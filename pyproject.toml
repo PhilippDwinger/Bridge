@@ -5,7 +5,8 @@ description = "Universal communication layer for connecting programs and systems
 requires-python = ">=3.13"
 dependencies = [
     "fastapi",
-    "uvicorn"
+    "uvicorn",
+    "argon2-cffi"
 ]
 
 [build-system]
