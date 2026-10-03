@@ -63,10 +63,12 @@ def create_app(current_bridge_app):
 
     @app.post("/realm/command/protected")
     async def create_command_in_protected_realm(payload: dict):
+        print(payload)
         session_token = payload["session_token"]
+        realm_id = payload["realm_id"]
         security.authenticate_session(session_token)
         client_key = banker.get_client_key_from_session_token(session_token)
-        protected_realm : ProtectedRealm = banker.get_realm_from_id(client_key)
+        protected_realm : ProtectedRealm = banker.get_realm_from_id(realm_id)
         if not protected_realm or not protected_realm.realm_type == "protected":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         command_name = payload["command_name"]

@@ -41,7 +41,7 @@ class ProtectedRealm(Realm):
     def create_command(self, command_name, allowed_roles, client_key):
         if command_name not in self.commands:
             self.commands[command_name] = {}
-        if self.commands[command_name][client_key] is not None:
+        if self.commands[command_name].get(client_key) is not None:
             raise HTTPException(status_code=400, detail="Command already exists!")
         self.commands[command_name][client_key] = {
             "allowed_roles": allowed_roles,
