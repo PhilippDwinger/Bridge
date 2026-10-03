@@ -65,7 +65,7 @@ class PrivateRealm(Realm):
     def create_command(self):
         pass
     def create_access_key(self, giving_roles, preferred_key):
-        if not preferred_key or isinstance(preferred_key, str):
+        if not preferred_key or not isinstance(preferred_key, str):
             preferred_key = security.get_free_key_in_dict(self.access_keys)
         if self.access_keys.get(preferred_key):
             raise HTTPException(status_code=403, detail="Role already exists")

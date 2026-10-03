@@ -94,7 +94,6 @@ def create_app(current_bridge_app):
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
 
-
     @app.post("/realm/join/private")
     async def join_private_realm(payload : dict):
         session_token = payload["session_token"]
