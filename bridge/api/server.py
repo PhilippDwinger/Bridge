@@ -73,8 +73,7 @@ def create_app(current_bridge_app):
         if not protected_realm.is_client_key_allowed_to_host_command(client_key):
             raise HTTPException(status_code=401, detail="Client is not allowed to host command")
         command_name = payload["command_name"]
-        allowed_roles = payload["allowed_roles"]
-        protected_realm.create_command(command_name, allowed_roles, client_key)
+        protected_realm.create_command(command_name, client_key)
 
     # endregion
     # region private
@@ -110,7 +109,8 @@ def create_app(current_bridge_app):
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         role_name = payload["role_name"]
-        private_realm.create_role(role_name)
+        role_permissions = payload["role_permissions"]
+        private_realm.create_role(role_name, role_permissions)
 
     @app.post("/realm/join/private")
     async def join_private_realm(payload : dict):
@@ -123,6 +123,21 @@ def create_app(current_bridge_app):
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         private_realm.join(realm_access_key, client_key)
+
+    @app.post("/realm/command/private")
+    async def create_command_in_private_realm(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        realm_id = payload["realm_id"]
+        client_key = banker.get_client_key_from_session_token(session_token)
+        private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
+        if not private_realm or not private_realm.realm_type == "private":
+            raise HTTPException(status_code=403, detail="Invalid arguments")
+        allowed_roles = payload["allowed_roles"]
+        command_name = payload["command_name"]
+        if not private_realm.can_client_host_commands(client_key):
+            raise HTTPException(status_code=403, detail="Client is not allowed to host commands")
+        private_realm.create_command(command_name, allowed_roles, client_key)
 
     # endregion
     # endregion

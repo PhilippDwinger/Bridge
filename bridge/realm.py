@@ -38,13 +38,12 @@ class ProtectedRealm(Realm):
             raise HTTPException(status_code=403, detail="Invalid realm access key")
         self.clients[client_key] = client_key
 
-    def create_command(self, command_name, allowed_roles, client_key):
+    def create_command(self, command_name, client_key):
         if command_name not in self.commands:
             self.commands[command_name] = {}
         if self.commands[command_name].get(client_key) is not None:
             raise HTTPException(status_code=400, detail="Command already exists!")
         self.commands[command_name][client_key] = {
-            "allowed_roles": allowed_roles,
             "command_name": command_name,
             "hosting_client": client_key,
         }
@@ -73,10 +72,10 @@ class PrivateRealm(Realm):
         self.clients[client_key] = {
             "roles": [],
         }
-    def create_role(self, role_name):
+    def create_role(self, role_name, role_permissions):
         if role_name in self.roles:
             raise HTTPException(status_code=400, detail="Role already exists")
-        self.roles[role_name] = {}
+        self.roles[role_name] = role_permissions
 
     def create_access_key(self, giving_roles, preferred_key):
         if not preferred_key or not isinstance(preferred_key, str):
@@ -95,3 +94,29 @@ class PrivateRealm(Realm):
     def give_client_roles(self, client_key, roles):
         for role in roles:
             self.give_client_role(client_key, role)
+
+    def create_command(self, command_name, allowed_roles, client_key):
+        if command_name not in self.commands:
+            self.commands[command_name] = {}
+        if self.commands[command_name].get(client_key) is not None:
+            raise HTTPException(status_code=400, detail="Command already exists!")
+        self.commands[command_name][client_key] = {
+            "command_name": command_name,
+            "hosting_client": client_key,
+            "allowed_roles": allowed_roles,
+        }
+    def can_role_host_command(self, role_name):
+        if role_name not in self.roles:
+            raise HTTPException(status_code=403, detail="Invalid role name")
+        role_perms = self.roles[role_name]
+        return role_perms.get("can_host_command", False)
+    def can_client_host_commands(self, client_key):
+        if client_key == self.owner_client_key:
+            return True
+        client_roles = self.clients[client_key]["roles"]
+        for role_name in client_roles:
+            if self.can_role_host_command(role_name):
+                return True
+        return False
+
+
