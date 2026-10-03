@@ -2,7 +2,12 @@ import uuid
 import hmac
 import hashlib
 import secrets
+from fastapi import HTTPException
+
 from argon2 import PasswordHasher
+
+from bridge import banker
+
 
 def generate_key_uuid4():
     return str(uuid.uuid4())
@@ -42,3 +47,13 @@ def get_free_key_in_list(given_list : list, max_tries=100):
         if key not in given_list:
             return key
     return None
+
+def resolve_client_key(session_token: str):
+    client_key = banker.get_client_key_from_session_token(session_token)
+    if not client_key:
+        raise HTTPException(status_code=404, detail="Session token not found")
+    return client_key
+
+def authenticate_session(session_token: str):
+    resolve_client_key(session_token)
+    return True

@@ -20,9 +20,6 @@ def login_client(client_key: str, password: str):
         raise HTTPException(status_code=500, detail="A problem occurred")
     return session_token
 
-def authenticate_session(session_token: str):
-    client_key = banker.get_client_key_from_session_token(session_token)
-
 def restart():
     os._exit(0)
 

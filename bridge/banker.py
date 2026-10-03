@@ -4,10 +4,44 @@ from datetime import datetime, timedelta, timezone
 from bridge import security
 from bridge.messenger.mailbox import MailBox
 
+# region Stores
 realms = {}
 clients = {}
 session_tokens = {}
 used_client_ips = []
+# endregion
+
+# region realm functions
+
+# region Utils
+
+def generate_realm_id():
+    counter = 0
+    while counter < len(realms) + 1:
+        counter += 1
+        realm_id = security.generate_key()
+        if realm_id_exists(realm_id) is False:
+            return realm_id
+    raise HTTPException(status_code=500, detail="Could not generate realm id!")
+
+def realm_id_exists(realm_id: str):
+    if realm_id in realms:
+        return True
+    return False
+
+# endregion
+
+def get_realm_from_id(realm_id: str):
+    if realm_id in realms:
+        return realms[realm_id]
+    raise HTTPException(status_code=404, detail="Realm not found!")
+
+def add_realm(realm):
+    realm_id = generate_realm_id()
+    realms[realm_id] = realm
+    return realm_id
+
+# endregion
 
 def register_new_client(client_name: str, password: str):
     client_key = security.generate_key()
