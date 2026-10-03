@@ -60,6 +60,19 @@ def create_app(current_bridge_app):
         if not protected_realm or not realm_access_key or not client_key:
             raise HTTPException(status_code=403, detail="Invalid arguments")
         protected_realm.join(realm_access_key, client_key)
+
+    @app.post("/realm/command/protected")
+    async def create_command_in_protected_realm(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        protected_realm : ProtectedRealm = banker.get_realm_from_id(client_key)
+        if not protected_realm or not protected_realm.realm_type == "protected":
+            raise HTTPException(status_code=403, detail="Invalid arguments")
+        command_name = payload["command_name"]
+        allowed_roles = payload["allowed_roles"]
+        protected_realm.create_command(command_name, allowed_roles, client_key)
+
     # endregion
     # region private
     @app.post("/realm/create/private")
@@ -78,7 +91,7 @@ def create_app(current_bridge_app):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         realm_id = payload["realm_id"]
-        private_realm : PrivateRealm = PrivateRealm(realm_id)
+        private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         giving_roles = payload["giving_roles"]
@@ -90,9 +103,11 @@ def create_app(current_bridge_app):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         realm_id = payload["realm_id"]
-        private_realm : PrivateRealm = PrivateRealm(realm_id)
+        private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
+        role_name = payload["role_name"]
+        private_realm.create_role(role_name)
 
     @app.post("/realm/join/private")
     async def join_private_realm(payload : dict):
@@ -113,7 +128,7 @@ def create_app(current_bridge_app):
     # region messaging
     # endregion
     # region admin
-    @app.post("admin/realm/view")
+    @app.post("/admin/realm/view")
     def realm_view(payload: dict):
         realm_id = payload["realm_id"]
         realm = banker.get_realm_from_id(realm_id)

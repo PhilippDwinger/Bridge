@@ -101,3 +101,6 @@ def validate_session_token(session_token: str):
 
 def get_client_key_from_session_token(session_token: str):
     return validate_session_token(session_token)["client_key"]
+
+def get_client_ip_from_session_token(session_token: str):
+    return validate_session_token(session_token)["client_ip"]

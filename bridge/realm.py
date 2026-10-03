@@ -38,6 +38,17 @@ class ProtectedRealm(Realm):
             raise HTTPException(status_code=403, detail="Invalid realm access key")
         self.clients[client_key] = client_key
 
+    def create_command(self, command_name, allowed_roles, client_key):
+        if command_name not in self.commands:
+            self.commands[command_name] = {}
+        if self.commands[command_name][client_key] is not None:
+            raise HTTPException(status_code=400, detail="Command already exists!")
+        self.commands[command_name][client_key] = {
+            "allowed_roles": allowed_roles,
+            "command_name": command_name,
+            "hosting_client": client_key,
+        }
+
 class PrivateRealm(Realm):
     def __init__(self, name):
         super().__init__(name)
@@ -62,8 +73,7 @@ class PrivateRealm(Realm):
         if role_name in self.roles:
             raise HTTPException(status_code=400, detail="Role already exists")
         self.roles[role_name] = {}
-    def create_command(self):
-        pass
+
     def create_access_key(self, giving_roles, preferred_key):
         if not preferred_key or not isinstance(preferred_key, str):
             preferred_key = security.get_free_key_in_dict(self.access_keys)
@@ -76,7 +86,7 @@ class PrivateRealm(Realm):
         return preferred_key
     def give_client_role(self, client_key, role):
         client_roles = self.clients[client_key]["roles"]
-        if role not in client_roles:
+        if role not in client_roles and role in self.roles:
             self.clients[client_key]["roles"].append(role)
     def give_client_roles(self, client_key, roles):
         for role in roles:
