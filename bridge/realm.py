@@ -8,6 +8,7 @@ class Realm:
         self.handler_client_keys = {}
         self.clients = {}
         self.realm_type = "None"
+        self.owner_client_key = None
 
         realm_id = banker.add_realm(self)
         self.id = realm_id
@@ -31,7 +32,6 @@ class ProtectedRealm(Realm):
         self.commands = {}
         self.access_key = None
         self.restricted_to_owner = False
-        self.owner_client_key = None
 
     def join(self, realm_access_key, client_key):
         if not realm_access_key == self.access_key:
@@ -49,6 +49,11 @@ class ProtectedRealm(Realm):
             "hosting_client": client_key,
         }
 
+    def is_client_key_allowed_to_host_command(self, client_key):
+        if client_key != self.owner_client_key and self.restricted_to_owner == True:
+            return False
+        return True
+
 class PrivateRealm(Realm):
     def __init__(self, name):
         super().__init__(name)
@@ -56,7 +61,6 @@ class PrivateRealm(Realm):
         self.roles = {}
         self.commands = {}
         self.access_keys = {}
-        self.owner_client_key = None
 
     def join(self, access_key, client_key):
         if not access_key in self.access_keys:

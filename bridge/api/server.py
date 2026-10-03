@@ -63,7 +63,6 @@ def create_app(current_bridge_app):
 
     @app.post("/realm/command/protected")
     async def create_command_in_protected_realm(payload: dict):
-        print(payload)
         session_token = payload["session_token"]
         realm_id = payload["realm_id"]
         security.authenticate_session(session_token)
@@ -71,6 +70,8 @@ def create_app(current_bridge_app):
         protected_realm : ProtectedRealm = banker.get_realm_from_id(realm_id)
         if not protected_realm or not protected_realm.realm_type == "protected":
             raise HTTPException(status_code=403, detail="Invalid arguments")
+        if not protected_realm.is_client_key_allowed_to_host_command(client_key):
+            raise HTTPException(status_code=401, detail="Client is not allowed to host command")
         command_name = payload["command_name"]
         allowed_roles = payload["allowed_roles"]
         protected_realm.create_command(command_name, allowed_roles, client_key)
