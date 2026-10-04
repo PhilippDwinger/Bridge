@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 
 import bridge
 from bridge import banker, security
+from bridge.messenger import sender
+from bridge.messenger.mailbox import MailBox
 from bridge.realm import PublicRealm, PrivateRealm, ProtectedRealm
 
 def create_app(current_bridge_app):
@@ -27,6 +29,24 @@ def create_app(current_bridge_app):
 
     # endregion
     # region realms
+    # region public
+    @app.post("/realm/command")
+    async def create_command_in_public_realm(payload : dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        if not client_key:
+            raise HTTPException(status_code=403, detail="Invalid arguments")
+        command_name = payload["command_name"]
+        public_realm : PublicRealm = current_bridge_app.public_realm
+        if not public_realm:
+            return ValueError("Public realm was not found!")
+
+        public_realm.create_command(command_name, client_key)
+
+        return None
+
+    # endregion
     # region protected
     @app.post("/realm/create/protected")
     async def create_protected_realm(payload : dict):
@@ -144,6 +164,39 @@ def create_app(current_bridge_app):
     # region events
     # endregion
     # region messaging
+    @app.post("/poll")
+    async def poll_client_mailbox(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_mailbox : MailBox = sender.get_client_mailbox_from_session_token(session_token)
+        return {
+            "task_pool": client_mailbox.task_pool,
+            "response_pool": client_mailbox.response_pool,
+            "command_pool": client_mailbox.command_pool,
+        }
+
+    @app.post("/direct")
+    async def direct_request(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        target_ip = payload["target_ip"]
+        content = payload["content"]
+        content_type = payload["content_type"]
+        sender.send_to_client_ip(target_ip, content, content_type)
+
+    @app.post("/get/ip")
+    async def get_ip_from_key(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        target_client_key = payload["target_client_key"]
+        return sender.get_client_ip(target_client_key)
+
+    @app.post("/get/key")
+    async def get_key_from_session_token(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        return banker.get_client_key_from_session_token(session_token)
+
     # endregion
     # region admin
     @app.post("/admin/realm/view")
@@ -151,6 +204,10 @@ def create_app(current_bridge_app):
         realm_id = payload["realm_id"]
         realm = banker.get_realm_from_id(realm_id)
         print(realm)
+
+    @app.get("/admin/view/realms")
+    def view_all_realms():
+        print(banker.realms)
     # endregion
 
     return app

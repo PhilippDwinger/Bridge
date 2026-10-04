@@ -2,13 +2,13 @@ from fastapi import HTTPException
 from datetime import datetime, timedelta, timezone
 
 from bridge import security
+from bridge.messenger import sender
 from bridge.messenger.mailbox import MailBox
 
 # region Stores
 realms = {}
 clients = {}
 session_tokens = {}
-used_client_ips = []
 # endregion
 
 # region realm functions
@@ -48,14 +48,11 @@ def register_new_client(client_name: str, password: str):
     if not client_key:
         raise HTTPException(status_code=500, detail="Error while generating key!")
 
-    client_ip = security.get_free_key_in_list(used_client_ips, len(used_client_ips) + 1)
-    if not client_ip:
-        raise HTTPException(status_code=500, detail="Error while generating ip!")
-    used_client_ips.append(client_ip)
-
     client_mailbox = MailBox()
     if not client_mailbox:
         raise HTTPException(status_code=500, detail="Error while creating mailbox!")
+
+    client_ip = sender.initialize_client_traffic(client_key, client_mailbox)
 
     hashed_password = security.hash_password(password)
 
@@ -101,6 +98,3 @@ def validate_session_token(session_token: str):
 
 def get_client_key_from_session_token(session_token: str):
     return validate_session_token(session_token)["client_key"]
-
-def get_client_ip_from_session_token(session_token: str):
-    return validate_session_token(session_token)["client_ip"]

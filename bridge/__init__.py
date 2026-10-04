@@ -40,10 +40,7 @@ class Bridge:
         self._metadata = {
             "initialization_time": datetime.datetime.now(),
         }
-        self.Realms = {
-            "PublicRealm" : PublicRealm("Bridge"),
-            "PrivateRealm": {},
-        }
+        self.public_realm = PublicRealm("Bridge")
         self.clients = {}
 
     def register_client(self, requested_client_name: str, password: str):

@@ -25,6 +25,16 @@ class PublicRealm(Realm):
         self.realm_type = "public"
         self.commands = {}
 
+    def create_command(self, command_name, client_key):
+        if command_name not in self.commands:
+            self.commands[command_name] = {}
+        if self.commands[command_name].get(client_key) is not None:
+            raise HTTPException(status_code=400, detail="Command already exists!")
+        self.commands[command_name][client_key] = {
+            "command_name": command_name,
+            "hosting_client": client_key,
+        }
+
 class ProtectedRealm(Realm):
     def __init__(self, name):
         super().__init__(name)
@@ -109,7 +119,7 @@ class PrivateRealm(Realm):
         if role_name not in self.roles:
             raise HTTPException(status_code=403, detail="Invalid role name")
         role_perms = self.roles[role_name]
-        return role_perms.get("can_host_command", False)
+        return role_perms.get("can_host_commands", False)
     def can_client_host_commands(self, client_key):
         if client_key == self.owner_client_key:
             return True
