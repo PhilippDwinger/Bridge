@@ -15,10 +15,10 @@ def login_client(client_key: str, password: str):
         raise HTTPException(status_code=404, detail="Client not found")
     if not security.verify_password(password, client_entry["hashed_password"]):
         raise HTTPException(status_code=403, detail="Incorrect password")
-    session_token = banker.generate_session_token(client_key)
+    session_token, remaining_minutes = banker.generate_session_token(client_key)
     if not session_token:
         raise HTTPException(status_code=500, detail="A problem occurred")
-    return session_token
+    return session_token, remaining_minutes
 
 def restart():
     os._exit(0)

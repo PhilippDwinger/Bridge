@@ -25,7 +25,11 @@ def create_app(current_bridge_app):
     async def login(payload : dict):
         client_key = payload["client_key"]
         password = payload["password"]
-        return bridge.login_client(client_key, password)
+        session_token, remaining_minutes = bridge.login_client(client_key, password)
+        return {
+            "session_token": session_token,
+            "remaining_minutes": remaining_minutes
+        }
 
     # endregion
     # region realms

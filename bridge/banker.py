@@ -75,13 +75,17 @@ def get_client_by_key(client_key: str):
 
 def generate_session_token(client_key: str):
     session_token = security.generate_key()
+    expires_at_time = datetime.now(timezone.utc) + timedelta(hours=1)
 
     session_tokens[session_token] = {
         "client_key": client_key,
-        "expires_at_time": datetime.now(timezone.utc) + timedelta(hours=1)
+        "expires_at_time": expires_at_time
     }
 
-    return session_token
+    remaining_time = expires_at_time - datetime.now(timezone.utc)
+    remaining_minutes = remaining_time.total_seconds() / 60
+
+    return session_token, remaining_minutes
 
 def validate_session_token(session_token: str):
     if session_token not in session_tokens:
