@@ -36,6 +36,7 @@ def create_app(current_bridge_app):
     # region public
     @app.post("/realm/command")
     async def create_command_in_public_realm(payload : dict):
+        print("TESST!!!")
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         client_key = banker.get_client_key_from_session_token(session_token)
@@ -44,7 +45,7 @@ def create_app(current_bridge_app):
         command_name = payload["command_name"]
         public_realm : PublicRealm = current_bridge_app.public_realm
         if not public_realm:
-            return ValueError("Public realm was not found!")
+            raise ValueError("Public realm was not found!")
 
         public_realm.create_command(command_name, client_key)
 
@@ -172,21 +173,24 @@ def create_app(current_bridge_app):
     async def poll_client_mailbox(payload: dict):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
-        client_mailbox : MailBox = sender.get_client_mailbox_from_session_token(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        client_mailbox : MailBox = sender.get_client_mailbox_from_client_key(client_key)
         return {
             "task_pool": client_mailbox.task_pool,
             "response_pool": client_mailbox.response_pool,
-            "command_pool": client_mailbox.command_pool,
+            "instruction_pool": client_mailbox.instruction_pool,
         }
 
     @app.post("/direct")
     async def direct_request(payload: dict):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
         target_ip = payload["target_ip"]
         content = payload["content"]
         content_type = payload["content_type"]
-        sender.send_to_client_ip(target_ip, content, content_type)
+        register = payload.get("register", False)
+        sender.send_to_client_ip(client_key, target_ip, content, content_type, register)
 
     @app.post("/get/ip")
     async def get_ip_from_key(payload: dict):
@@ -200,6 +204,51 @@ def create_app(current_bridge_app):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         return banker.get_client_key_from_session_token(session_token)
+
+    @app.post("/call/command")
+    async def call_command(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        command_name = payload["command_name"]
+        command_args = payload.get("command_args")
+        hosting_clients = bridge.get_all_accessible_command_hosts_for_client(command_name, client_key)
+        print("hosting_clients:", hosting_clients)
+        if not hosting_clients:
+            raise HTTPException(status_code=402, detail="No hosting clients found")
+        best_client = bridge.get_least_busy_client(hosting_clients)
+        print("best_client: ", best_client)
+        if not best_client:
+            raise HTTPException(status_code=500, detail="Error while getting best client")
+        best_client_ip = sender.get_client_ip(best_client)
+        client_ip = sender.get_client_ip(client_key)
+        return sender.send_to_client_ip(
+            client_ip,
+            best_client_ip,
+            {
+                "command_name": command_name,
+                "command_args": command_args,
+            },
+            "task",
+            True
+        )
+
+    @app.post("/respond")
+    async def respond_to_client(payload: dict):
+        print("Got!")
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        message_id = payload["message_id"]
+        client_key = banker.get_client_key_from_session_token(session_token)
+        client_ip = sender.get_client_ip(client_key)
+        target_client_ip = payload["target_client_ip"]
+        content = payload["content"]
+        sender.handle_respond(
+            message_id,
+            client_ip,
+            target_client_ip,
+            content
+        )
 
     # endregion
     # region admin

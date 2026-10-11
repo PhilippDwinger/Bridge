@@ -5,7 +5,6 @@ from bridge import banker, security
 class Realm:
     def __init__(self, name):
         self.name = name
-        self.handler_client_keys = {}
         self.clients = {}
         self.realm_type = "None"
         self.owner_client_key = None
@@ -35,6 +34,16 @@ class PublicRealm(Realm):
             "hosting_client": client_key,
         }
 
+    def get_all_accessible_hosts_for_command(self, command_name):
+        command = self.commands.get(command_name)
+        if not command:
+            return False
+        if not isinstance(command, dict):
+            raise HTTPException(status_code=500, detail="Command is not a dict")
+        if len(command) == 0:
+            return False
+        return list(command)
+
 class ProtectedRealm(Realm):
     def __init__(self, name):
         super().__init__(name)
@@ -62,6 +71,15 @@ class ProtectedRealm(Realm):
         if client_key != self.owner_client_key and self.restricted_to_owner == True:
             return False
         return True
+    def get_all_accessible_hosts_for_command(self, command_name):
+        command = self.commands.get(command_name)
+        if not command:
+            return False
+        if not isinstance(command, dict):
+            raise HTTPException(status_code=500, detail="Command is not a dict")
+        if len(command) == 0:
+            return False
+        return list(command)
 
 class PrivateRealm(Realm):
     def __init__(self, name):
@@ -86,7 +104,6 @@ class PrivateRealm(Realm):
         if role_name in self.roles:
             raise HTTPException(status_code=400, detail="Role already exists")
         self.roles[role_name] = role_permissions
-
     def create_access_key(self, giving_roles, preferred_key):
         if not preferred_key or not isinstance(preferred_key, str):
             preferred_key = security.get_free_key_in_dict(self.access_keys)
@@ -128,5 +145,23 @@ class PrivateRealm(Realm):
             if self.can_role_host_command(role_name):
                 return True
         return False
-
+    def get_all_accessible_hosts_for_command(self, client_key, command_name):
+        command = self.commands.get(command_name)
+        if not command:
+            return False
+        if not isinstance(command, dict):
+            raise HTTPException(status_code=500, detail="Command must be a dict")
+        client = self.clients.get(client_key)
+        if client is None:
+            return False
+        if not isinstance(client, dict):
+            raise HTTPException(status_code=500, detail="Client must be a dict")
+        client_roles = client["roles"]
+        found_hosts = []
+        for handler, data in command.items():
+            if any(role in data["allowed_roles"] for role in client_roles):
+                found_hosts.append(handler)
+        if len(found_hosts) == 0:
+            return False
+        return found_hosts
 

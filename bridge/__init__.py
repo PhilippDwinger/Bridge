@@ -1,19 +1,28 @@
 import datetime
 import os
 from logging import warning
+from argon2.exceptions import VerifyMismatchError
 
 import uvicorn
 from fastapi import HTTPException
 
 from bridge import security, banker
 from bridge.api import server
+from bridge.messenger.sender import get_client_mailbox_from_client_key
 from bridge.realm import Realm, PrivateRealm, PublicRealm
 
 def login_client(client_key: str, password: str):
     client_entry = banker.get_client_by_key(client_key)
     if not client_entry:
         raise HTTPException(status_code=404, detail="Client not found")
-    if not security.verify_password(password, client_entry["hashed_password"]):
+    try:
+        password_matches = security.verify_password(
+            password, client_entry["hashed_password"]
+        )
+    except VerifyMismatchError:
+        password_matches = False
+
+    if not password_matches:
         raise HTTPException(status_code=403, detail="Incorrect password")
     session_token, remaining_minutes = banker.generate_session_token(client_key)
     if not session_token:
@@ -22,6 +31,42 @@ def login_client(client_key: str, password: str):
 
 def restart():
     os._exit(0)
+
+def get_all_accessible_command_hosts_for_client(command_name, client_key: str):
+    client_entry = banker.get_client_by_key(client_key)
+
+    found_hosts = []
+
+    for i, v in banker.realms.items():
+        if v.realm_type == "public" or v.realm_type == "protected":
+            result = v.get_all_accessible_hosts_for_command(command_name)
+            if result:
+                for host in result:
+                    if host in found_hosts:
+                        continue
+                    found_hosts.append(host)
+        elif v.realm_type == "private":
+            result = v.get_all_accessible_hosts_for_command(client_key, command_name)
+            if result:
+                for host in result:
+                    if host in found_hosts:
+                        continue
+                    found_hosts.append(host)
+        else:
+            warning("Realm is not supported")
+            continue
+    return found_hosts
+
+def get_least_busy_client(clients : list):
+    busy_points_record = {}
+    for client_key in clients:
+        mailbox = get_client_mailbox_from_client_key(client_key)
+        busy_points = mailbox.get_busy_points()
+        if busy_points is not None:
+            busy_points_record[busy_points] = client_key
+    if len(busy_points_record) == 0:
+        return None
+    return busy_points_record[max(busy_points_record)]
 
 class Bridge:
     _instance = None
