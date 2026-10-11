@@ -89,12 +89,14 @@ def create_app(current_bridge_app):
     @app.post("/realm/command/protected")
     async def create_command_in_protected_realm(payload: dict):
         session_token = payload["session_token"]
-        realm_id = payload["realm_id"]
         security.authenticate_session(session_token)
+        realm_id = payload["realm_id"]
         client_key = banker.get_client_key_from_session_token(session_token)
         protected_realm : ProtectedRealm = banker.get_realm_from_id(realm_id)
         if not protected_realm or not protected_realm.realm_type == "protected":
             raise HTTPException(status_code=403, detail="Invalid arguments")
+        if not protected_realm.is_client_in_realm(client_key):
+            raise HTTPException(status_code=403, detail="Client is not a member of the realm")
         if not protected_realm.is_client_key_allowed_to_host_command(client_key):
             raise HTTPException(status_code=401, detail="Client is not allowed to host command")
         command_name = payload["command_name"]
@@ -121,6 +123,9 @@ def create_app(current_bridge_app):
         private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
+        client_key = banker.get_client_key_from_session_token(session_token)
+        if not private_realm.is_client_owner(client_key):
+            raise HTTPException(status_code=401, detail="Client is not allowed to host command")
         giving_roles = payload["giving_roles"]
         preferred_key = payload.get("preferred_key") or None
         return private_realm.create_access_key(giving_roles, preferred_key)
@@ -133,6 +138,9 @@ def create_app(current_bridge_app):
         private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
+        client_key = banker.get_client_key_from_session_token(session_token)
+        if not private_realm.is_client_owner(client_key):
+            raise HTTPException(status_code=401, detail="Client is not allowed to host command")
         role_name = payload["role_name"]
         role_permissions = payload["role_permissions"]
         private_realm.create_role(role_name, role_permissions)
@@ -180,30 +188,6 @@ def create_app(current_bridge_app):
             "response_pool": client_mailbox.response_pool,
             "instruction_pool": client_mailbox.instruction_pool,
         }
-
-    @app.post("/direct")
-    async def direct_request(payload: dict):
-        session_token = payload["session_token"]
-        security.authenticate_session(session_token)
-        client_key = banker.get_client_key_from_session_token(session_token)
-        target_ip = payload["target_ip"]
-        content = payload["content"]
-        content_type = payload["content_type"]
-        register = payload.get("register", False)
-        sender.send_to_client_ip(client_key, target_ip, content, content_type, register)
-
-    @app.post("/get/ip")
-    async def get_ip_from_key(payload: dict):
-        session_token = payload["session_token"]
-        security.authenticate_session(session_token)
-        target_client_key = payload["target_client_key"]
-        return sender.get_client_ip(target_client_key)
-
-    @app.post("/get/key")
-    async def get_key_from_session_token(payload: dict):
-        session_token = payload["session_token"]
-        security.authenticate_session(session_token)
-        return banker.get_client_key_from_session_token(session_token)
 
     @app.post("/call/command")
     async def call_command(payload: dict):

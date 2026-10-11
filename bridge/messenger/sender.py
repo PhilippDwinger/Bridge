@@ -7,14 +7,6 @@ ip_registry = {}
 message_routes = {}
 
 def send_to_client_ip(origin_client_ip, target_client_ip, content, content_type, register=False):
-    print(">>>>>>>>>>>>>>")
-    print("origin_client_ip:", origin_client_ip)
-    print("target_client_ip:", target_client_ip)
-    print("content:", content)
-    print("content_type:", content_type)
-    print("register:", register)
-    print(ip_registry.get(target_client_ip), ip_registry)
-    print("<<<<<<<<<<<<<<")
     if not ip_registry.get(target_client_ip):
         raise HTTPException(status_code=404, detail="Client_ip not found")
     client_entry : dict = ip_registry[target_client_ip]
@@ -45,9 +37,6 @@ def send_to_client_ip(origin_client_ip, target_client_ip, content, content_type,
     return message_id
 
 def delete_message(message_id, client_ip):
-    print("....................")
-    print("client_ip:", client_ip)
-    print("message_id:", message_id)
     route_entry = message_routes.get(message_id)
     if not route_entry:
         raise HTTPException(status_code=404, detail="Message id not found!")
@@ -55,10 +44,7 @@ def delete_message(message_id, client_ip):
         raise HTTPException(status_code=404, detail="Client_ip not found")
     client_entry: dict = ip_registry[client_ip]
     client_mailbox: MailBox = client_entry["client_mailbox"]
-    print("mailbox:", client_mailbox)
     result = client_mailbox.delete_message(message_id)
-    print("new mailbox:", client_mailbox)
-    print("....................")
     if not result:
         raise HTTPException(status_code=404, detail="Error while deleting message!")
 
@@ -68,16 +54,13 @@ def handle_respond(message_id, client_ip, target_client_ip, content):
         raise HTTPException(status_code=404, detail="Message id not found!")
     if route_entry["origin_client_ip"] != target_client_ip or route_entry["target_client_ip"] != client_ip:
         raise HTTPException(status_code=404, detail="Ips not matching!")
-    print("Sending...")
     send_to_client_ip(
         client_ip,
         target_client_ip,
         content,
         "response",
     )
-    print("Deleting message...")
     delete_message(message_id, client_ip)
-
 
 def initialize_client_traffic(client_key, client_mailbox):
     client_ip = security.get_free_key_in_dict(ip_registry)

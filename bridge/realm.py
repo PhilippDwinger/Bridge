@@ -81,6 +81,12 @@ class ProtectedRealm(Realm):
             return False
         return list(command)
 
+    def is_client_in_realm(self, client_key):
+        if client_key in self.clients:
+            return True
+        else:
+            return False
+
 class PrivateRealm(Realm):
     def __init__(self, name):
         super().__init__(name)
@@ -164,4 +170,10 @@ class PrivateRealm(Realm):
         if len(found_hosts) == 0:
             return False
         return found_hosts
+
+    def is_client_owner(self, client_key):
+        if client_key == self.owner_client_key:
+            return True
+        else:
+            return False
 
