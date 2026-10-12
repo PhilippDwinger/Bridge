@@ -197,42 +197,22 @@ def create_app(current_bridge_app):
         command_name = payload["command_name"]
         command_args = payload.get("command_args")
         hosting_clients = bridge.get_all_accessible_command_hosts_for_client(command_name, client_key)
-        print("hosting_clients:", hosting_clients)
         if not hosting_clients:
             raise HTTPException(status_code=402, detail="No hosting clients found")
         best_client = bridge.get_least_busy_client(hosting_clients)
-        print("best_client: ", best_client)
         if not best_client:
             raise HTTPException(status_code=500, detail="Error while getting best client")
         best_client_ip = sender.get_client_ip(best_client)
         client_ip = sender.get_client_ip(client_key)
-        return sender.send_to_client_ip(
-            client_ip,
-            best_client_ip,
-            {
-                "command_name": command_name,
-                "command_args": command_args,
-            },
-            "task",
-            True
-        )
+        return
 
-    @app.post("/respond")
-    async def respond_to_client(payload: dict):
-        print("Got!")
-        session_token = payload["session_token"]
-        security.authenticate_session(session_token)
-        message_id = payload["message_id"]
-        client_key = banker.get_client_key_from_session_token(session_token)
-        client_ip = sender.get_client_ip(client_key)
-        target_client_ip = payload["target_client_ip"]
-        content = payload["content"]
-        sender.handle_respond(
-            message_id,
-            client_ip,
-            target_client_ip,
-            content
-        )
+    @app.post("/respond/message")
+    async def respond_to_client_with_msg(payload: dict):
+        pass
+
+    @app.post("/respond/acknowledge")
+    async def acknowledge_message(payload: dict):
+        pass
 
     # endregion
     # region admin
