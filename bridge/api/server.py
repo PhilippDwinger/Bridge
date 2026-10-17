@@ -11,6 +11,35 @@ from bridge.transfer import transfer, universal
 def get_bridge_url_from_request(request: Request):
     return str(request.base_url).rstrip("/")
 
+
+def normalize_lua_hybrid_tables(value):
+    if isinstance(value, list):
+        return [normalize_lua_hybrid_tables(item) for item in value]
+
+    if not isinstance(value, dict):
+        return value
+
+    array_items = []
+    has_keyed_items = False
+
+    for key, item in value.items():
+        if isinstance(key, str) and key.isdecimal() and int(key) > 0 and str(int(key)) == key:
+            array_items.append((int(key), item))
+        else:
+            has_keyed_items = True
+
+    if array_items and has_keyed_items:
+        return [
+            normalize_lua_hybrid_tables(item)
+            for _, item in sorted(array_items)
+        ]
+
+    return {
+        key: normalize_lua_hybrid_tables(item)
+        for key, item in value.items()
+    }
+
+
 def create_app(current_bridge_app):
     # region defaults
     app = FastAPI()
@@ -238,7 +267,7 @@ def create_app(current_bridge_app):
             "session_token": session_token,
             "client_ip": client_ip,
             "target_recipient_ip": best_client_ip,
-            "content": {command_args},
+            "content": normalize_lua_hybrid_tables(command_args),
         }, request)
         return result
 
