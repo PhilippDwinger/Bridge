@@ -37,15 +37,6 @@ def create_app(current_bridge_app):
             "remaining_minutes": remaining_minutes
         }
 
-    @app.post("/poll/stats")
-    async def poll_stats(payload: dict):
-        session_token = payload["session_token"]
-        security.authenticate_session(session_token)
-        client_key = banker.get_client_key_from_session_token(session_token)
-        mailbox = sender.get_client_mailbox_from_client_key(client_key)
-        pending_id = payload["pending_id"]
-        return mailbox.get_pending_id_stats(pending_id)
-
     # endregion
     # region realms
     # region public
@@ -217,7 +208,16 @@ def create_app(current_bridge_app):
         client_key = banker.get_client_key_from_session_token(session_token)
         mailbox = sender.get_client_mailbox_from_client_key(client_key)
         pending_id = payload["pending_id"]
-        return mailbox.complete_message(pending_id)
+        return universal.encode(mailbox.complete_message(pending_id))
+
+    @app.post("/poll/stats")
+    async def poll_stats(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        pending_id = payload["pending_id"]
+        return mailbox.get_pending_id_stats(pending_id)
 
     @app.post("/call/command")
     async def call_command(payload: dict, request: Request):

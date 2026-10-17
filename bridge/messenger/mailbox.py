@@ -65,12 +65,13 @@ class MailBox:
         entry = self.pending_message_pool[pending_id]
         message = entry["message"]
         content = message.content
-        chunk = content[chunk_index]
+        chunk = content[chunk_index][1]
         encoded_chunk = universal.encode(chunk)
         return encoded_chunk
     def complete_message(self, pending_id):
-        message = self.pending_message_pool.pop(pending_id)
-        message.pop("content")
+        entry = self.pending_message_pool.pop(pending_id)
+        message = entry["message"]
+        del message.content
         return message
     def get_pending_id_stats(self, pending_id):
         entry = self.pending_message_pool[pending_id]
