@@ -26,6 +26,8 @@ class Message:
         from bridge import security
         if conversation_id is None:
             conversation_id = get_free_key_in_dict(conversations)
+        if not conversation_id in conversations:
+            conversations[conversation_id] = []
         message_id = get_free_key_in_list(active_message_ids)
         encoded_content = chunk.encode_direct(content)
 
@@ -60,6 +62,8 @@ class Message:
         self.content = content_chunks
         self.content_total_kib = chunk.get_size_string(encoded_content)
         self.content_total_chunks = len(content_chunks)
+
+        conversations[conversation_id].append(self)
     def __str__(self) -> str:
         return str(self.__dict__)
     def __repr__(self) -> str:
@@ -68,6 +72,12 @@ universal.register_class("Message", Message)
 
 def is_message_expired(message: Message):
     return message.expires_at < datetime.datetime.now(datetime.timezone.utc)
+
+def end_conversation(conversation_id):
+    del conversations[conversation_id]
+
+def deactivate_message_id(message_id):
+    active_message_ids.pop(message_id)
 
 def create_message(
             sender_ip,

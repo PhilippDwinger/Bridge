@@ -213,6 +213,7 @@ def create_app(current_bridge_app):
     # region events
     # endregion
     # region messaging
+    # region poll
     @app.post("/poll")
     async def poll_client_mailbox(payload: dict):
         session_token = payload["session_token"]
@@ -249,6 +250,7 @@ def create_app(current_bridge_app):
         mailbox = sender.get_client_mailbox_from_client_key(client_key)
         pending_id = payload["pending_id"]
         return mailbox.get_pending_id_stats(pending_id)
+    # endregion
 
     @app.post("/call/command")
     async def call_command(payload: dict, request: Request):
@@ -271,7 +273,10 @@ def create_app(current_bridge_app):
             "session_token": session_token,
             "client_ip": client_ip,
             "target_recipient_ip": best_client_ip,
-            "content": normalize_lua_hybrid_tables(command_args),
+            "content": normalize_lua_hybrid_tables({
+                "command_args": command_args,
+                "command_name": command_name,
+            }),
         }, request)
         return result
 
@@ -287,14 +292,21 @@ def create_app(current_bridge_app):
         client_key = banker.get_client_key_from_session_token(session_token)
         client_ip = sender.get_client_ip(client_key)
 
+        conversation_id = payload.get("conversation_id", None)
+        causation_id = payload.get("causation_id", None)
+        content_type = payload.get("content_type", "task")
+        if content_type != "task" and content_type != "response":
+            raise HTTPException(status_code=400, detail="Invalid content type")
+        origin_client_ip = payload.get("origin_client_ip", client_ip)
+
         message = transfer.create_message(
             client_ip,
             target_recipient_ip,
             content,
             "task",
-            None,
-            None,
-            client_ip,
+            conversation_id,
+            causation_id,
+            origin_client_ip,
             bridge_url,
             "direct",
             "long"
@@ -303,12 +315,41 @@ def create_app(current_bridge_app):
         return result
 
     @app.post("/respond/message")
-    async def respond_to_client_with_msg(payload: dict):
-        pass
+    async def respond_to_client_with_msg(payload: dict, request: Request):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        pending_id = payload["pending_id"]
+        conversation_id = payload["conversation_id"]
+        content = payload["content"]
+        target_recipient_ip = payload["target_recipient_ip"]
+        causation_id = payload["causation_id"]
+        origin_client_ip = payload["origin_client_ip"]
+        client_key = banker.get_client_key_from_session_token(session_token)
+        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        await send_message({
+            "session_token": session_token,
+            "content": content,
+            "target_recipient_ip": target_recipient_ip,
+            "conversation_id": conversation_id,
+            "causation_id": causation_id,
+            "content_type": "response",
+            "origin_client_ip": origin_client_ip
+
+        }, request)
+        mailbox.delete_pending_id(pending_id)
 
     @app.post("/respond/acknowledge")
     async def acknowledge_message(payload: dict):
-        pass
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        pending_id = payload["pending_id"]
+        conversation_id = payload["conversation_id"]
+        message_id = payload["message_id"]
+        mailbox.delete_pending_id(pending_id)
+        transfer.end_conversation(conversation_id)
+        transfer.deactivate_message_id(message_id)
 
     # endregion
     # region admin

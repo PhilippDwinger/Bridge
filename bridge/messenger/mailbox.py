@@ -79,6 +79,10 @@ class MailBox:
         return {
             "chunk_amount": chunk_amount,
         }
+    def delete_pending_id(self, pending_id):
+        print(self.pending_message_pool)
+        print(pending_id)
+        del self.pending_message_pool[pending_id]
 
 
 
