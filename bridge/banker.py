@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from bridge import security
 from bridge.messenger import sender
 from bridge.messenger.mailbox import MailBox
+from bridge.security.utils import generate_key
 
 # region Stores
 realms = {}
@@ -19,7 +20,7 @@ def generate_realm_id():
     counter = 0
     while counter < len(realms) + 1:
         counter += 1
-        realm_id = security.generate_key()
+        realm_id = generate_key()
         if realm_id_exists(realm_id) is False:
             return realm_id
     raise HTTPException(status_code=500, detail="Could not generate realm id!")
@@ -43,8 +44,8 @@ def add_realm(realm):
 
 # endregion
 
-def register_new_client(client_name: str, password: str):
-    client_key = security.generate_key()
+def register_new_client(client_name: str, password: str, bridge_url: str):
+    client_key = generate_key()
     if not client_key:
         raise HTTPException(status_code=500, detail="Error while generating key!")
 
@@ -52,7 +53,7 @@ def register_new_client(client_name: str, password: str):
     if not client_mailbox:
         raise HTTPException(status_code=500, detail="Error while creating mailbox!")
 
-    client_ip = sender.initialize_client_traffic(client_key, client_mailbox)
+    client_ip = sender.initialize_client_traffic(client_key, client_mailbox, bridge_url)
 
     hashed_password = security.hash_password(password)
 
@@ -74,7 +75,7 @@ def get_client_by_key(client_key: str):
     raise HTTPException(status_code=404, detail="Client not found!")
 
 def generate_session_token(client_key: str):
-    session_token = security.generate_key()
+    session_token = generate_key()
     expires_at_time = datetime.now(timezone.utc) + timedelta(hours=1)
 
     session_tokens[session_token] = {

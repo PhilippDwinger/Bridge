@@ -7,13 +7,7 @@ from fastapi import HTTPException
 from argon2 import PasswordHasher
 
 from bridge import banker
-
-
-def generate_key_uuid4():
-    return str(uuid.uuid4())
-
-def generate_key():
-    return secrets.token_hex(32)
+from bridge.security.utils import get_free_key_in_dict
 
 password_hasher = PasswordHasher()
 
@@ -30,24 +24,6 @@ def generate_key_from_name_and_password(name, password):
         hashlib.sha256
     ).hexdigest()
 
-def get_free_key_in_dict(dictionary : dict, max_tries=100):
-    counter = 0
-    while counter < max_tries:
-        counter += 1
-        key = generate_key()
-        if key not in dictionary:
-            return key
-    return None
-
-def get_free_key_in_list(given_list : list, max_tries=100):
-    counter = 0
-    while counter < max_tries:
-        counter += 1
-        key = generate_key()
-        if key not in given_list:
-            return key
-    return None
-
 def resolve_client_key(session_token: str):
     client_key = banker.get_client_key_from_session_token(session_token)
     if not client_key:
@@ -57,3 +33,9 @@ def resolve_client_key(session_token: str):
 def authenticate_session(session_token: str):
     resolve_client_key(session_token)
     return True
+
+def generate_client_ip(bridge_url, used_ip_dict):
+    random_key = get_free_key_in_dict(used_ip_dict)
+    if not random_key:
+        raise HTTPException(status_code=404, detail="Session token not found")
+    return hashlib.sha256(f"{bridge_url}:{random_key}".encode()).hexdigest()

@@ -88,8 +88,8 @@ class Bridge:
         self.public_realm = PublicRealm("Bridge")
         self.clients = {}
 
-    def register_client(self, requested_client_name: str, password: str):
-        client_key = banker.register_new_client(requested_client_name, password)
+    def register_client(self, requested_client_name: str, password: str, bridge_url):
+        client_key = banker.register_new_client(requested_client_name, password, bridge_url)
         if not client_key:
             warning(f"Client {requested_client_name} is not registered")
             return None

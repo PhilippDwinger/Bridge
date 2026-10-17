@@ -1,10 +1,15 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 import bridge
 from bridge import banker, security
 from bridge.messenger import sender
 from bridge.messenger.mailbox import MailBox
 from bridge.realm import PublicRealm, PrivateRealm, ProtectedRealm
+from bridge.transfer import transfer, universal
+
+
+def get_bridge_url_from_request(request: Request):
+    return str(request.base_url).rstrip("/")
 
 def create_app(current_bridge_app):
     # region defaults
@@ -15,10 +20,11 @@ def create_app(current_bridge_app):
         return {"Hello from Bridge!"}
 
     @app.post("/client")
-    async def client_registration(payload : dict):
+    async def client_registration(payload : dict, request: Request):
+        bridge_url = get_bridge_url_from_request(request)
         requested_client_name = payload["client_name"]
         password = payload["password"]
-        client_key = current_bridge_app.register_client(requested_client_name, password)
+        client_key = current_bridge_app.register_client(requested_client_name, password, bridge_url)
         return {"client_name": requested_client_name, "client_key": client_key}
 
     @app.post("/login")
@@ -31,12 +37,20 @@ def create_app(current_bridge_app):
             "remaining_minutes": remaining_minutes
         }
 
+    @app.post("/poll/stats")
+    async def poll_stats(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        pending_id = payload["pending_id"]
+        return mailbox.get_pending_id_stats(pending_id)
+
     # endregion
     # region realms
     # region public
     @app.post("/realm/command")
     async def create_command_in_public_realm(payload : dict):
-        print("TESST!!!")
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         client_key = banker.get_client_key_from_session_token(session_token)
@@ -182,15 +196,31 @@ def create_app(current_bridge_app):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         client_key = banker.get_client_key_from_session_token(session_token)
-        client_mailbox : MailBox = sender.get_client_mailbox_from_client_key(client_key)
-        return {
-            "task_pool": client_mailbox.task_pool,
-            "response_pool": client_mailbox.response_pool,
-            "instruction_pool": client_mailbox.instruction_pool,
-        }
+        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        pending_id = mailbox.poll_most_overdue()
+        return pending_id
+
+    @app.post("/poll/chunk")
+    async def poll_client_chunk(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        pending_id = payload["pending_id"]
+        chunk_index = payload["chunk_index"]
+        client_key = banker.get_client_key_from_session_token(session_token)
+        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        return mailbox.get_chunk_of_pending_message(pending_id, chunk_index)
+
+    @app.post("/poll/complete")
+    async def poll_client_complete(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        pending_id = payload["pending_id"]
+        return mailbox.complete_message(pending_id)
 
     @app.post("/call/command")
-    async def call_command(payload: dict):
+    async def call_command(payload: dict, request: Request):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         client_key = banker.get_client_key_from_session_token(session_token)
@@ -204,7 +234,40 @@ def create_app(current_bridge_app):
             raise HTTPException(status_code=500, detail="Error while getting best client")
         best_client_ip = sender.get_client_ip(best_client)
         client_ip = sender.get_client_ip(client_key)
-        return
+        result = await send_message({
+            "session_token": session_token,
+            "client_ip": client_ip,
+            "target_recipient_ip": best_client_ip,
+            "content": {command_args},
+        }, request)
+        return result
+
+    @app.post("/send")
+    async def send_message(payload: dict, request: Request):
+        bridge_url = get_bridge_url_from_request(request)
+
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+
+        content = payload["content"]
+        target_recipient_ip = payload["target_recipient_ip"]
+        client_key = banker.get_client_key_from_session_token(session_token)
+        client_ip = sender.get_client_ip(client_key)
+
+        message = transfer.create_message(
+            client_ip,
+            target_recipient_ip,
+            content,
+            "task",
+            None,
+            None,
+            client_ip,
+            bridge_url,
+            "direct",
+            "long"
+        )
+        result = sender.send_message(message)
+        return result
 
     @app.post("/respond/message")
     async def respond_to_client_with_msg(payload: dict):
