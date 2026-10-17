@@ -303,7 +303,7 @@ def create_app(current_bridge_app):
             client_ip,
             target_recipient_ip,
             content,
-            "task",
+            content_type,
             conversation_id,
             causation_id,
             origin_client_ip,
@@ -318,25 +318,23 @@ def create_app(current_bridge_app):
     async def respond_to_client_with_msg(payload: dict, request: Request):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
-        pending_id = payload["pending_id"]
         conversation_id = payload["conversation_id"]
         content = payload["content"]
         target_recipient_ip = payload["target_recipient_ip"]
         causation_id = payload["causation_id"]
         origin_client_ip = payload["origin_client_ip"]
-        client_key = banker.get_client_key_from_session_token(session_token)
-        mailbox = sender.get_client_mailbox_from_client_key(client_key)
+        content_type = payload.get("content_type", "task")
+        if content_type != "task" and content_type != "response":
+            raise HTTPException(status_code=400, detail="Invalid content type")
         await send_message({
             "session_token": session_token,
             "content": content,
             "target_recipient_ip": target_recipient_ip,
             "conversation_id": conversation_id,
             "causation_id": causation_id,
-            "content_type": "response",
+            "content_type": content_type,
             "origin_client_ip": origin_client_ip
-
         }, request)
-        mailbox.delete_pending_id(pending_id)
 
     @app.post("/respond/acknowledge")
     async def acknowledge_message(payload: dict):
@@ -347,7 +345,7 @@ def create_app(current_bridge_app):
         pending_id = payload["pending_id"]
         conversation_id = payload["conversation_id"]
         message_id = payload["message_id"]
-        mailbox.delete_pending_id(pending_id)
+        mailbox.delete_pending_id(pending_id, True) # Just making sure the message is deleted!
         transfer.end_conversation(conversation_id)
         transfer.deactivate_message_id(message_id)
 

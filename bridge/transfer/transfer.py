@@ -64,6 +64,7 @@ class Message:
         self.content_total_chunks = len(content_chunks)
 
         conversations[conversation_id].append(self)
+        active_message_ids.append(message_id)
     def __str__(self) -> str:
         return str(self.__dict__)
     def __repr__(self) -> str:
@@ -77,7 +78,7 @@ def end_conversation(conversation_id):
     del conversations[conversation_id]
 
 def deactivate_message_id(message_id):
-    active_message_ids.pop(message_id)
+    active_message_ids.remove(message_id)
 
 def create_message(
             sender_ip,
