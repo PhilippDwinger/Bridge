@@ -11,6 +11,35 @@ from bridge.transfer import transfer, universal
 def get_bridge_url_from_request(request: Request):
     return str(request.base_url).rstrip("/")
 
+
+def normalize_lua_hybrid_tables(value):
+    if isinstance(value, list):
+        return [normalize_lua_hybrid_tables(item) for item in value]
+
+    if not isinstance(value, dict):
+        return value
+
+    array_items = []
+    has_keyed_items = False
+
+    for key, item in value.items():
+        if isinstance(key, str) and key.isdecimal() and int(key) > 0 and str(int(key)) == key:
+            array_items.append((int(key), item))
+        else:
+            has_keyed_items = True
+
+    if array_items and has_keyed_items:
+        return [
+            normalize_lua_hybrid_tables(item)
+            for _, item in sorted(array_items)
+        ]
+
+    return {
+        key: normalize_lua_hybrid_tables(item)
+        for key, item in value.items()
+    }
+
+
 def create_app(current_bridge_app):
     # region defaults
     app = FastAPI()
@@ -20,15 +49,17 @@ def create_app(current_bridge_app):
         return {"Hello from Bridge!"}
 
     @app.post("/client")
-    async def client_registration(payload : dict, request: Request):
+    async def client_registration(payload: dict, request: Request):
         bridge_url = get_bridge_url_from_request(request)
         requested_client_name = payload["client_name"]
         password = payload["password"]
-        client_key = current_bridge_app.register_client(requested_client_name, password, bridge_url)
+        client_key = current_bridge_app.register_client(
+            requested_client_name, password, bridge_url
+        )
         return {"client_name": requested_client_name, "client_key": client_key}
 
     @app.post("/login")
-    async def login(payload : dict):
+    async def login(payload: dict):
         client_key = payload["client_key"]
         password = payload["password"]
         session_token, remaining_minutes = bridge.login_client(client_key, password)
@@ -41,14 +72,14 @@ def create_app(current_bridge_app):
     # region realms
     # region public
     @app.post("/realm/command")
-    async def create_command_in_public_realm(payload : dict):
+    async def create_command_in_public_realm(payload: dict):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         client_key = banker.get_client_key_from_session_token(session_token)
         if not client_key:
             raise HTTPException(status_code=403, detail="Invalid arguments")
         command_name = payload["command_name"]
-        public_realm : PublicRealm = current_bridge_app.public_realm
+        public_realm: PublicRealm = current_bridge_app.public_realm
         if not public_realm:
             raise ValueError("Public realm was not found!")
 
@@ -59,7 +90,7 @@ def create_app(current_bridge_app):
     # endregion
     # region protected
     @app.post("/realm/create/protected")
-    async def create_protected_realm(payload : dict):
+    async def create_protected_realm(payload: dict):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         restricted_to_owner = payload["restricted_to_owner"]
@@ -78,12 +109,12 @@ def create_app(current_bridge_app):
         return protected_realm.id
 
     @app.post("/realm/join/protected")
-    async def join_protected_realm(payload : dict):
+    async def join_protected_realm(payload: dict):
         realm_id = payload["realm_id"]
         realm_access_key = payload["realm_access_key"]
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
-        protected_realm : ProtectedRealm = banker.get_realm_from_id(realm_id)
+        protected_realm: ProtectedRealm = banker.get_realm_from_id(realm_id)
         if not protected_realm or not protected_realm.realm_type == "protected":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         client_key = banker.get_client_key_from_session_token(session_token)
@@ -97,7 +128,7 @@ def create_app(current_bridge_app):
         security.authenticate_session(session_token)
         realm_id = payload["realm_id"]
         client_key = banker.get_client_key_from_session_token(session_token)
-        protected_realm : ProtectedRealm = banker.get_realm_from_id(realm_id)
+        protected_realm: ProtectedRealm = banker.get_realm_from_id(realm_id)
         if not protected_realm or not protected_realm.realm_type == "protected":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         if not protected_realm.is_client_in_realm(client_key):
@@ -110,7 +141,7 @@ def create_app(current_bridge_app):
     # endregion
     # region private
     @app.post("/realm/create/private")
-    async def create_private_realm(payload : dict):
+    async def create_private_realm(payload: dict):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         realm_name = payload.get("realm_name") or "unnamed-realm"
@@ -125,7 +156,7 @@ def create_app(current_bridge_app):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         realm_id = payload["realm_id"]
-        private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
+        private_realm: PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         client_key = banker.get_client_key_from_session_token(session_token)
@@ -140,7 +171,7 @@ def create_app(current_bridge_app):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         realm_id = payload["realm_id"]
-        private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
+        private_realm: PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         client_key = banker.get_client_key_from_session_token(session_token)
@@ -151,13 +182,13 @@ def create_app(current_bridge_app):
         private_realm.create_role(role_name, role_permissions)
 
     @app.post("/realm/join/private")
-    async def join_private_realm(payload : dict):
+    async def join_private_realm(payload: dict):
         session_token = payload["session_token"]
         security.authenticate_session(session_token)
         realm_id = payload["realm_id"]
         realm_access_key = payload["realm_access_key"]
         client_key = banker.get_client_key_from_session_token(session_token)
-        private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
+        private_realm: PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         private_realm.join(realm_access_key, client_key)
@@ -168,7 +199,7 @@ def create_app(current_bridge_app):
         security.authenticate_session(session_token)
         realm_id = payload["realm_id"]
         client_key = banker.get_client_key_from_session_token(session_token)
-        private_realm : PrivateRealm = banker.get_realm_from_id(realm_id)
+        private_realm: PrivateRealm = banker.get_realm_from_id(realm_id)
         if not private_realm or not private_realm.realm_type == "private":
             raise HTTPException(status_code=403, detail="Invalid arguments")
         allowed_roles = payload["allowed_roles"]
@@ -226,7 +257,9 @@ def create_app(current_bridge_app):
         client_key = banker.get_client_key_from_session_token(session_token)
         command_name = payload["command_name"]
         command_args = payload.get("command_args")
-        hosting_clients = bridge.get_all_accessible_command_hosts_for_client(command_name, client_key)
+        hosting_clients = bridge.get_all_accessible_command_hosts_for_client(
+            command_name, client_key
+        )
         if not hosting_clients:
             raise HTTPException(status_code=402, detail="No hosting clients found")
         best_client = bridge.get_least_busy_client(hosting_clients)
@@ -238,7 +271,7 @@ def create_app(current_bridge_app):
             "session_token": session_token,
             "client_ip": client_ip,
             "target_recipient_ip": best_client_ip,
-            "content": {command_args},
+            "content": normalize_lua_hybrid_tables(command_args),
         }, request)
         return result
 
