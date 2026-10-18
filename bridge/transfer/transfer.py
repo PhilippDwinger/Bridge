@@ -4,7 +4,8 @@ from fastapi import HTTPException
 
 from bridge.security.utils import get_free_key_in_dict
 from bridge.security.utils import get_free_key_in_list
-from bridge.transfer import protocol, chunk, universal
+from bridge.transfer import protocol, chunk
+from bridge.utils import universal, time_calc
 
 conversations = {}
 active_message_ids = []
@@ -23,7 +24,6 @@ class Message:
             traffic_type = "direct",
             route_length = "unknown",
     ):
-        from bridge import security
         if conversation_id is None:
             conversation_id = get_free_key_in_dict(conversations)
         if not conversation_id in conversations:
@@ -72,7 +72,7 @@ class Message:
 universal.register_class("Message", Message)
 
 def is_message_expired(message: Message):
-    return message.expires_at < datetime.datetime.now(datetime.timezone.utc)
+    return time_calc.is_expired(message.expires_at)
 
 def end_conversation(conversation_id):
     del conversations[conversation_id]

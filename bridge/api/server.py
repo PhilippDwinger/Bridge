@@ -3,9 +3,10 @@ from fastapi import FastAPI, HTTPException, Request
 import bridge
 from bridge import banker, security
 from bridge.messenger import sender
-from bridge.messenger.mailbox import MailBox
 from bridge.realm import PublicRealm, PrivateRealm, ProtectedRealm
-from bridge.transfer import transfer, universal
+from bridge.transfer import transfer
+from bridge.utils import universal
+from bridge.utils.time_calc import get_time_plus_minutes, is_expired
 
 
 def get_bridge_url_from_request(request: Request):
@@ -138,6 +139,26 @@ def create_app(current_bridge_app):
         command_name = payload["command_name"]
         protected_realm.create_command(command_name, client_key)
 
+    @app.post("/realm/create/protected/code")
+    async def create_protected_code(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        realm_id = payload["realm_id"]
+        client_key = banker.get_client_key_from_session_token(session_token)
+        realm : ProtectedRealm = banker.get_realm_from_id(realm_id)
+        if realm.realm_type != "protected":
+            raise HTTPException(status_code=403, detail="Realm is not a protected realm")
+        if not client_key == realm.owner_client_key:
+            raise HTTPException(status_code=403, detail="Client needs to be owner to create code!")
+        expires_in_minutes = payload["expires_in_minutes"]
+        expires_at = get_time_plus_minutes(expires_in_minutes)
+        preferred_code = payload.get("preferred_code", None)
+        return banker.create_protected_realm_code(
+            realm_id,
+            "protected",
+            expires_at,
+            preferred_code,
+        )
     # endregion
     # region private
     @app.post("/realm/create/private")
@@ -208,7 +229,53 @@ def create_app(current_bridge_app):
             raise HTTPException(status_code=403, detail="Client is not allowed to host commands")
         private_realm.create_command(command_name, allowed_roles, client_key)
 
+    @app.post("/realm/create/private/code")
+    async def create_private_code(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        realm_id = payload["realm_id"]
+        client_key = banker.get_client_key_from_session_token(session_token)
+        realm: PrivateRealm = banker.get_realm_from_id(realm_id)
+        if realm.realm_type != "private":
+            raise HTTPException(status_code=403, detail="Realm is not a private realm")
+        if not client_key == realm.owner_client_key:
+            raise HTTPException(status_code=403, detail="Client needs to be owner to create code!")
+        expires_in_minutes = payload["expires_in_minutes"]
+        expires_at = get_time_plus_minutes(expires_in_minutes)
+        preferred_code = payload.get("preferred_code", None)
+        giving_roles = payload["giving_roles"]
+        return banker.create_private_realm_code(
+            realm_id,
+            "private",
+            giving_roles,
+            expires_at,
+            preferred_code,
+        )
     # endregion
+    @app.post("/realm/join/code")
+    async def join_code(payload: dict):
+        session_token = payload["session_token"]
+        security.authenticate_session(session_token)
+        client_key = banker.get_client_key_from_session_token(session_token)
+        realm_code = payload["realm_code"]
+        realm_code_entry = banker.get_realm_entry_from_code(realm_code)
+        if not realm_code_entry:
+            raise HTTPException(status_code=403, detail="Invalid realm code")
+        if is_expired(realm_code_entry["expires_at"]):
+            banker.delete_realm_code(realm_code)
+            raise HTTPException(status_code=403, detail="Expired realm code")
+        realm_id = realm_code_entry["realm_id"]
+        realm = banker.get_realm_from_id(realm_id)
+        if realm.realm_type == "protected":
+            access_key = realm.access_key
+            realm.join(access_key, client_key)
+        elif realm.realm_type == "private":
+            giving_roles = realm_code_entry["giving_roles"]
+            realm : PrivateRealm
+            realm.join_empty(client_key)
+            realm.give_client_roles(client_key, giving_roles)
+        else:
+            raise HTTPException(status_code=403, detail="Invalid realm type")
     # endregion
     # region events
     # endregion

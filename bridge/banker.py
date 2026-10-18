@@ -4,12 +4,14 @@ from datetime import datetime, timedelta, timezone
 from bridge import security
 from bridge.messenger import sender
 from bridge.messenger.mailbox import MailBox
-from bridge.security.utils import generate_key
+from bridge.security.utils import generate_key, get_free_key_in_dict
+from bridge.utils.time_calc import is_expired
 
 # region Stores
 realms = {}
 clients = {}
 session_tokens = {}
+realm_codes = {}
 # endregion
 
 # region realm functions
@@ -62,7 +64,11 @@ def register_new_client(client_name: str, password: str, bridge_url: str):
         "hashed_password": hashed_password,
         "client_key": client_key,
         "client_ip": client_ip,
-        "client_mailbox": client_mailbox
+        "client_mailbox": client_mailbox,
+        "metadata": {
+            "first_code_join_attempt" : None,
+            "code_join_declines": None
+        }
     }
 
     clients[client_key] = entry
@@ -93,9 +99,8 @@ def validate_session_token(session_token: str):
         raise HTTPException(status_code=401, detail="Invalid session token!")
 
     entry = session_tokens[session_token]
-    current_time = datetime.now(timezone.utc)
 
-    if current_time >= entry["expires_at_time"]:
+    if is_expired(entry["expires_at_time"]):
         del session_tokens[session_token]
         raise HTTPException(status_code=401, detail="Session token expired!")
 
@@ -103,3 +108,45 @@ def validate_session_token(session_token: str):
 
 def get_client_key_from_session_token(session_token: str):
     return validate_session_token(session_token)["client_key"]
+
+def create_protected_realm_code(realm_id, realm_type, expires_at, preferred_code=None):
+    if not realm_id or not realm_type:
+        raise HTTPException(status_code=400, detail="Missing Arguments!")
+    code = preferred_code
+    if not code:
+        code = get_free_key_in_dict(realm_codes)
+    if is_expired(expires_at):
+        raise HTTPException(status_code=400, detail="Expired Session!")
+    realm_codes[code] = {
+        "realm_id": realm_id,
+        "realm_type": realm_type,
+        "expires_at": expires_at,
+    }
+    return code
+
+def create_private_realm_code(realm_id, realm_type, giving_roles, expires_at, preferred_code=None):
+    if not realm_id or not realm_type or not giving_roles:
+        raise HTTPException(status_code=400, detail="Missing Arguments!")
+    code = preferred_code
+    if not code:
+        code = get_free_key_in_dict(realm_codes)
+    if is_expired(expires_at):
+        raise HTTPException(status_code=400, detail="Expired Session!")
+    realm_codes[code] = {
+        "realm_id": realm_id,
+        "realm_type": realm_type,
+        "giving_roles": giving_roles,
+        "expires_at": expires_at,
+    }
+    return code
+
+def get_realm_entry_from_code(code: str):
+    if code not in realm_codes:
+        raise HTTPException(status_code=404, detail="Realm not found!")
+    return realm_codes[code]
+
+def delete_realm_code(code: str):
+    if code not in realm_codes:
+        return False
+    del realm_codes[code]
+    return True

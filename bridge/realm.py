@@ -1,7 +1,6 @@
 from fastapi import HTTPException
 from bridge import banker, security
 
-
 class Realm:
     def __init__(self, name):
         self.name = name

@@ -3,7 +3,7 @@ import datetime
 from fastapi import HTTPException
 
 from bridge.security.utils import get_free_key_in_dict
-from bridge.transfer import universal
+from bridge.utils import universal
 
 mailboxes = []
 
