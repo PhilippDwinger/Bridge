@@ -1,8 +1,8 @@
+import hashlib
 import secrets
-import uuid
 
-def generate_key_uuid4():
-    return str(uuid.uuid4())
+from bridge.errors.exceptions import Exceptions
+
 
 def generate_key():
     return secrets.token_hex(32)
@@ -24,3 +24,9 @@ def get_free_key_in_list(given_list : list, max_tries=100):
         if key not in given_list:
             return key
     return None
+
+def generate_client_ip(bridge_url, used_ip_dict):
+    random_key = get_free_key_in_dict(used_ip_dict)
+    if not random_key:
+        return Exceptions.FAILED
+    return hashlib.sha256(f"{bridge_url}:{random_key}".encode()).hexdigest()
