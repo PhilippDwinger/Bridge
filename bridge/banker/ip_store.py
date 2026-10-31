@@ -1,13 +1,35 @@
-from bridge.security import hasher
-from bridge.security.generator import get_free_key_in_dict
+from bridge import errors
+from bridge.core import address
+from bridge.errors.exceptions import Exceptions
+from bridge.security.generator import generate_key
+from bridge.server import url_env
 
+# client_ip -> client_key
 ip_storage = {}
 
-def get_free_ip(bridge_url, client_key):
-    free_raw_ip = get_free_key_in_dict(ip_storage)
-    free_ip = hasher.merge_hash_strings(free_raw_ip, bridge_url)
-    ip_storage[free_ip] = client_key
-    return free_ip
+def get_free_ip(client_key):
+    bridge_url = url_env.base_root
+    if not bridge_url:
+        errors.handle_error(Exceptions.BRIDGE_URL_MISSING, "Cannot create a client IP without the server URL")
+        return Exceptions.BRIDGE_URL_MISSING
+    for _ in range(100):
+        client_ip = address.make_address(bridge_url, generate_key(16))
+        if client_ip not in ip_storage:
+            ip_storage[client_ip] = client_key
+            return client_ip
+    errors.handle_error(Exceptions.FAILED, "No free client IP could be generated")
+    return Exceptions.FAILED
+
+def get_client_key(client_ip):
+    if not isinstance(client_ip, str):
+        return None
+    return ip_storage.get(client_ip)
+
+def remove_ip(client_ip):
+    ip_storage.pop(client_ip, None)
+
+def is_valid_ip(client_ip):
+    return client_ip in ip_storage
 
 def reset():
     ip_storage.clear()

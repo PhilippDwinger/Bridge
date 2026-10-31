@@ -1,32 +1,24 @@
-import hashlib
 import secrets
 
-from bridge.errors.exceptions import Exceptions
 
+def generate_key(n_bytes: int = 32):
+    # Random hex string with n_bytes of randomness (32 -> 64 hex characters)
+    return secrets.token_hex(n_bytes)
 
-def generate_key():
-    return secrets.token_hex(32)
-
-def get_free_key_in_dict(dictionary : dict, max_tries=100):
+def get_free_key_in_dict(dictionary : dict, max_tries=100, n_bytes: int = 32):
     counter = 0
     while counter < max_tries:
         counter += 1
-        key = generate_key()
+        key = generate_key(n_bytes)
         if key not in dictionary:
             return key
     return None
 
-def get_free_key_in_list(given_list : list, max_tries=100):
+def get_free_key_in_list(given_list : list, max_tries=100, n_bytes: int = 32):
     counter = 0
     while counter < max_tries:
         counter += 1
-        key = generate_key()
+        key = generate_key(n_bytes)
         if key not in given_list:
             return key
     return None
-
-def generate_client_ip(bridge_url, used_ip_dict):
-    random_key = get_free_key_in_dict(used_ip_dict)
-    if not random_key:
-        return Exceptions.FAILED
-    return hashlib.sha256(f"{bridge_url}:{random_key}".encode()).hexdigest()

@@ -4,4 +4,4 @@ __pycache__/
 *.pyc
 .env
 *.pem
-Bridge.tester.py
+tests/*.log

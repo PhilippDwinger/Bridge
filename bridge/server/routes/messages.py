@@ -1,0 +1,63 @@
+from fastapi import APIRouter
+
+from bridge.messenger import service as messenger_service
+from bridge.messenger.message import ContentType, MessageMode
+from bridge.server.routes._helpers import authenticate, check, get_field
+
+Router = APIRouter(prefix="/message")
+
+
+@Router.post("/send")
+async def send(payload: dict):
+    client_key = authenticate(payload)
+    if "content" not in payload:
+        get_field(payload, "content", object)  # reports the missing field
+    message = check(await messenger_service.send(
+        client_key,
+        recipient_ip=get_field(payload, "recipient_ip", str),
+        content=payload.get("content"),
+        content_type=get_field(payload, "content_type", str, required=False, default=str(ContentType.TASK)),
+        mode=get_field(payload, "mode", str, required=False, default=str(MessageMode.SAFE)),
+        conversation_id=get_field(payload, "conversation_id", str, required=False),
+        causation_id=get_field(payload, "causation_id", str, required=False),
+    ))
+    return {
+        "message_id": message.message_id,
+        "conversation_id": message.conversation_id,
+        "mode": str(message.mode),
+        "size_bytes": message.size_bytes,
+        "sha256": message.sha256,
+    }
+
+
+@Router.post("/poll")
+async def poll(payload: dict):
+    client_key = authenticate(payload)
+    return check(messenger_service.poll(client_key))
+
+
+@Router.post("/chunk")
+async def chunk(payload: dict):
+    client_key = authenticate(payload)
+    return check(messenger_service.get_chunk(
+        client_key,
+        get_field(payload, "pending_id", str),
+        get_field(payload, "chunk_index", int),
+    ))
+
+
+@Router.post("/complete")
+async def complete(payload: dict):
+    client_key = authenticate(payload)
+    return check(messenger_service.complete(
+        client_key,
+        get_field(payload, "pending_id", str),
+        get_field(payload, "sha256", str),
+    ))
+
+
+@Router.post("/cancel")
+async def cancel(payload: dict):
+    client_key = authenticate(payload)
+    check(messenger_service.cancel(client_key, get_field(payload, "pending_id", str)))
+    return {"cancelled": True}
