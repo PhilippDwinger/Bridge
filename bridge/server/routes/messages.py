@@ -36,9 +36,21 @@ async def send(payload: dict):
 
 @Router.post("/poll")
 async def poll(payload: dict):
-    # Optional "content_types": ["direct"] or ["task", "response"] ... to poll only some pools
+    # Optional "content_types": ["direct"] or ["task", "response"] ... to poll only some pools.
+    # Optional "wait_seconds" (max 25): keep the request open until a message arrives (long polling).
     client_key = authenticate(payload)
-    return check(messenger_service.poll(client_key, get_field(payload, "content_types", list, required=False)))
+    return check(await messenger_service.poll_wait(
+        client_key,
+        get_field(payload, "content_types", list, required=False),
+        get_field(payload, "wait_seconds", (int, float), required=False, default=0),
+    ))
+
+
+@Router.post("/status")
+async def status(payload: dict):
+    # Status of a message this client sent: waiting, taken, delivered, expired
+    client_key = authenticate(payload)
+    return check(await messenger_service.message_status(client_key, get_field(payload, "message_id", str)))
 
 
 @Router.post("/chunk")

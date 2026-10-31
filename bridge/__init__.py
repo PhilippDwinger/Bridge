@@ -11,7 +11,8 @@ from bridge.server import runtime, s2s_client, url_env
 from bridge.server.connection_modes import ConnectionMode
 from bridge.server.server import start_server
 from bridge.realm import service as realm_service
-from bridge.core import clients
+from bridge.core import backup, clients
+from bridge.banker import backup_store, status_store
 
 
 def verify_bridge_password(password, bridge_password_hash):
@@ -71,6 +72,7 @@ class Bridge:
             "initialization_time": datetime.datetime.now(datetime.timezone.utc),
         }
         self.password = hash_password(password)
+        backup.set_password(password, self.public_url)
         realm_service.create_default_public_realm()
 
     def __str__(self) -> str:
@@ -87,6 +89,7 @@ class Bridge:
         if hashed_password is None:
             return Exceptions.ARGUMENT_ERROR
         self.password = hashed_password
+        backup.set_password(new_password, self.public_url)
         return True
 
     def change_password(self, password, new_password):
@@ -155,6 +158,7 @@ class Bridge:
         client_key_store.reset()
         realm_store.reset()
         task_store.reset()
+        status_store.reset()
         authorizer.reset()
         realm_service.create_default_public_realm()
         errors.debug_print("Bridge was reset")
@@ -182,13 +186,76 @@ class Bridge:
             "open_tasks": len(task_store.incoming_tasks),
             "public_realm_address": realm_service.get_public_realm_address(),
             "trusted_servers": trust_store.list_servers(),
+            "settings": self._get_settings(),
+            "backup": {key: value for key, value in backup.status().items() if key != "stored_for_other_servers"},
+            "stored_backups": len(backup_store.stored_backups),
             "errors": {error.name: entry["amount"] for error, entry in errors.tracker.get_errors().items()},
         }
+
+    # region settings
+    SETTINGS = {
+        "relay_mode": ("off", "trusted"),
+        "accept_relayed": (True, False),
+        "backup_mode": ("peers", "off"),
+    }
+
+    def _get_settings(self):
+        return {name: getattr(protocol, name) for name in self.SETTINGS}
+
+    def _set_settings(self, **changes):
+        for name, value in changes.items():
+            if value is None:
+                continue
+            if name not in self.SETTINGS or value not in self.SETTINGS[name]:
+                errors.handle_error(Exceptions.ARGUMENT_ERROR, f"Invalid setting {name}={value!r}")
+                return Exceptions.ARGUMENT_ERROR
+        for name, value in changes.items():
+            if value is not None:
+                setattr(protocol, name, value)
+        return self._get_settings()
+
+    def set_settings(self, password, **changes):
+        if not self.verify_password(password):
+            return Exceptions.NOT_ALLOWED
+        return self._set_settings(**changes)
+    # endregion settings
 
     def get_status(self, password):
         if not self.verify_password(password):
             return Exceptions.NOT_ALLOWED
         return self._get_status()
+
+    def _get_clients(self):
+        result = []
+        for client_key, entry in client_key_store.client_key_storage.items():
+            mailbox = mailbox_store.get_mailbox(client_key)
+            result.append({
+                "client_ip": entry.get("client_ip"),
+                "name": entry.get("name"),
+                "realms": list(entry.get("realms", [])),
+                "created_at": entry["created_at"].isoformat(),
+                "last_signal": entry["last_signal"].isoformat(),
+                "waiting_messages": sum(len(pool) for pool in mailbox.snapshot(0)["pools"].values()) if mailbox else 0,
+            })
+        return result
+
+    def _get_mailbox_view(self, client_ip):
+        client_key = ip_store.get_client_key(client_ip)
+        mailbox = mailbox_store.get_mailbox(client_key) if client_key else None
+        if mailbox is None:
+            errors.handle_error(Exceptions.CLIENT_NOT_FOUND, "No client with this IP on this server")
+            return Exceptions.CLIENT_NOT_FOUND
+        return mailbox.snapshot()
+
+    def get_clients(self, password):
+        if not self.verify_password(password):
+            return Exceptions.NOT_ALLOWED
+        return self._get_clients()
+
+    def get_mailbox_view(self, password, client_ip):
+        if not self.verify_password(password):
+            return Exceptions.NOT_ALLOWED
+        return self._get_mailbox_view(client_ip)
 
     def get_all_storages(self, password):
         # Raw view of everything in RAM (debugging only - contains password hashes)

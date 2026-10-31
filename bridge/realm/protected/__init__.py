@@ -24,6 +24,13 @@ class ProtectedRealm(Realm):
         errors.handle_error(Exceptions.NOT_ALLOWED, "Invalid access key or invitation code")
         return Exceptions.NOT_ALLOWED
 
+    def _extra_state(self):
+        return {"access_key": self.access_key, "restricted_to_owner": self.restricted_to_owner}
+
+    def _load_extra_state(self, extra):
+        self.access_key = extra.get("access_key")
+        self.restricted_to_owner = bool(extra.get("restricted_to_owner"))
+
     def can_host(self, client_ip):
         if not self.is_member(client_ip):
             return False

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request
 from starlette.concurrency import run_in_threadpool
 
 from bridge import errors
+from bridge.core import backup
 from bridge.errors.exceptions import Exceptions
 from bridge.security import authorizer
 from bridge.server.routes._helpers import check, fail, get_bridge, get_field, remote_host
@@ -73,3 +74,46 @@ async def change_password(payload: dict, request: Request):
     new_password = get_field(payload, "new_password", str)
     check(await run_in_threadpool(bridge._set_password, new_password))
     return {"changed": True}
+
+
+@Router.post("/clients")
+async def client_list(payload: dict, request: Request):
+    bridge = await _verify_admin(payload, request)
+    return {"clients": bridge._get_clients()}
+
+
+@Router.post("/mailbox")
+async def mailbox_view(payload: dict, request: Request):
+    # Shows what waits in a client's mailbox without taking anything out (debugging / tester)
+    bridge = await _verify_admin(payload, request)
+    return check(bridge._get_mailbox_view(get_field(payload, "client_ip", str)))
+
+
+@Router.post("/settings")
+async def settings(payload: dict, request: Request):
+    # relay_mode: off | trusted, accept_relayed: true | false, backup_mode: peers | off
+    bridge = await _verify_admin(payload, request)
+    return check(bridge._set_settings(
+        relay_mode=get_field(payload, "relay_mode", str, required=False),
+        accept_relayed=get_field(payload, "accept_relayed", bool, required=False),
+        backup_mode=get_field(payload, "backup_mode", str, required=False),
+    ))
+
+
+@Router.post("/backup/status")
+async def backup_status(payload: dict, request: Request):
+    await _verify_admin(payload, request)
+    return backup.status()
+
+
+@Router.post("/backup/now")
+async def backup_now(payload: dict, request: Request):
+    await _verify_admin(payload, request)
+    return check(await backup.backup_now(force=True))
+
+
+@Router.post("/backup/restore")
+async def backup_restore(payload: dict, request: Request):
+    # Replaces everything in RAM with the newest backup from the trusted servers
+    await _verify_admin(payload, request)
+    return check(await backup.restore_from_peers(only_if_fresh=False))

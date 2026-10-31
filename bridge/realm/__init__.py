@@ -13,6 +13,7 @@ MAX_NAME_LENGTH = 64
 MAX_KEY_LENGTH = 128
 MAX_CODE_MINUTES = 60 * 24 * 30
 MAX_CODE_USES = 100_000
+MAX_DESCRIPTION_LENGTH = 300
 
 
 class RealmType(StrEnum):
@@ -48,8 +49,10 @@ class Realm:
         self.created_at = _now()
         # client_ip -> {"roles": [role names], "joined_at": datetime}
         self.members = {}
-        # command_name -> {host_ip: {"allowed_roles": [role names]}}
+        # command_name -> {host_ip: {"allowed_roles": [role names], "description": str}}
         self.commands = {}
+        # topic -> [subscriber client IPs]
+        self.topics = {}
         # Invitation codes are stored per server in realm_store.realm_codes
         if owner_ip:
             self.add_member(owner_ip)
@@ -79,11 +82,16 @@ class Realm:
 
     def remove_member(self, client_ip):
         self.members.pop(client_ip, None)
-        # Hosted commands of a member that left are removed as well
+        # Hosted commands and topic subscriptions of a member that left are removed as well
         for command_name in list(self.commands):
             self.commands[command_name].pop(client_ip, None)
             if not self.commands[command_name]:
                 del self.commands[command_name]
+        for topic in list(self.topics):
+            if client_ip in self.topics[topic]:
+                self.topics[topic].remove(client_ip)
+            if not self.topics[topic]:
+                del self.topics[topic]
 
     def join(self, client_ip, access_key=None, code=None):
         raise NotImplementedError
@@ -174,8 +182,11 @@ class Realm:
     def can_call(self, client_ip, host_entry):
         return self.is_member(client_ip)
 
-    def create_command(self, client_ip, command_name, allowed_roles=None):
+    def create_command(self, client_ip, command_name, allowed_roles=None, description=None):
         if not _valid_name(command_name, "command_name", 128):
+            return Exceptions.ARGUMENT_ERROR
+        if description is not None and (not isinstance(description, str) or len(description) > MAX_DESCRIPTION_LENGTH):
+            errors.handle_error(Exceptions.ARGUMENT_ERROR, f"'description' must be a text with up to {MAX_DESCRIPTION_LENGTH} characters")
             return Exceptions.ARGUMENT_ERROR
         if not self.can_host(client_ip):
             errors.handle_error(Exceptions.NOT_ALLOWED, f"Client may not host commands in this {self.realm_type} realm")
@@ -189,7 +200,7 @@ class Realm:
         if client_ip in hosts:
             errors.handle_error(Exceptions.ALREADY_EXISTS, f"Client already hosts '{command_name}'")
             return Exceptions.ALREADY_EXISTS
-        hosts[client_ip] = {"allowed_roles": list(allowed_roles or [])}
+        hosts[client_ip] = {"allowed_roles": list(allowed_roles or []), "description": description or ""}
         return True
 
     def remove_command(self, client_ip, command_name):
@@ -209,7 +220,108 @@ class Realm:
             return Exceptions.NOT_ALLOWED
         hosts = self.commands.get(command_name) or {}
         return [host_ip for host_ip, host_entry in hosts.items() if self.can_call(client_ip, host_entry)]
+
+    def list_commands(self, client_ip):
+        """Command catalog: every command the caller may use, with number of hosts and descriptions."""
+        if not self.can_see_commands(client_ip):
+            errors.handle_error(Exceptions.NOT_ALLOWED, "Client is not a member of the realm")
+            return Exceptions.NOT_ALLOWED
+        catalog = {}
+        for command_name, hosts in self.commands.items():
+            usable = [entry for entry in hosts.values() if self.can_call(client_ip, entry)]
+            if usable:
+                catalog[command_name] = {
+                    "hosts": len(usable),
+                    "descriptions": sorted({entry.get("description", "") for entry in usable} - {""}),
+                }
+        return catalog
     # endregion commands
+
+    # region topics
+    # Publish/subscribe: an event published to a topic goes to every subscriber as "event" message.
+    # Subscribers fetch events like every other message (poll) - Bridge does not push.
+    def can_publish(self, client_ip):
+        return self.can_host(client_ip)
+
+    def subscribe(self, client_ip, topic):
+        if not _valid_name(topic, "topic", 128):
+            return Exceptions.ARGUMENT_ERROR
+        if not self.can_see_commands(client_ip):
+            errors.handle_error(Exceptions.NOT_ALLOWED, "Client is not a member of the realm")
+            return Exceptions.NOT_ALLOWED
+        if topic not in self.topics and len(self.topics) >= protocol.max_topics_per_realm:
+            errors.handle_error(Exceptions.NOT_ALLOWED, f"The realm has {protocol.max_topics_per_realm} topics already")
+            return Exceptions.NOT_ALLOWED
+        subscribers = self.topics.setdefault(topic, [])
+        if client_ip not in subscribers:
+            if len(subscribers) >= protocol.max_topic_subscribers:
+                errors.handle_error(Exceptions.NOT_ALLOWED, f"Topic has {protocol.max_topic_subscribers} subscribers already")
+                return Exceptions.NOT_ALLOWED
+            subscribers.append(client_ip)
+        if self.realm_type == RealmType.PUBLIC:
+            self.add_member(client_ip)
+        return True
+
+    def unsubscribe(self, client_ip, topic):
+        subscribers = self.topics.get(topic) or []
+        if client_ip not in subscribers:
+            errors.handle_error(Exceptions.KEY_ERROR, "Client is not subscribed to this topic")
+            return Exceptions.KEY_ERROR
+        subscribers.remove(client_ip)
+        if not subscribers:
+            del self.topics[topic]
+        return True
+
+    def resolve_subscribers(self, client_ip, topic):
+        """Subscribers of a topic, if the caller may publish to it."""
+        if not _valid_name(topic, "topic", 128):
+            return Exceptions.ARGUMENT_ERROR
+        if not self.can_publish(client_ip):
+            errors.handle_error(Exceptions.NOT_ALLOWED, f"Client may not publish in this {self.realm_type} realm")
+            return Exceptions.NOT_ALLOWED
+        return list(self.topics.get(topic) or [])
+
+    def verify_event(self, client_ip, topic, subscriber_ip):
+        """For the server of a subscriber: may client_ip publish here, and is subscriber_ip subscribed?"""
+        if not self.can_publish(client_ip):
+            return False
+        return subscriber_ip in (self.topics.get(topic) or [])
+    # endregion topics
+
+    # region backup
+    def to_state(self):
+        """Everything of the realm as JSON-ready data (for the encrypted backup)."""
+        return {
+            "realm_type": str(self.realm_type),
+            "realm_id": self.realm_id,
+            "name": self.name,
+            "owner_ip": self.owner_ip,
+            "created_at": self.created_at.isoformat(),
+            "members": {
+                ip: {"roles": list(entry["roles"]), "joined_at": entry["joined_at"].isoformat()}
+                for ip, entry in self.members.items()
+            },
+            "commands": {name: {ip: dict(entry) for ip, entry in hosts.items()} for name, hosts in self.commands.items()},
+            "topics": {topic: list(subscribers) for topic, subscribers in self.topics.items()},
+            "extra": self._extra_state(),
+        }
+
+    def _extra_state(self):
+        return {}
+
+    def _load_extra_state(self, extra):
+        pass
+
+    def load_state(self, state):
+        self.created_at = datetime.datetime.fromisoformat(state["created_at"])
+        self.members = {
+            ip: {"roles": list(entry["roles"]), "joined_at": datetime.datetime.fromisoformat(entry["joined_at"])}
+            for ip, entry in state["members"].items()
+        }
+        self.commands = {name: {ip: dict(entry) for ip, entry in hosts.items()} for name, hosts in state["commands"].items()}
+        self.topics = {topic: list(subscribers) for topic, subscribers in state.get("topics", {}).items()}
+        self._load_extra_state(state.get("extra") or {})
+    # endregion backup
 
     # region info
     def info(self, client_ip):
@@ -225,6 +337,8 @@ class Realm:
             "is_member": self.is_member(client_ip),
             "member_count": len(self.members),
             "commands": {name: len(hosts) for name, hosts in self.commands.items()},
+            "topics": {topic: len(subscribers) for topic, subscribers in self.topics.items()},
+            "my_topics": [topic for topic, subscribers in self.topics.items() if client_ip in subscribers],
             "created_at": self.created_at.isoformat(),
         }
         if self.is_member(client_ip):

@@ -2,12 +2,14 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from bridge import errors
-from bridge.banker import trust_store
+from bridge.banker import backup_store, trust_store
 from bridge.core import address
 from bridge.errors.exceptions import Exceptions, get_exception_id, is_exception
 from bridge.messenger import router
 from bridge.messenger.message import ContentType, message_from_dict
-from bridge.realm import commands, service as realm_service
+from bridge.core import backup, protocol
+from bridge.messenger import service as messenger_service
+from bridge.realm import commands, service as realm_service, topics
 from bridge.security.hasher import sha256_hex
 from bridge.server import s2s_client, url_env
 
@@ -117,8 +119,17 @@ async def receive_message(payload: dict, request: Request):
     message = message_from_dict(payload.get("message"))
     if is_exception(message):
         return _error(message)
-    # A server may only send messages of its own clients, and only to our clients
-    if address.server_of(message.sender_ip) != peer_url:
+    if address.server_of(message.recipient_ip) != url_env.base_root:
+        errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} sent a message for a client of another server")
+        return _error(Exceptions.NOT_ALLOWED)
+    if message.relayed_via:
+        # A direct message that the peer passed on for a third server
+        if (not protocol.accept_relayed or message.content_type != ContentType.DIRECT
+                or message.relayed_via != [peer_url]):
+            errors.handle_error(Exceptions.NOT_ALLOWED, f"Relayed message from {peer_url} rejected")
+            return _error(Exceptions.NOT_ALLOWED)
+    elif address.server_of(message.sender_ip) != peer_url:
+        # Without relaying a server may only send messages of its own clients
         errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} sent a message with a foreign sender IP")
         return _error(Exceptions.NOT_ALLOWED)
     if message.content_type == ContentType.INSTRUCTION:
@@ -129,8 +140,36 @@ async def receive_message(payload: dict, request: Request):
         verified = await commands.verify_remote_task(message, peer_url)
         if is_exception(verified):
             return _error(verified)
+    if message.content_type == ContentType.EVENT:
+        verified = await topics.verify_remote_event(message, peer_url)
+        if is_exception(verified):
+            return _error(verified)
     # Responses are checked in router.deliver_local against the task we sent
-    return _answer(await router.deliver(message, from_server=peer_url))
+    return _answer(router.deliver_local(message))
+
+
+@Router.post("/relay")
+async def relay(payload: dict, request: Request):
+    # The peer asks us to pass a direct message on to a server it does not trust (but we do)
+    peer_url = _authenticate_server(request)
+    if peer_url is None:
+        return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
+    message = message_from_dict(payload.get("message"))
+    if is_exception(message):
+        return _error(message)
+    return _answer(await router.relay_for_peer(message, peer_url))
+
+
+@Router.post("/status")
+async def message_status(payload: dict, request: Request):
+    peer_url = _authenticate_server(request)
+    if peer_url is None:
+        return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
+    sender_ip = payload.get("sender_ip")
+    if address.server_of(sender_ip) != peer_url:
+        errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} asked for a message of a foreign client")
+        return _error(Exceptions.NOT_ALLOWED)
+    return _answer(messenger_service.get_local_status(payload.get("message_id"), sender_ip))
 
 
 @Router.post("/realm")
@@ -169,3 +208,31 @@ async def busy(payload: dict, request: Request):
         return _error(Exceptions.ARGUMENT_ERROR)
     return _ok(commands.get_local_busy_points([ip for ip in client_ips if isinstance(ip, str)]))
 # endregion authorized
+
+
+# region backup
+@Router.post("/backup/store")
+async def store_backup(payload: dict, request: Request):
+    # Keep the encrypted backup of a trusted server. We cannot read it.
+    peer_url = _authenticate_server(request)
+    if peer_url is None:
+        return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
+    blob = payload.get("backup")
+    if not isinstance(blob, dict) or blob.get("server_url") != peer_url or not isinstance(blob.get("data"), str):
+        return _error(Exceptions.ARGUMENT_ERROR)
+    size = backup.blob_size(blob)
+    if size > protocol.max_backup_mb * 1024 * 1024:
+        return _error(Exceptions.MESSAGE_TOO_LARGE)
+    if not backup_store.store(peer_url, blob, size):
+        return _error(Exceptions.SERVER_FULL)
+    return _ok()
+
+
+@Router.post("/backup/fetch")
+async def fetch_backup(request: Request):
+    # A trusted server asks for its own backup (only its own)
+    peer_url = _authenticate_server(request)
+    if peer_url is None:
+        return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
+    return _ok(backup_store.fetch(peer_url))
+# endregion backup

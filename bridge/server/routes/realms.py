@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from bridge.core import address, clients
 from bridge.errors.exceptions import Exceptions
-from bridge.realm import service as realm_service
+from bridge.realm import service as realm_service, topics
 from bridge.server.routes._helpers import authenticate, check, fail, get_field
 
 # All realm actions work the same for realms on this server and on trusted servers:
@@ -100,8 +100,16 @@ async def create_command(payload: dict):
     await _run(payload, "create_command", {
         "command_name": get_field(payload, "command_name", str),
         "allowed_roles": get_field(payload, "allowed_roles", list, required=False),
+        "description": get_field(payload, "description", str, required=False),
     })
     return {"created": True}
+
+
+@Router.post("/commands")
+async def list_commands(payload: dict):
+    # Command catalog: all commands of the realm the caller may use
+    _, _, catalog = await _run(payload, "list_commands")
+    return {"commands": catalog}
 
 
 @Router.post("/command/remove")
@@ -116,6 +124,7 @@ async def create_role(payload: dict):
     await _run(payload, "create_role", {
         "role_name": get_field(payload, "role_name", str),
         "can_host_commands": get_field(payload, "can_host_commands", bool, required=False, default=False),
+        "can_publish": get_field(payload, "can_publish", bool, required=False, default=False),
     })
     return {"created": True}
 
@@ -137,3 +146,31 @@ async def create_access_key(payload: dict):
     })
     return {"access_key": key}
 # endregion private realms
+
+
+# region topics
+@Router.post("/topic/subscribe")
+async def subscribe(payload: dict):
+    await _run(payload, "subscribe", {"topic": get_field(payload, "topic", str)})
+    return {"subscribed": True}
+
+
+@Router.post("/topic/unsubscribe")
+async def unsubscribe(payload: dict):
+    await _run(payload, "unsubscribe", {"topic": get_field(payload, "topic", str)})
+    return {"unsubscribed": True}
+
+
+@Router.post("/topic/publish")
+async def publish(payload: dict):
+    client_key = authenticate(payload)
+    if "content" not in payload:
+        get_field(payload, "content", object)
+    return check(await topics.publish(
+        client_key,
+        get_field(payload, "realm_address", str),
+        get_field(payload, "topic", str),
+        payload.get("content"),
+        get_field(payload, "mode", str, required=False, default="fast"),
+    ))
+# endregion topics

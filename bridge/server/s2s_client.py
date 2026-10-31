@@ -46,8 +46,9 @@ def get_pending_secret(peer_url):
     return _pending_secrets.get(peer_url)
 
 
-async def _post(peer_url, path, body, headers=None):
-    async with httpx.AsyncClient(timeout=protocol.s2s_timeout_seconds, verify=protocol.s2s_verify_tls) as client:
+async def _post(peer_url, path, body, headers=None, timeout=None):
+    timeout = timeout or protocol.s2s_timeout_seconds
+    async with httpx.AsyncClient(timeout=timeout, verify=protocol.s2s_verify_tls) as client:
         response = await client.post(peer_url + path, json=body, headers=headers or {})
     try:
         data = response.json()
@@ -118,7 +119,7 @@ async def handshake(peer_url):
 
 
 # region authorized requests
-async def _authorized_post(peer_url, path, body, retry=True):
+async def _authorized_post(peer_url, path, body, retry=True, timeout=None):
     if not trust_store.is_trusted(peer_url):
         errors.handle_error(Exceptions.SERVER_NOT_TRUSTED, f"{peer_url} is not in the trusted list")
         return Exceptions.SERVER_NOT_TRUSTED
@@ -130,7 +131,7 @@ async def _authorized_post(peer_url, path, body, retry=True):
         token = trust_store.get_token(peer_url)
     headers = {HEADER_FROM: url_env.base_root, HEADER_TOKEN: token}
     try:
-        status, data = await _post(peer_url, path, body, headers)
+        status, data = await _post(peer_url, path, body, headers, timeout)
     except httpx.HTTPError as error:
         errors.handle_error(Exceptions.REMOTE_SERVER_ERROR, f"{peer_url}{path}: {error!r}")
         return Exceptions.REMOTE_SERVER_ERROR
@@ -138,7 +139,7 @@ async def _authorized_post(peer_url, path, body, retry=True):
         # The other side lost or changed the token (e.g. restart) - one new handshake, then retry once
         trust_store.set_waiting(peer_url, "token rejected")
         if retry:
-            return await _authorized_post(peer_url, path, body, retry=False)
+            return await _authorized_post(peer_url, path, body, retry=False, timeout=timeout)
         return Exceptions.SERVER_NOT_TRUSTED
     if not isinstance(data, dict) or "ok" not in data:
         errors.handle_error(Exceptions.REMOTE_SERVER_ERROR, f"{peer_url}{path} answered with HTTP {status}")
@@ -160,6 +161,21 @@ async def realm_action(peer_url, caller_ip, realm_address, action, params):
         "action": action,
         "params": params,
     })
+
+async def relay_message(peer_url, message):
+    result = await _authorized_post(peer_url, "/s2s/relay", {"message": message.to_dict()})
+    return True if result is True else result
+
+async def message_status(peer_url, message_id, sender_ip):
+    return await _authorized_post(peer_url, "/s2s/status", {"message_id": message_id, "sender_ip": sender_ip})
+
+BACKUP_TIMEOUT_SECONDS = 60
+
+async def backup_store(peer_url, blob):
+    return await _authorized_post(peer_url, "/s2s/backup/store", {"backup": blob}, timeout=BACKUP_TIMEOUT_SECONDS)
+
+async def backup_fetch(peer_url):
+    return await _authorized_post(peer_url, "/s2s/backup/fetch", {}, timeout=BACKUP_TIMEOUT_SECONDS)
 
 async def realm_code_join(peer_url, caller_ip, code):
     return await _authorized_post(peer_url, "/s2s/realm/code", {"caller_ip": caller_ip, "code": code})

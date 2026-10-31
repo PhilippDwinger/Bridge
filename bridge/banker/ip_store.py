@@ -7,11 +7,19 @@ from bridge.server import url_env
 # client_ip -> client_key
 ip_storage = {}
 
-def get_free_ip(client_key):
+def get_free_ip(client_key, local_id=None):
+    """A new client IP. With local_id (stable identity) the IP is always the same for the same identity."""
     bridge_url = url_env.base_root
     if not bridge_url:
         errors.handle_error(Exceptions.BRIDGE_URL_MISSING, "Cannot create a client IP without the server URL")
         return Exceptions.BRIDGE_URL_MISSING
+    if local_id is not None:
+        client_ip = address.make_address(bridge_url, local_id)
+        if client_ip in ip_storage:
+            errors.handle_error(Exceptions.ALREADY_EXISTS, "This identity is already registered - log in instead")
+            return Exceptions.ALREADY_EXISTS
+        ip_storage[client_ip] = client_key
+        return client_ip
     for _ in range(100):
         client_ip = address.make_address(bridge_url, generate_key(16))
         if client_ip not in ip_storage:

@@ -77,9 +77,11 @@ def receive_filtered(server, token, content_types):
 
 
 def wait_for(server):
-    for _ in range(100):
+    # Ready = the server finished looking for its backup at its trusted servers
+    for _ in range(300):
         try:
-            if httpx.get(server + "/server/status", timeout=1).status_code == 200:
+            response = httpx.get(server + "/server/status", timeout=1)
+            if response.status_code == 200 and response.json().get("ready"):
                 return True
         except httpx.HTTPError:
             pass
@@ -88,12 +90,12 @@ def wait_for(server):
 
 
 def main():
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = dict(os.environ, PYTHONUNBUFFERED="1", BRIDGE_TEST_OVERRIDES='{"backup_restore_wait_seconds": 3}')
     log_a = open(os.path.join(ROOT, "tests", "server_a.log"), "w")
     log_b = open(os.path.join(ROOT, "tests", "server_b.log"), "w")
     # A trusts B from the start, B does not trust A yet
     server_a = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_A), PASSWORD_A, B], cwd=ROOT, stdout=log_a, stderr=log_a, env=env)
-    env_b = dict(env, BRIDGE_TEST_OVERRIDES='{"max_registrations_per_host": 6}')
+    env_b = dict(env, BRIDGE_TEST_OVERRIDES='{"max_registrations_per_host": 6, "backup_restore_wait_seconds": 3}')
     server_b = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_B), PASSWORD_B], cwd=ROOT, stdout=log_b, stderr=log_b, env=env_b)
     try:
         assert wait_for(A) and wait_for(B), "servers did not start"

@@ -8,13 +8,14 @@ class PrivateRealm(Realm):
     """Roles decide everything:
     - access keys and invitation codes give roles when joining
     - a role with can_host_commands lets members host commands
+    - a role with can_publish lets members publish events to topics
     - a command can be limited to allowed_roles (empty = every member)
     The owner can always host and call everything."""
     realm_type = RealmType.PRIVATE
 
     def __init__(self, realm_id, name, owner_ip):
         super().__init__(realm_id, name, owner_ip)
-        # role_name -> {"can_host_commands": bool}
+        # role_name -> {"can_host_commands": bool, "can_publish": bool}
         self.roles = {}
         # access_key -> [role names]
         self.access_keys = {}
@@ -31,6 +32,16 @@ class PrivateRealm(Realm):
             return False
         return True
 
+    def _extra_state(self):
+        return {
+            "roles": {name: dict(entry) for name, entry in self.roles.items()},
+            "access_keys": {key: list(roles) for key, roles in self.access_keys.items()},
+        }
+
+    def _load_extra_state(self, extra):
+        self.roles = {name: dict(entry) for name, entry in extra.get("roles", {}).items()}
+        self.access_keys = {key: list(roles) for key, roles in extra.get("access_keys", {}).items()}
+
     # region join
     def join(self, client_ip, access_key=None, code=None):
         roles = None
@@ -46,7 +57,7 @@ class PrivateRealm(Realm):
     # endregion join
 
     # region owner functions
-    def create_role(self, client_ip, role_name, can_host_commands=False):
+    def create_role(self, client_ip, role_name, can_host_commands=False, can_publish=False):
         if not self.is_owner(client_ip):
             errors.handle_error(Exceptions.NOT_ALLOWED, "Only the owner can create roles")
             return Exceptions.NOT_ALLOWED
@@ -55,7 +66,7 @@ class PrivateRealm(Realm):
         if role_name in self.roles:
             errors.handle_error(Exceptions.ALREADY_EXISTS, f"Role '{role_name}' already exists")
             return Exceptions.ALREADY_EXISTS
-        self.roles[role_name] = {"can_host_commands": bool(can_host_commands)}
+        self.roles[role_name] = {"can_host_commands": bool(can_host_commands), "can_publish": bool(can_publish)}
         return True
 
     def create_access_key(self, client_ip, roles=None, preferred_key=None):
@@ -97,6 +108,14 @@ class PrivateRealm(Realm):
         if member is None:
             return False
         return any(self.roles.get(role, {}).get("can_host_commands") for role in member["roles"])
+
+    def can_publish(self, client_ip):
+        if self.is_owner(client_ip):
+            return True
+        member = self.members.get(client_ip)
+        if member is None:
+            return False
+        return any(self.roles.get(role, {}).get("can_publish") for role in member["roles"])
 
     def can_call(self, client_ip, host_entry):
         if self.is_owner(client_ip):

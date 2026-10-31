@@ -20,9 +20,9 @@ class PublicRealm(Realm):
     def can_call(self, client_ip, host_entry):
         return True
 
-    def create_command(self, client_ip, command_name, allowed_roles=None):
+    def create_command(self, client_ip, command_name, allowed_roles=None, description=None):
         # Hosting makes the client a member, so leaving cleans up its commands
-        result = super().create_command(client_ip, command_name, allowed_roles)
+        result = super().create_command(client_ip, command_name, allowed_roles, description)
         if result is True:
             self.add_member(client_ip)
         return result

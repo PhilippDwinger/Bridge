@@ -118,6 +118,14 @@ class Exceptions:
         hint="url_env.base_root is not set. Create the Bridge object (it sets the public URL) before creating clients."
     )
 
+    SERVER_STARTING = ExceptionInfo(
+        name="Server Starting",
+        type="warning",
+        status_code=503,
+        default_message="The server is starting and restores its data. Try again in a few seconds.",
+        hint="After a start the server waits up to protocol.backup_restore_wait_seconds for its trusted servers to restore its backup."
+    )
+
     BRIDGE_PASSWORD_MISSING = ExceptionInfo(
         name="Bridge Password Missing",
         type="warning",
@@ -176,6 +184,14 @@ class Exceptions:
         status_code=404,
         default_message="The recipient does not exist on its Bridge server.",
         hint="Check the recipient IP. The part before <|BRIDGE_IP_SPLIT|> must be the URL of the recipient's server."
+    )
+
+    RECIPIENT_REJECTED = ExceptionInfo(
+        name="Recipient Rejected",
+        type="warning",
+        status_code=403,
+        default_message="The recipient does not accept direct messages from you.",
+        hint="The recipient uses the direct message mode 'nobody' or 'allowlist', or blocked the sender."
     )
 
     MESSAGE_TOO_LARGE = ExceptionInfo(

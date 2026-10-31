@@ -23,12 +23,17 @@ async def register(payload: dict, request: Request):
         fail(Exceptions.TOO_MANY_ATTEMPTS, f"Too many registrations from {remote_host(request)}")
     if not clients.has_capacity():
         raise errors.http_exception(Exceptions.SERVER_FULL)
+    if payload.get("identity_secret") is not None:
+        check(clients.identity_local_id(get_field(payload, "identity_secret", str)))
     # Hashing is slow on purpose - run it outside the event loop
     hashed_password = await run_in_threadpool(hash_password, password)
     if hashed_password is None:
         fail(Exceptions.ARGUMENT_ERROR, "Password must not be empty")
-    client_ip = check(clients.create_client(name, hashed_password))
-    return {"client_ip": client_ip}
+    # Identity modes: without identity_secret the IP is random; with it (32+ characters, keep it secret!)
+    # the IP is always the same - also after a server restart.
+    identity_secret = get_field(payload, "identity_secret", str, required=False)
+    client_ip = check(clients.create_client(name, hashed_password, identity_secret))
+    return {"client_ip": client_ip, "stable_identity": identity_secret is not None}
 
 
 @Router.post("/login")
@@ -66,3 +71,15 @@ async def logout(payload: dict):
 async def me(payload: dict):
     client_key = authenticate(payload)
     return check(clients.get_client_info(client_key))
+
+
+@Router.post("/direct")
+async def direct_settings(payload: dict):
+    # Who may send me direct messages. mode: everyone | allowlist | nobody; allow/block: client IPs or server URLs
+    client_key = authenticate(payload)
+    return check(clients.set_direct_policy(
+        client_key,
+        mode=get_field(payload, "mode", str, required=False),
+        allow=get_field(payload, "allow", list, required=False),
+        block=get_field(payload, "block", list, required=False),
+    ))

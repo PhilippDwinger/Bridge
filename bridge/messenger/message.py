@@ -25,6 +25,8 @@ class ContentType(StrEnum):
     RESPONSE = "response"
     # Verified: reserved for the server itself
     INSTRUCTION = "instruction"
+    # Verified: published to a topic of a realm by an allowed member, delivered to all subscribers
+    EVENT = "event"
     # NOT verified: any client can send a direct message to any client. The receiver decides what to trust.
     DIRECT = "direct"
 
@@ -34,9 +36,11 @@ POOL_BY_CONTENT_TYPE = {
     ContentType.RESPONSE: PoolName.RESPONSE,
     ContentType.INSTRUCTION: PoolName.INSTRUCTION,
     ContentType.DIRECT: PoolName.DIRECT,
+    ContentType.EVENT: PoolName.EVENT,
 }
 
-VERIFIED_CONTENT_TYPES = (ContentType.TASK, ContentType.RESPONSE, ContentType.INSTRUCTION)
+VERIFIED_CONTENT_TYPES = (ContentType.TASK, ContentType.RESPONSE, ContentType.INSTRUCTION, ContentType.EVENT)
+MAX_RELAY_HOPS = 1
 
 MAX_ID_LENGTH = 128
 
@@ -59,6 +63,7 @@ class Message:
             created_at = None,
             expires_at = None,
             protocol_version = None,
+            relayed_via = None,
     ):
         # Use create_message() / message_from_dict() - they validate the input before calling this
         now = _now()
@@ -76,6 +81,8 @@ class Message:
         self.created_at = created_at or now
         self.expires_at = expires_at or now + datetime.timedelta(minutes=protocol.message_lifetime_minutes)
         self.protocol_version = protocol_version or protocol.current_protocol.version
+        # Servers that passed this message on (only direct messages can be relayed)
+        self.relayed_via = list(relayed_via or [])
         self._chunks = None
 
     def __str__(self):
@@ -117,6 +124,7 @@ class Message:
             "created_at": self.created_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
             "protocol_version": self.protocol_version,
+            "relayed_via": list(self.relayed_via),
         }
         if self.mode == MessageMode.SAFE:
             data["chunk_count"] = len(self.get_chunks())
@@ -220,6 +228,11 @@ def message_from_dict(data):
     message_id = data.get("message_id")
     if message_id is None or not _valid_optional_id(message_id, "message_id"):
         return Exceptions.ARGUMENT_ERROR
+    relayed_via = data.get("relayed_via") or []
+    if (not isinstance(relayed_via, list) or len(relayed_via) > MAX_RELAY_HOPS
+            or any(address.normalize_url(url) != url for url in relayed_via)):
+        errors.handle_error(Exceptions.CLIENT_PAYLOAD_ERROR, "Invalid relayed_via")
+        return Exceptions.CLIENT_PAYLOAD_ERROR
     problem = _check_common(
         data.get("sender_ip"), data.get("recipient_ip"), payload, mode,
         data.get("conversation_id"), data.get("causation_id"),
@@ -252,6 +265,7 @@ def message_from_dict(data):
         created_at=created_at,
         expires_at=expires_at,
         protocol_version=str(data.get("protocol_version") or protocol.current_protocol.version),
+        relayed_via=relayed_via,
     )
     if data.get("sha256") != message.sha256:
         errors.handle_error(Exceptions.HASH_MISMATCH, "Forwarded message was changed on the way (hash differs)")

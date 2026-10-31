@@ -11,18 +11,21 @@ class PoolName(StrEnum):
     TASK = "task_pool"
     INSTRUCTION = "instruction_pool"
     RESPONSE = "response_pool"
+    # Events of topics the client subscribed to
+    EVENT = "event_pool"
     # Direct messages from any client. Not verified by a realm - the client decides what to do with them.
     DIRECT = "direct_pool"
 
 
 class Mailbox:
     # Highest priority first
-    POLL_ORDER = (PoolName.INSTRUCTION, PoolName.RESPONSE, PoolName.TASK, PoolName.DIRECT)
+    POLL_ORDER = (PoolName.INSTRUCTION, PoolName.RESPONSE, PoolName.TASK, PoolName.EVENT, PoolName.DIRECT)
     # How much one waiting or pending message of a pool counts towards the busy points
     BUSY_WEIGHTS = {
         PoolName.TASK: 1,
         PoolName.INSTRUCTION: 2,
         PoolName.RESPONSE: 0,
+        PoolName.EVENT: 0,
         PoolName.DIRECT: 0,
     }
     MAX_MESSAGES_PER_POOL = 1000
@@ -34,6 +37,7 @@ class Mailbox:
         self.task_pool = []
         self.instruction_pool = []
         self.response_pool = []
+        self.event_pool = []
         self.direct_pool = []
         self.pending_messages = {}
     def __str__(self):
@@ -49,6 +53,8 @@ class Mailbox:
             return self.instruction_pool
         if pool_name == PoolName.RESPONSE:
             return self.response_pool
+        if pool_name == PoolName.EVENT:
+            return self.event_pool
         if pool_name == PoolName.DIRECT:
             return self.direct_pool
         return None
@@ -107,6 +113,13 @@ class Mailbox:
                 if result and current_message_id == message_id:
                     return self._take_from_pool(pool_name, index)
         return None, None
+
+    def take_response(self, task_id):
+        """Takes the response to a task directly (used when a caller waits for the answer of its call)."""
+        for index, message in enumerate(self.response_pool):
+            if getattr(message, "causation_id", None) == task_id:
+                return self.response_pool.pop(index)
+        return None
 
     def poll_most_overdue(self, pool_names=None):
         """Takes the next message by priority. pool_names limits polling to some pools (e.g. only DIRECT)."""
@@ -196,6 +209,35 @@ class Mailbox:
             errors.debug_print(f"Requeued {len(expired_pending_ids)} expired pending message(s)")
         return len(expired_pending_ids)
     # endregion pending
+
+    # region admin view
+    @staticmethod
+    def _describe(message, preview_chars):
+        data = message.metadata() if hasattr(message, "metadata") else {"message": str(message)}
+        payload = getattr(message, "payload", None)
+        if isinstance(payload, str):
+            data["preview"] = payload[:preview_chars] + ("..." if len(payload) > preview_chars else "")
+        return data
+
+    def snapshot(self, preview_chars=300):
+        """Read-only view of everything waiting in this mailbox (for admins / the tester). Takes nothing out."""
+        return {
+            "pools": {
+                str(pool_name): [self._describe(message, preview_chars) for message in self._get_pool(pool_name)]
+                for pool_name in self.POLL_ORDER
+            },
+            "pending": [
+                {
+                    "pool": str(entry["pool_name"]),
+                    "pending_since": entry["pending_since"].isoformat(),
+                    "expires_at": entry["expires_at"].isoformat(),
+                    "message": self._describe(entry["message"], preview_chars),
+                }
+                for entry in self.pending_messages.values()
+            ],
+            "busy_points": self.get_busy_points(),
+        }
+    # endregion admin view
 
     # region load
     def get_busy_points(self):
