@@ -11,24 +11,30 @@ class PoolName(StrEnum):
     TASK = "task_pool"
     INSTRUCTION = "instruction_pool"
     RESPONSE = "response_pool"
+    # Direct messages from any client. Not verified by a realm - the client decides what to do with them.
+    DIRECT = "direct_pool"
 
 
 class Mailbox:
     # Highest priority first
-    POLL_ORDER = (PoolName.INSTRUCTION, PoolName.RESPONSE, PoolName.TASK)
+    POLL_ORDER = (PoolName.INSTRUCTION, PoolName.RESPONSE, PoolName.TASK, PoolName.DIRECT)
     # How much one waiting or pending message of a pool counts towards the busy points
     BUSY_WEIGHTS = {
         PoolName.TASK: 1,
         PoolName.INSTRUCTION: 2,
         PoolName.RESPONSE: 0,
+        PoolName.DIRECT: 0,
     }
     MAX_MESSAGES_PER_POOL = 1000
+    # One sender cannot fill the direct pool of somebody else on its own
+    MAX_DIRECT_MESSAGES_PER_SENDER = 100
     PENDING_TIMEOUT_MINUTES = 15
 
     def __init__(self):
         self.task_pool = []
         self.instruction_pool = []
         self.response_pool = []
+        self.direct_pool = []
         self.pending_messages = {}
     def __str__(self):
         return str(self.__dict__)
@@ -43,6 +49,8 @@ class Mailbox:
             return self.instruction_pool
         if pool_name == PoolName.RESPONSE:
             return self.response_pool
+        if pool_name == PoolName.DIRECT:
+            return self.direct_pool
         return None
 
     def _insert_into_pool(self, message, pool_name, front=False, ignore_limit=False):
@@ -56,6 +64,15 @@ class Mailbox:
                 f"{pool_name} is full ({len(pool)}/{self.MAX_MESSAGES_PER_POOL} messages)"
             )
             return Exceptions.MAILBOX_FULL
+        if not ignore_limit and pool_name == PoolName.DIRECT:
+            sender_ip = getattr(message, "sender_ip", None)
+            from_sender = sum(1 for waiting in pool if getattr(waiting, "sender_ip", None) == sender_ip)
+            if from_sender >= self.MAX_DIRECT_MESSAGES_PER_SENDER:
+                errors.handle_error(
+                    Exceptions.MAILBOX_FULL,
+                    f"{from_sender} direct messages from the same sender are already waiting"
+                )
+                return Exceptions.MAILBOX_FULL
         if front:
             pool.insert(0, message)
         else:
@@ -91,9 +108,12 @@ class Mailbox:
                     return self._take_from_pool(pool_name, index)
         return None, None
 
-    def poll_most_overdue(self):
+    def poll_most_overdue(self, pool_names=None):
+        """Takes the next message by priority. pool_names limits polling to some pools (e.g. only DIRECT)."""
         self.requeue_expired_pending()
         for pool_name in self.POLL_ORDER:
+            if pool_names is not None and pool_name not in pool_names:
+                continue
             if len(self._get_pool(pool_name)) > 0:
                 return self._take_from_pool(pool_name, 0)
         return None, None

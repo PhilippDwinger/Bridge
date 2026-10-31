@@ -19,17 +19,24 @@ class MessageMode(StrEnum):
 
 
 class ContentType(StrEnum):
+    # Verified: only created by Bridge itself after a realm check (command call)
     TASK = "task"
+    # Verified: only the host that received the task can answer it, and only to the caller
     RESPONSE = "response"
-    # Reserved for the server itself - clients cannot send instructions
+    # Verified: reserved for the server itself
     INSTRUCTION = "instruction"
+    # NOT verified: any client can send a direct message to any client. The receiver decides what to trust.
+    DIRECT = "direct"
 
 
 POOL_BY_CONTENT_TYPE = {
     ContentType.TASK: PoolName.TASK,
     ContentType.RESPONSE: PoolName.RESPONSE,
     ContentType.INSTRUCTION: PoolName.INSTRUCTION,
+    ContentType.DIRECT: PoolName.DIRECT,
 }
+
+VERIFIED_CONTENT_TYPES = (ContentType.TASK, ContentType.RESPONSE, ContentType.INSTRUCTION)
 
 MAX_ID_LENGTH = 128
 
@@ -44,7 +51,7 @@ class Message:
             sender_ip,
             recipient_ip,
             payload : str,
-            content_type = ContentType.TASK,
+            content_type = ContentType.DIRECT,
             mode = MessageMode.SAFE,
             conversation_id = None,
             causation_id = None,
@@ -80,6 +87,10 @@ class Message:
     def pool_name(self):
         return POOL_BY_CONTENT_TYPE[self.content_type]
 
+    @property
+    def verified(self):
+        return self.content_type in VERIFIED_CONTENT_TYPES
+
     def is_expired(self):
         return _now() >= self.expires_at
 
@@ -99,6 +110,7 @@ class Message:
             "sender_ip": self.sender_ip,
             "recipient_ip": self.recipient_ip,
             "content_type": str(self.content_type),
+            "verified": self.verified,
             "mode": str(self.mode),
             "size_bytes": self.size_bytes,
             "sha256": self.sha256,
@@ -114,6 +126,7 @@ class Message:
         # Full message incl. payload - used to forward a message to another Bridge server
         data = self.metadata()
         data.pop("chunk_count", None)
+        data.pop("verified", None)
         data["payload"] = self.payload
         return data
 
@@ -168,7 +181,7 @@ def _check_common(sender_ip, recipient_ip, payload, mode, conversation_id, causa
 # endregion validation helpers
 
 
-def create_message(sender_ip, recipient_ip, content, content_type=ContentType.TASK, mode=MessageMode.SAFE,
+def create_message(sender_ip, recipient_ip, content, content_type=ContentType.DIRECT, mode=MessageMode.SAFE,
                    conversation_id=None, causation_id=None):
     content_type = _parse_enum(ContentType, content_type, "content_type")
     mode = _parse_enum(MessageMode, mode, "mode")

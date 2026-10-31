@@ -3,7 +3,8 @@ import datetime
 from fastapi import APIRouter, Request
 from starlette.concurrency import run_in_threadpool
 
-from bridge.core import clients
+from bridge import errors
+from bridge.core import clients, protocol
 from bridge.errors.exceptions import Exceptions
 from bridge.security import authorizer
 from bridge.security.hasher import hash_password, verify_password
@@ -13,9 +14,15 @@ Router = APIRouter(prefix="/client")
 
 
 @Router.post("/register")
-async def register(payload: dict):
+async def register(payload: dict, request: Request):
     name = get_field(payload, "name", str, required=False, default=clients.DEFAULT_NAME)
     password = get_field(payload, "password", str)
+    # Checked before the slow hashing, so floods are cheap to reject
+    if not authorizer.allow_event(f"register:{remote_host(request)}", protocol.max_registrations_per_host,
+                                  protocol.registration_window_minutes):
+        fail(Exceptions.TOO_MANY_ATTEMPTS, f"Too many registrations from {remote_host(request)}")
+    if not clients.has_capacity():
+        raise errors.http_exception(Exceptions.SERVER_FULL)
     # Hashing is slow on purpose - run it outside the event loop
     hashed_password = await run_in_threadpool(hash_password, password)
     if hashed_password is None:

@@ -4,7 +4,7 @@ from bridge import errors
 from bridge.errors import Exceptions
 from bridge.errors.exceptions import is_exception
 from bridge.core import address, protocol
-from bridge.banker import client_key_store, ip_store, mailbox_store, realm_store, session_store, trust_store
+from bridge.banker import client_key_store, ip_store, mailbox_store, realm_store, session_store, task_store, trust_store
 from bridge.security import authorizer
 from bridge.security.hasher import hash_password, verify_password
 from bridge.server import runtime, s2s_client, url_env
@@ -154,6 +154,7 @@ class Bridge:
         ip_store.reset()
         client_key_store.reset()
         realm_store.reset()
+        task_store.reset()
         authorizer.reset()
         realm_service.create_default_public_realm()
         errors.debug_print("Bridge was reset")
@@ -176,7 +177,9 @@ class Bridge:
             "uptime_seconds": int((now - self._metadata["initialization_time"]).total_seconds()),
             "clients": len(client_key_store.client_key_storage),
             "sessions": len(session_store.session_storage),
+            "max_clients": protocol.max_clients,
             "realms": len(realm_store.realm_storage),
+            "open_tasks": len(task_store.incoming_tasks),
             "public_realm_address": realm_service.get_public_realm_address(),
             "trusted_servers": trust_store.list_servers(),
             "errors": {error.name: entry["amount"] for error, entry in errors.tracker.get_errors().items()},
@@ -197,6 +200,9 @@ class Bridge:
             "session_storage": session_store.session_storage,
             "mailbox_storage": mailbox_store.mailbox_storage,
             "realm_storage": realm_store.realm_storage,
+            "realm_codes": realm_store.realm_codes,
+            "outgoing_tasks": task_store.outgoing_tasks,
+            "incoming_tasks": task_store.incoming_tasks,
             "trusted_servers": trust_store.list_servers(),
         }
     # endregion control

@@ -3,7 +3,7 @@ from bridge.banker import mailbox_store
 from bridge.core import clients
 from bridge.errors.exceptions import Exceptions, is_exception
 from bridge.messenger import router
-from bridge.messenger.message import ContentType, MessageMode, create_message
+from bridge.messenger.message import POOL_BY_CONTENT_TYPE, ContentType, MessageMode, create_message
 from bridge.security.hasher import secrets_equal
 
 # Message flow for a recipient:
@@ -22,16 +22,13 @@ def _get_mailbox(client_key):
     return mailbox
 
 
-async def send(client_key, recipient_ip, content, content_type=ContentType.TASK, mode=MessageMode.SAFE,
-               conversation_id=None, causation_id=None):
+async def send_direct(client_key, recipient_ip, content, mode=MessageMode.SAFE, conversation_id=None, causation_id=None):
+    """A direct message from one client to any other client (on any trusted server). Not verified."""
     sender_ip = clients.get_client_ip(client_key)
     if sender_ip is None:
         errors.handle_error(Exceptions.CLIENT_NOT_FOUND)
         return Exceptions.CLIENT_NOT_FOUND
-    if content_type == ContentType.INSTRUCTION:
-        errors.handle_error(Exceptions.NOT_ALLOWED, "Clients cannot send instructions")
-        return Exceptions.NOT_ALLOWED
-    message = create_message(sender_ip, recipient_ip, content, content_type, mode, conversation_id, causation_id)
+    message = create_message(sender_ip, recipient_ip, content, ContentType.DIRECT, mode, conversation_id, causation_id)
     if is_exception(message):
         return message
     result = await router.deliver(message)
@@ -40,12 +37,33 @@ async def send(client_key, recipient_ip, content, content_type=ContentType.TASK,
     return message
 
 
-def poll(client_key):
+def parse_content_types(content_types):
+    """Turns ["direct", "task", ...] from a client into pool names. None means all pools."""
+    if content_types is None:
+        return None
+    if not isinstance(content_types, list) or not content_types:
+        errors.handle_error(Exceptions.ARGUMENT_ERROR, "'content_types' must be a non-empty list")
+        return Exceptions.ARGUMENT_ERROR
+    pool_names = []
+    for content_type in content_types:
+        try:
+            pool_names.append(POOL_BY_CONTENT_TYPE[ContentType(content_type)])
+        except (ValueError, KeyError):
+            allowed = ", ".join(item.value for item in ContentType)
+            errors.handle_error(Exceptions.ARGUMENT_ERROR, f"Unknown content type {content_type!r} (allowed: {allowed})")
+            return Exceptions.ARGUMENT_ERROR
+    return pool_names
+
+
+def poll(client_key, content_types=None):
     mailbox = _get_mailbox(client_key)
     if is_exception(mailbox):
         return mailbox
+    pool_names = parse_content_types(content_types)
+    if is_exception(pool_names):
+        return pool_names
     while True:
-        message, pending_id = mailbox.poll_most_overdue()
+        message, pending_id = mailbox.poll_most_overdue(pool_names)
         if message is None:
             return {"message": None}
         if message.is_expired():

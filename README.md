@@ -56,22 +56,44 @@ Errors come back with an HTTP status and:
 | `/client/logout` | `session_token` | |
 | `/client/me` | `session_token` | `client_ip`, `name`, `realms` |
 
-Sessions last 60 minutes. After 5 failed logins the caller is locked for 5 minutes.
+Limits:
+
+- **Sessions:** last 60 minutes.
+- **Login:** after 5 failed logins the caller is locked for 5 minutes.
+- **Per server:** max 10 000 clients. When the server is full, clients without any request for 7 days are removed to make room.
+- **Per caller address:** max 30 registrations per hour.
+
+## Message types
+
+| Type | Who creates it | Verified |
+|---|---|---|
+| `direct` | any client, to any client (also on other trusted servers) | **no** – the receiver decides what to trust |
+| `task` | only Bridge, after the realm allowed a command call | yes |
+| `response` | only the host that received the task, only to the caller, only once | yes |
+| `instruction` | only the server itself | yes |
+
+Every message has `"verified": true/false` in its metadata. The `sender_ip` is always set by the sender's home
+server, so it cannot be faked. The content of a direct message can be anything.
+
+Each type has its own pool in the mailbox. Poll order: instruction > response > task > direct.
 
 ## Messages
 
-`/message/send` takes `recipient_ip` and `content` (any JSON). Optional fields:
+`/message/send` sends a **direct** message. It takes `recipient_ip` and `content` (any JSON). Optional fields:
 
 - `mode`: `"safe"` (default) or `"fast"`
-- `content_type`: `"task"` (default) or `"response"`
 - `conversation_id` and `causation_id`
 
-It answers with `message_id` and `conversation_id`. The recipient can be on another trusted server.
+It answers with `message_id` and `conversation_id`. Bridge finds the recipient by its IP, also on other trusted servers.
+One sender can have at most 100 direct messages waiting in the same mailbox.
 
 | Mode | How it works |
 |---|---|
 | **fast** | Max 64 KiB. `/message/poll` returns the whole `content` and the message is deleted right away. No hash, no retry. |
 | **safe** | Max 1 MiB. `/message/poll` returns `pending_id` and metadata (`sha256`, `chunk_count`). The message is only deleted after the hash was confirmed. |
+
+`/message/poll` takes the optional field `content_types`, e.g. `["direct"]` or `["task", "response"]`, to poll only
+some pools.
 
 ### Receiving a safe message
 
@@ -81,10 +103,7 @@ It answers with `message_id` and `conversation_id`. The recipient can be on anot
 4. `/message/complete` with `pending_id` and `sha256`. If the hash is right, the message is deleted. If not, you get `HASH_MISMATCH` and the message stays.
 5. `/message/cancel` with `pending_id` puts the message back into the mailbox. Without complete or cancel, it goes back by itself after 15 minutes.
 
-Poll order: instruction > response > task. Messages expire after 10 minutes. Clients cannot send instructions.
-
-To answer, send a message with `content_type: "response"` to the sender. Use `causation_id` = the id of the
-message you are answering and the same `conversation_id`.
+Messages expire after 10 minutes if nobody polls them.
 
 ## Realms
 
@@ -97,16 +116,23 @@ your own server.
 | protected | access key or invitation code | members (only the owner if `restricted_to_owner`) | members |
 | private | access key or code, both give roles | owner + roles with `can_host_commands` | owner + members with one of `allowed_roles` (empty = all members) |
 
+### Invitation codes
+
+- **Format:** 8 characters, easy to type, e.g. `K7M3XQ9P`. Codes are generated without 0/O and 1/I/L. Upper/lower case and a dash (`k7m3-xq9p`) don't matter.
+- **Scope:** a code is unique on its server, so joining needs **only the code**. Add `server_url` if the realm is on another server.
+- **Lifetime:** default 60 minutes, max 30 days. The owner can limit the uses with `max_uses` and choose an own code with `preferred_code` (8 letters/digits).
+- **Brute force protection:** after 5 wrong codes/access keys a client is locked for 5 minutes. After 50 wrong ones from all clients of one other server, that whole server is locked.
+
 | Endpoint | Body (besides `session_token`) |
 |---|---|
 | `GET /realm/public` | – (public realm of this server) |
 | `/realm/create` | `realm_type`, `realm_name`, optional: `access_key` and `restricted_to_owner` (protected) |
-| `/realm/join` | `realm_address`, `access_key` or `code` |
+| `/realm/join` | `realm_address` + `access_key` **or** just `code` (+ `server_url`) |
 | `/realm/leave` | `realm_address` |
 | `/realm/info` | `realm_address` |
 | `/realm/kick` | `realm_address`, `member_ip` (owner) |
 | `/realm/transfer` | `realm_address`, `new_owner_ip` (owner) |
-| `/realm/code/create` | `realm_address`, `expires_in_minutes`, optional: `roles`, `preferred_code` (owner) |
+| `/realm/code/create` | `realm_address`, optional: `expires_in_minutes`, `max_uses`, `roles`, `preferred_code` (owner) |
 | `/realm/command/create` | `realm_address`, `command_name`, optional: `allowed_roles` |
 | `/realm/command/remove` | `realm_address`, `command_name` |
 | `/realm/role/create` | `realm_address`, `role_name`, optional: `can_host_commands` (private, owner) |
@@ -115,19 +141,22 @@ your own server.
 
 ## Commands
 
-`/command/call` takes `command_name`. Optional fields:
+1. **Call:** `/command/call` takes `command_name`. Optional fields:
+   - `command_args`
+   - `realm_address` (without it, Bridge searches the public realm and every realm you are in)
+   - `mode`
 
-- `command_args`
-- `realm_address` (without it, Bridge searches the public realm and every realm you are in)
-- `mode`
+   Bridge picks the least busy host and sends it a `task` message with this content:
 
-Bridge picks the least busy host and sends it a `task` message with this content:
+   ```json
+   {"command_name": "add", "command_args": [2, 3], "realm_address": "..."}
+   ```
 
-```json
-{"command_name": "add", "command_args": [2, 3], "realm_address": "..."}
-```
-
-The host answers with a normal `response` message. The call returns `message_id` and `host_ip`.
+   The call returns `task_id` and `host_ip`.
+2. **Answer:** the host answers with `/command/respond` and the fields `task_id`, `content` and optionally `mode`. The caller gets a `response` message with `causation_id` = `task_id`. A task can be answered once, within 60 minutes.
+3. **Checks:**
+   - If the task comes from another server, the host's server checks the realm again before it delivers the task.
+   - The caller's server only accepts a response for a task it really sent.
 
 ## Connecting Bridge servers
 

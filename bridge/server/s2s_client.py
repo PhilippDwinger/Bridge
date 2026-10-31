@@ -161,6 +161,9 @@ async def realm_action(peer_url, caller_ip, realm_address, action, params):
         "params": params,
     })
 
+async def realm_code_join(peer_url, caller_ip, code):
+    return await _authorized_post(peer_url, "/s2s/realm/code", {"caller_ip": caller_ip, "code": code})
+
 async def busy_points(peer_url, client_ips):
     return await _authorized_post(peer_url, "/s2s/busy", {"client_ips": client_ips})
 

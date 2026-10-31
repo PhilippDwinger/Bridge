@@ -1,5 +1,8 @@
+import datetime
+
 from bridge import errors
 from bridge.banker import client_key_store, ip_store, mailbox_store, session_store
+from bridge.core import protocol
 from bridge.errors.exceptions import Exceptions, is_exception
 from bridge.messenger.mailbox import Mailbox
 from bridge.security.hasher import hash_password
@@ -12,6 +15,25 @@ MAX_NAME_LENGTH = 64
 DEFAULT_NAME = "Unnamed Client"
 
 # region registration
+def remove_inactive_clients():
+    """Removes clients without any request for protocol.inactive_client_days. Returns how many were removed."""
+    limit = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=protocol.inactive_client_days)
+    inactive_keys = [key for key, entry in client_key_store.client_key_storage.items() if entry["last_signal"] < limit]
+    for client_key in inactive_keys:
+        delete_client(client_key)
+    if inactive_keys:
+        errors.debug_print(f"Removed {len(inactive_keys)} inactive clients to make room")
+    return len(inactive_keys)
+
+def has_capacity():
+    if len(client_key_store.client_key_storage) < protocol.max_clients:
+        return True
+    remove_inactive_clients()
+    if len(client_key_store.client_key_storage) < protocol.max_clients:
+        return True
+    errors.handle_error(Exceptions.SERVER_FULL, f"{protocol.max_clients} clients registered")
+    return False
+
 def create_client(name, hashed_password):
     """Creates a client from an already hashed password. Returns the client IP."""
     if not hashed_password or not isinstance(hashed_password, str):
@@ -23,6 +45,8 @@ def create_client(name, hashed_password):
     if len(name) > MAX_NAME_LENGTH:
         errors.handle_error(Exceptions.ARGUMENT_ERROR, f"Client name is longer than {MAX_NAME_LENGTH} characters")
         return Exceptions.ARGUMENT_ERROR
+    if not has_capacity():
+        return Exceptions.SERVER_FULL
 
     client_key = client_key_store.generate_client_key(hashed_password)
     if is_exception(client_key):

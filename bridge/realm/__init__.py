@@ -2,9 +2,9 @@ import datetime
 from enum import StrEnum
 
 from bridge import errors
-from bridge.core import address
+from bridge.banker import realm_store
+from bridge.core import address, protocol
 from bridge.errors.exceptions import Exceptions
-from bridge.security.generator import get_free_key_in_dict
 from bridge.server import url_env
 
 # Members are identified by their client IP (not the client key), because members can live on other servers.
@@ -12,6 +12,7 @@ from bridge.server import url_env
 MAX_NAME_LENGTH = 64
 MAX_KEY_LENGTH = 128
 MAX_CODE_MINUTES = 60 * 24 * 30
+MAX_CODE_USES = 100_000
 
 
 class RealmType(StrEnum):
@@ -49,8 +50,7 @@ class Realm:
         self.members = {}
         # command_name -> {host_ip: {"allowed_roles": [role names]}}
         self.commands = {}
-        # invitation code -> {"roles": [role names], "expires_at": datetime}
-        self.codes = {}
+        # Invitation codes are stored per server in realm_store.realm_codes
         if owner_ip:
             self.add_member(owner_ip)
 
@@ -121,14 +121,8 @@ class Realm:
 
     # region codes
     def _take_code(self, code):
-        """Returns the roles of a valid code (codes can be used multiple times until they expire)."""
-        now = _now()
-        for expired_code in [c for c, entry in self.codes.items() if entry["expires_at"] <= now]:
-            del self.codes[expired_code]
-        if not isinstance(code, str):
-            return None
-        entry = self.codes.get(code)
-        return list(entry["roles"]) if entry else None
+        """Uses an invitation code of this realm and returns its roles (None if the code is not valid)."""
+        return realm_store.use_code(code, self.realm_id)
 
     def _validate_roles(self, roles):
         # Overwritten by PrivateRealm. Other realms have no roles.
@@ -137,26 +131,36 @@ class Realm:
             return False
         return True
 
-    def create_code(self, client_ip, expires_in_minutes, roles=None, preferred_code=None):
+    def create_code(self, client_ip, expires_in_minutes=None, roles=None, preferred_code=None, max_uses=None):
+        """Creates an 8 character invitation code (unique on this server, easy to type, e.g. 'K7M3XQ9P')."""
         if not self.is_owner(client_ip):
             errors.handle_error(Exceptions.NOT_ALLOWED, "Only the owner can create invitation codes")
             return Exceptions.NOT_ALLOWED
+        if expires_in_minutes is None:
+            expires_in_minutes = protocol.default_code_minutes
         if not _valid_minutes(expires_in_minutes) or not self._validate_roles(roles):
             return Exceptions.ARGUMENT_ERROR
+        if max_uses is not None and (isinstance(max_uses, bool) or not isinstance(max_uses, int) or not 0 < max_uses <= MAX_CODE_USES):
+            errors.handle_error(Exceptions.ARGUMENT_ERROR, f"'max_uses' must be a whole number between 1 and {MAX_CODE_USES}")
+            return Exceptions.ARGUMENT_ERROR
         if preferred_code is not None:
-            if not _valid_name(preferred_code, "preferred_code", MAX_KEY_LENGTH):
+            code = realm_store.normalize_code(preferred_code)
+            if code is None:
+                errors.handle_error(
+                    Exceptions.ARGUMENT_ERROR,
+                    f"'preferred_code' must be {protocol.code_length} letters/digits (A-Z, 0-9)"
+                )
                 return Exceptions.ARGUMENT_ERROR
-            self._take_code(None)  # cleans up expired codes
-            if preferred_code in self.codes:
-                errors.handle_error(Exceptions.ALREADY_EXISTS, "This code is already in use")
+            if realm_store.get_code(code) is not None:
+                errors.handle_error(Exceptions.ALREADY_EXISTS, "This code is already in use on this server")
                 return Exceptions.ALREADY_EXISTS
-            code = preferred_code
         else:
-            code = get_free_key_in_dict(self.codes, n_bytes=6)
-        self.codes[code] = {
-            "roles": list(roles or []),
-            "expires_at": _now() + datetime.timedelta(minutes=expires_in_minutes),
-        }
+            code = realm_store.generate_code()
+            if code is None:
+                errors.handle_error(Exceptions.FAILED, "No free invitation code could be generated")
+                return Exceptions.FAILED
+        expires_at = _now() + datetime.timedelta(minutes=expires_in_minutes)
+        realm_store.add_code(code, self.realm_id, roles, expires_at, max_uses)
         return code
     # endregion codes
 
@@ -227,6 +231,14 @@ class Realm:
             data["my_roles"] = list(self.members[client_ip]["roles"])
         if self.is_owner(client_ip):
             data["members"] = {ip: list(entry["roles"]) for ip, entry in self.members.items()}
-            data["codes"] = {code: entry["expires_at"].isoformat() for code, entry in self.codes.items()}
+            data["codes"] = {
+                code: {
+                    "expires_at": entry["expires_at"].isoformat(),
+                    "roles": list(entry["roles"]),
+                    "uses": entry["uses"],
+                    "max_uses": entry["max_uses"],
+                }
+                for code, entry in realm_store.get_codes_of_realm(self.realm_id).items()
+            }
         return data
     # endregion info

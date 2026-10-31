@@ -124,6 +124,12 @@ async def receive_message(payload: dict, request: Request):
     if message.content_type == ContentType.INSTRUCTION:
         errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} tried to send an instruction")
         return _error(Exceptions.NOT_ALLOWED)
+    if message.content_type == ContentType.TASK:
+        # Check the realm again instead of only trusting the other server
+        verified = await commands.verify_remote_task(message, peer_url)
+        if is_exception(verified):
+            return _error(verified)
+    # Responses are checked in router.deliver_local against the task we sent
     return _answer(await router.deliver(message, from_server=peer_url))
 
 
@@ -139,6 +145,18 @@ async def realm_action(payload: dict, request: Request):
     return _answer(realm_service.execute_local(
         caller_ip, payload.get("realm_address"), payload.get("action"), payload.get("params"),
     ))
+
+
+@Router.post("/realm/code")
+async def realm_code_join(payload: dict, request: Request):
+    peer_url = _authenticate_server(request)
+    if peer_url is None:
+        return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
+    caller_ip = payload.get("caller_ip")
+    if address.server_of(caller_ip) != peer_url:
+        errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} acted for a client of another server")
+        return _error(Exceptions.NOT_ALLOWED)
+    return _answer(realm_service.join_by_code_local(caller_ip, payload.get("code")))
 
 
 @Router.post("/busy")

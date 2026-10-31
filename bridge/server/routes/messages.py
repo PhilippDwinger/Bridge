@@ -2,21 +2,25 @@ from fastapi import APIRouter
 
 from bridge.messenger import service as messenger_service
 from bridge.messenger.message import ContentType, MessageMode
-from bridge.server.routes._helpers import authenticate, check, get_field
+from bridge.errors.exceptions import Exceptions
+from bridge.server.routes._helpers import authenticate, check, fail, get_field
 
 Router = APIRouter(prefix="/message")
 
 
 @Router.post("/send")
 async def send(payload: dict):
+    # Direct message to any client on any trusted server. Tasks and responses go through /command/...
     client_key = authenticate(payload)
     if "content" not in payload:
         get_field(payload, "content", object)  # reports the missing field
-    message = check(await messenger_service.send(
+    content_type = get_field(payload, "content_type", str, required=False, default=str(ContentType.DIRECT))
+    if content_type != ContentType.DIRECT:
+        fail(Exceptions.NOT_ALLOWED, "Clients can only send direct messages. Use /command/call and /command/respond.")
+    message = check(await messenger_service.send_direct(
         client_key,
         recipient_ip=get_field(payload, "recipient_ip", str),
         content=payload.get("content"),
-        content_type=get_field(payload, "content_type", str, required=False, default=str(ContentType.TASK)),
         mode=get_field(payload, "mode", str, required=False, default=str(MessageMode.SAFE)),
         conversation_id=get_field(payload, "conversation_id", str, required=False),
         causation_id=get_field(payload, "causation_id", str, required=False),
@@ -32,8 +36,9 @@ async def send(payload: dict):
 
 @Router.post("/poll")
 async def poll(payload: dict):
+    # Optional "content_types": ["direct"] or ["task", "response"] ... to poll only some pools
     client_key = authenticate(payload)
-    return check(messenger_service.poll(client_key))
+    return check(messenger_service.poll(client_key, get_field(payload, "content_types", list, required=False)))
 
 
 @Router.post("/chunk")

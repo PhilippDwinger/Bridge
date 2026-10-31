@@ -18,6 +18,7 @@ A, B = f"http://127.0.0.1:{PORT_A}", f"http://127.0.0.1:{PORT_B}"
 PASSWORD_A, PASSWORD_B = "admin-A", "admin-B"
 
 results = {"ok": 0, "fail": 0}
+SESSIONS = {}
 
 
 def check(name, condition, info=None):
@@ -67,6 +68,14 @@ def receive(server, token):
     return "safe", meta, json.loads(payload)
 
 
+def receive_filtered(server, token, content_types):
+    status, data = post(server, "/message/poll", {"session_token": token, "content_types": content_types})
+    if data.get("message") is None:
+        return None, None, None
+    assert data["mode"] == "fast", data
+    return "fast", data["message"], data["content"]
+
+
 def wait_for(server):
     for _ in range(100):
         try:
@@ -84,7 +93,8 @@ def main():
     log_b = open(os.path.join(ROOT, "tests", "server_b.log"), "w")
     # A trusts B from the start, B does not trust A yet
     server_a = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_A), PASSWORD_A, B], cwd=ROOT, stdout=log_a, stderr=log_a, env=env)
-    server_b = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_B), PASSWORD_B], cwd=ROOT, stdout=log_b, stderr=log_b, env=env)
+    env_b = dict(env, BRIDGE_TEST_OVERRIDES='{"max_registrations_per_host": 6}')
+    server_b = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_B), PASSWORD_B], cwd=ROOT, stdout=log_b, stderr=log_b, env=env_b)
     try:
         assert wait_for(A) and wait_for(B), "servers did not start"
         run_scenarios()
@@ -98,8 +108,7 @@ def main():
         status, data = post(A, "/admin/trusted/list", {"password": PASSWORD_A})
         check("A reconnects to B by itself after restart", data["trusted_servers"][0]["status"] == "connected", data)
         a_new, t_a_new = register_and_login(A, "a-new")
-        b2, t_b2 = register_and_login(B, "b2")
-        status, data = post(B, "/message/send", {"session_token": t_b2, "recipient_ip": a_new, "content": "welcome back", "mode": "fast"})
+        status, data = post(B, "/message/send", {"session_token": SESSIONS["b1"], "recipient_ip": a_new, "content": "welcome back", "mode": "fast"})
         check("B -> restarted A works with the new token", status == 200, data)
         check("message arrives", receive(A, t_a_new)[2] == "welcome back")
     finally:
@@ -121,6 +130,7 @@ def run_scenarios():
     a1, t_a1 = register_and_login(A, "a1")
     a2, t_a2 = register_and_login(A, "a2")
     b1, t_b1 = register_and_login(B, "b1")
+    SESSIONS["b1"] = t_b1
     check("IP contains home server", a1.startswith(A + "<|BRIDGE_IP_SPLIT|>") and b1.startswith(B + "<|BRIDGE_IP_SPLIT|>"))
     status, data = post(A, "/client/me", {"session_token": t_a1})
     check("/client/me", status == 200 and data["client_ip"] == a1 and data["name"] == "a1")
@@ -133,7 +143,8 @@ def run_scenarios():
     status, data = post(A, "/message/send", {"session_token": t_a1, "recipient_ip": a2, "content": {"hi": "fast"}, "mode": "fast"})
     check("send fast", status == 200, data)
     mode, meta, content = receive(A, t_a2)
-    check("fast arrives in one piece", mode == "fast" and content == {"hi": "fast"} and meta["sender_ip"] == a1)
+    check("fast arrives in one piece as unverified direct message", mode == "fast" and content == {"hi": "fast"}
+          and meta["sender_ip"] == a1 and meta["content_type"] == "direct" and meta["verified"] is False, meta)
     check("fast is gone after poll", receive(A, t_a2)[0] is None)
 
     big = {"text": "Grüße 🌍 " * 3000}
@@ -154,6 +165,10 @@ def run_scenarios():
     check("fast > 64 KiB -> 413", status == 413 and error_id(data) == "MESSAGE_TOO_LARGE", data)
     status, data = post(A, "/message/send", {"session_token": t_a1, "recipient_ip": a2, "content": 1, "content_type": "instruction"})
     check("clients cannot send instructions -> 403", status == 403, data)
+    status, data = post(A, "/message/send", {"session_token": t_a1, "recipient_ip": a2, "content": 1, "content_type": "task"})
+    check("clients cannot send tasks directly -> 403", status == 403, data)
+    status, data = post(A, "/message/send", {"session_token": t_a1, "recipient_ip": a2, "content": 1, "content_type": "response"})
+    check("clients cannot fake responses -> 403", status == 403, data)
     status, data = post(A, "/message/send", {"session_token": t_a1, "recipient_ip": "garbage", "content": 1})
     check("invalid recipient -> 400", status == 400, data)
     status, data = post(A, "/message/send", {"session_token": t_a1, "content": 1})
@@ -187,10 +202,10 @@ def run_scenarios():
     mode, meta, content = receive(B, t_b1)
     check("b1 receives it safe and complete", mode == "safe" and content == {"q": "ping"} and meta["sender_ip"] == a1)
     status, data = post(B, "/message/send", {"session_token": t_b1, "recipient_ip": a1, "content": {"a": "pong"},
-                                             "content_type": "response", "causation_id": first_id, "conversation_id": meta["conversation_id"], "mode": "fast"})
-    check("b1 answers a1 (B -> A)", status == 200, data)
+                                             "causation_id": first_id, "conversation_id": meta["conversation_id"], "mode": "fast"})
+    check("b1 answers a1 directly (B -> A)", status == 200, data)
     mode, meta, content = receive(A, t_a1)
-    check("a1 gets the response", mode == "fast" and content == {"a": "pong"} and meta["causation_id"] == first_id and meta["content_type"] == "response")
+    check("a1 gets the direct answer", mode == "fast" and content == {"a": "pong"} and meta["causation_id"] == first_id and meta["content_type"] == "direct")
     status, data = post(A, "/message/send", {"session_token": t_a1, "recipient_ip": B + "<|BRIDGE_IP_SPLIT|>doesnotexist", "content": 1})
     check("unknown remote recipient -> 404", status == 404 and error_id(data) == "RECIPIENT_NOT_FOUND", data)
 
@@ -218,9 +233,15 @@ def run_scenarios():
     task_id = data.get("message_id")
     mode, meta, content = receive(B, t_b1)
     check("b1 gets the task (Lua table normalized)", content == {"command_name": "add", "command_args": [2, 3], "realm_address": private}, content)
-    post(B, "/message/send", {"session_token": t_b1, "recipient_ip": meta["sender_ip"], "content": 5, "content_type": "response", "causation_id": task_id})
+    check("task is verified", meta["content_type"] == "task" and meta["verified"] is True and meta["message_id"] == task_id)
+    status, data = post(A, "/command/respond", {"session_token": t_a1, "task_id": task_id, "content": 666})
+    check("someone else cannot answer the task -> 404 TASK_NOT_FOUND", status == 404 and error_id(data) == "TASK_NOT_FOUND", data)
+    status, data = post(B, "/command/respond", {"session_token": t_b1, "task_id": task_id, "content": 5})
+    check("host answers with /command/respond (B -> A)", status == 200, data)
+    status, data = post(B, "/command/respond", {"session_token": t_b1, "task_id": task_id, "content": 6})
+    check("a task can only be answered once", status == 404, data)
     mode, meta, content = receive(A, t_a2)
-    check("a2 gets the result", content == 5 and meta["causation_id"] == task_id)
+    check("a2 gets the verified result", content == 5 and meta["causation_id"] == task_id and meta["content_type"] == "response" and meta["verified"] is True, meta)
     status, data = post(A, "/command/call", {"session_token": t_a1, "command_name": "add", "command_args": [1, 1]})
     check("owner may call everything", status == 200, data)
     receive(B, t_b1)
@@ -242,8 +263,9 @@ def run_scenarios():
     post(B, "/realm/command/create", {"session_token": t_b1, "realm_address": protected, "command_name": "echo"})
     status, data = post(B, "/realm/code/create", {"session_token": t_b1, "realm_address": protected, "expires_in_minutes": 5})
     code = data["code"]
-    status, data = post(A, "/realm/join", {"session_token": t_a2, "realm_address": protected, "code": code})
-    check("a2 joins with invitation code", status == 200, data)
+    check("invitation code has 8 easy characters", len(code) == 8 and all(c in "ABCDEFGHJKMNPQRSTUVWXYZ23456789" for c in code), code)
+    status, data = post(A, "/realm/join", {"session_token": t_a2, "code": code.lower()[:4] + "-" + code.lower()[4:], "server_url": B})
+    check("a2 joins with only the code (+ server), lowercase and dash work", status == 200 and data["realm_address"] == protected, data)
     status, data = post(A, "/command/call", {"session_token": t_a2, "command_name": "echo", "realm_address": protected, "command_args": "hey", "mode": "fast"})
     check("a2 calls echo on B", status == 200 and data["host_ip"] == b1, data)
     mode, meta, content = receive(B, t_b1)
@@ -255,15 +277,37 @@ def run_scenarios():
 
     print("Public realm + load balancing")
     post(A, "/realm/command/create", {"session_token": t_a2, "realm_address": public_a, "command_name": "work"})
+    for _ in range(3):
+        post(A, "/command/call", {"session_token": t_a1, "command_name": "work", "mode": "fast"})
     post(B, "/realm/join", {"session_token": t_b1, "realm_address": public_a})
     post(B, "/realm/command/create", {"session_token": t_b1, "realm_address": public_a, "command_name": "work"})
-    for _ in range(3):
-        post(A, "/message/send", {"session_token": t_a1, "recipient_ip": a2, "content": "busy", "mode": "fast"})
     status, data = post(A, "/command/call", {"session_token": t_a1, "command_name": "work"})
-    check("least busy host is chosen (b1, a2 has 3 tasks)", status == 200 and data["host_ip"] == b1, data)
-    for _ in range(4):
-        receive(A, t_a2)
+    check("least busy host is chosen (b1, a2 has 3 open tasks)", status == 200 and data["host_ip"] == b1, data)
+    post(A, "/message/send", {"session_token": t_a1, "recipient_ip": a2, "content": "hi", "mode": "fast"})
+    mode, meta, content = receive_filtered(A, t_a2, ["direct"])
+    check("poll only direct messages, tasks wait", content == "hi" and meta["content_type"] == "direct", meta)
+    for _ in range(3):
+        mode, meta, content = receive(A, t_a2)
+    check("then the tasks come", meta["content_type"] == "task")
     receive(B, t_b1)
+
+    print("Invitation codes")
+    status, data = post(A, "/realm/create", {"session_token": t_a1, "realm_type": "protected", "realm_name": "Club"})
+    club = data["realm_address"]
+    status, data = post(A, "/realm/code/create", {"session_token": t_a1, "realm_address": club, "max_uses": 1, "preferred_code": "club2026"})
+    check("own code (normalized to upper case)", status == 200 and data["code"] == "CLUB2026", data)
+    status, data = post(A, "/realm/code/create", {"session_token": t_a1, "realm_address": club, "preferred_code": "CLUB2026"})
+    check("same code twice -> 409", status == 409, data)
+    status, data = post(A, "/realm/join", {"session_token": t_a2, "code": "CLUB2026"})
+    check("join own server's realm with code only", status == 200 and data["realm_address"] == club, data)
+    status, data = post(B, "/realm/join", {"session_token": t_b1, "code": "CLUB2026", "server_url": A})
+    check("max_uses=1: second use is rejected", status == 403, data)
+    a3, t_a3 = register_and_login(A, "a3")
+    for _ in range(5):
+        post(A, "/realm/join", {"session_token": t_a3, "code": "WRONG123"})
+    status, data = post(A, "/realm/code/create", {"session_token": t_a1, "realm_address": club})
+    status, data = post(A, "/realm/join", {"session_token": t_a3, "code": data["code"]})
+    check("5 wrong codes -> locked even for a valid code (429)", status == 429, data)
 
     print("Untrust")
     status, data = post(B, "/admin/trusted/remove", {"password": PASSWORD_B, "url": A})
@@ -272,6 +316,10 @@ def run_scenarios():
     check("A can no longer send to B -> 403", status == 403 and error_id(data) == "SERVER_NOT_TRUSTED", data)
     status, data = post(B, "/admin/status", {"password": PASSWORD_B})
     check("admin status", status == 200 and data["clients"] == 1, data)
+
+    print("Registration limit")
+    codes = [post(B, "/client/register", {"name": f"x{i}", "password": "pw"})[0] for i in range(6)]
+    check("B allows 6 registrations per host (test setting), then 429", codes == [200] * 5 + [429], codes)
 
     print("Brute force protection")
     for _ in range(5):

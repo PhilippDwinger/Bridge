@@ -18,13 +18,16 @@ class ExceptionInfo:
     hint: str | None = None
 
 def is_exception(value: ExceptionInfo) -> bool:
-    return any(
+    # isinstance first: vars(Exceptions) also holds __doc__ = None, so None would count as an exception otherwise
+    return isinstance(value, ExceptionInfo) and any(
         Item is value
         for Item in vars(Exceptions).values()
     )
 
 def get_exception_id(value: ExceptionInfo) -> str | None:
     # Stable, machine readable id (the attribute name, e.g. "MAILBOX_FULL") - used by clients and servers
+    if not isinstance(value, ExceptionInfo):
+        return None
     for exception_id, item in vars(Exceptions).items():
         if item is value:
             return exception_id
@@ -149,6 +152,14 @@ class Exceptions:
         hint="The caller is locked for protocol.lock_minutes after protocol.max_failed_attempts failures."
     )
 
+    SERVER_FULL = ExceptionInfo(
+        name="Server Full",
+        type="warning",
+        status_code=503,
+        default_message="This Bridge server cannot take more clients right now.",
+        hint="protocol.max_clients is reached and no client was inactive for protocol.inactive_client_days."
+    )
+
     CLIENT_NOT_FOUND = ExceptionInfo(
         name="Client Not Found",
         type="warning",
@@ -207,6 +218,14 @@ class Exceptions:
         status_code=404,
         default_message="The realm could not be found.",
         hint="Check the realm address. Realms live in RAM on the server in their address and are lost on restart."
+    )
+
+    TASK_NOT_FOUND = ExceptionInfo(
+        name="Task Not Found",
+        type="warning",
+        status_code=404,
+        default_message="There is no open task with this id for you.",
+        hint="Only the host that received the task can answer it, only once, and only within protocol.command_response_minutes."
     )
 
     COMMAND_NOT_FOUND = ExceptionInfo(

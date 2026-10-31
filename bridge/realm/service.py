@@ -1,7 +1,8 @@
 from bridge import errors
 from bridge.banker import realm_store
-from bridge.core import address
-from bridge.errors.exceptions import Exceptions
+from bridge.core import address, protocol
+from bridge.errors.exceptions import Exceptions, is_exception
+from bridge.security import authorizer
 from bridge.realm import RealmType, _valid_name
 from bridge.realm.private import PrivateRealm
 from bridge.realm.protected import ProtectedRealm
@@ -22,7 +23,7 @@ ACTIONS = {
     "info": ("info", (), False),
     "kick": ("kick", ("member_ip",), False),
     "transfer_ownership": ("transfer_ownership", ("new_owner_ip",), False),
-    "create_code": ("create_code", ("expires_in_minutes", "roles", "preferred_code"), False),
+    "create_code": ("create_code", ("expires_in_minutes", "roles", "preferred_code", "max_uses"), False),
     "create_command": ("create_command", ("command_name", "allowed_roles"), False),
     "remove_command": ("remove_command", ("command_name",), False),
     "resolve_hosts": ("resolve_hosts", ("command_name",), False),
@@ -105,8 +106,62 @@ def execute_local(caller_ip, realm_address, action, params):
     if private_only and not isinstance(realm, PrivateRealm):
         errors.handle_error(Exceptions.ARGUMENT_ERROR, f"'{action}' is only available in private realms")
         return Exceptions.ARGUMENT_ERROR
+    if action == "join" and _join_locked(caller_ip):
+        return Exceptions.TOO_MANY_ATTEMPTS
     method = getattr(realm, method_name)
-    return method(caller_ip, *(params.get(name) for name in param_names))
+    result = method(caller_ip, *(params.get(name) for name in param_names))
+    if action == "join":
+        _register_join_result(caller_ip, result)
+    return result
+
+# region join protection
+# Wrong access keys and codes are counted per client and per home server of the client,
+# so nobody can guess codes by trying many of them.
+def _join_limiter_keys(caller_ip):
+    return f"join:{caller_ip}", f"join-server:{address.server_of(caller_ip)}"
+
+def _join_locked(caller_ip):
+    client_key, server_key = _join_limiter_keys(caller_ip)
+    if authorizer.is_locked(client_key) or authorizer.is_locked(server_key):
+        errors.handle_error(Exceptions.TOO_MANY_ATTEMPTS, "Too many wrong access keys/codes")
+        return True
+    return False
+
+def _register_join_result(caller_ip, result):
+    client_key, server_key = _join_limiter_keys(caller_ip)
+    if result is Exceptions.NOT_ALLOWED:
+        authorizer.register_failure(client_key)
+        authorizer.register_failure(server_key, protocol.max_failed_attempts_per_server)
+    elif not is_exception(result):
+        authorizer.register_success(client_key)
+# endregion join protection
+
+
+def join_by_code_local(caller_ip, code):
+    """Joins the realm of an invitation code on this server. Returns the realm address."""
+    if not address.is_valid_address(caller_ip):
+        errors.handle_error(Exceptions.ARGUMENT_ERROR, "Invalid caller IP")
+        return Exceptions.ARGUMENT_ERROR
+    if _join_locked(caller_ip):
+        return Exceptions.TOO_MANY_ATTEMPTS
+    entry = realm_store.get_code(code)
+    realm = realm_store.get_realm(entry["realm_id"]) if entry else None
+    if realm is None:
+        errors.handle_error(Exceptions.NOT_ALLOWED, "Unknown or expired invitation code")
+        result = Exceptions.NOT_ALLOWED
+    else:
+        result = realm.join(caller_ip, code=code)
+    _register_join_result(caller_ip, result)
+    if is_exception(result):
+        return result
+    return realm.address
+
+async def join_by_code(caller_ip, code, server_url=None):
+    """Code of a realm on this server (server_url None) or on a trusted server."""
+    if server_url is None or server_url == url_env.base_root:
+        return join_by_code_local(caller_ip, code)
+    return await s2s_client.realm_code_join(server_url, caller_ip, code)
+
 
 async def execute(caller_ip, realm_address, action, params=None):
     """Runs a realm action where the realm lives - here or on a trusted server."""

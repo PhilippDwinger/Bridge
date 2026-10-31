@@ -1,8 +1,9 @@
 from fastapi import APIRouter
 
-from bridge.core import clients
+from bridge.core import address, clients
+from bridge.errors.exceptions import Exceptions
 from bridge.realm import service as realm_service
-from bridge.server.routes._helpers import authenticate, check, get_field
+from bridge.server.routes._helpers import authenticate, check, fail, get_field
 
 # All realm actions work the same for realms on this server and on trusted servers:
 # the client sends them here, this server forwards them if the realm lives somewhere else.
@@ -39,10 +40,21 @@ async def create(payload: dict):
 
 @Router.post("/join")
 async def join(payload: dict):
-    client_key, realm_address, _ = await _run(payload, "join", {
-        "access_key": get_field(payload, "access_key", str, required=False),
-        "code": get_field(payload, "code", str, required=False),
-    })
+    # Either realm_address + access_key, or just the invitation code (+ server_url if the realm is on another server)
+    code = get_field(payload, "code", str, required=False)
+    if code is not None and payload.get("realm_address") is None:
+        client_key = authenticate(payload)
+        server_url = get_field(payload, "server_url", str, required=False)
+        if server_url is not None:
+            server_url = address.normalize_url(server_url)
+            if server_url is None:
+                fail(Exceptions.ARGUMENT_ERROR, "Invalid server_url")
+        realm_address = check(await realm_service.join_by_code(clients.get_client_ip(client_key), code, server_url))
+    else:
+        client_key, realm_address, _ = await _run(payload, "join", {
+            "access_key": get_field(payload, "access_key", str, required=False),
+            "code": code,
+        })
     clients.add_realm_membership(client_key, realm_address)
     return {"joined": True, "realm_address": realm_address}
 
@@ -75,9 +87,10 @@ async def transfer(payload: dict):
 @Router.post("/code/create")
 async def create_code(payload: dict):
     _, _, code = await _run(payload, "create_code", {
-        "expires_in_minutes": get_field(payload, "expires_in_minutes", (int, float)),
+        "expires_in_minutes": get_field(payload, "expires_in_minutes", (int, float), required=False),
         "roles": get_field(payload, "roles", list, required=False),
         "preferred_code": get_field(payload, "preferred_code", str, required=False),
+        "max_uses": get_field(payload, "max_uses", int, required=False),
     })
     return {"code": code}
 

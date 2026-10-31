@@ -1,11 +1,13 @@
 import random
 
+import json
+
 from bridge import errors
-from bridge.banker import mailbox_store
+from bridge.banker import mailbox_store, task_store
 from bridge.core import address, clients
 from bridge.errors.exceptions import Exceptions, is_exception
-from bridge.messenger import service as messenger_service
-from bridge.messenger.message import ContentType, MessageMode
+from bridge.messenger import router
+from bridge.messenger.message import ContentType, MessageMode, create_message
 from bridge.realm import service as realm_service
 from bridge.server import s2s_client, url_env
 from bridge.transfer.lua import normalize_lua_hybrid_tables
@@ -14,7 +16,10 @@ from bridge.transfer.lua import normalize_lua_hybrid_tables
 #   1. find every host of the command in the realms the caller is member of (+ the public realm of its server)
 #   2. pick the least busy host (busy points of its mailbox; hosts on other servers are asked via server to server)
 #   3. send the host a "task" message: {"command_name", "command_args", "realm_address"}
-#   4. the host answers with a normal "response" message (causation_id = message_id of the task)
+#   4. the host answers with respond(task_id) -> "response" message to the caller (causation_id = task id)
+# Clients can never send task or response messages themselves. That is why they are "verified":
+#   - a task only exists after the realm allowed the call
+#   - a response is only accepted from the host that got the task, only to the caller, only once
 
 
 async def get_busy_points(client_ips):
@@ -95,12 +100,64 @@ async def call_command(client_key, command_name, command_args=None, realm_addres
         "command_args": normalize_lua_hybrid_tables(command_args),
         "realm_address": candidates[host_ip],
     }
-    message = await messenger_service.send(client_key, host_ip, content, ContentType.TASK, mode)
+    message = create_message(caller_ip, host_ip, content, ContentType.TASK, mode)
     if is_exception(message):
         return message
+    # Registered before sending - a fast host could answer before the send call returns
+    task_store.add_outgoing(message.message_id, caller_ip, host_ip)
+    result = await router.deliver(message)
+    if is_exception(result):
+        task_store.remove_outgoing(message.message_id)
+        return result
     return {
+        "task_id": message.message_id,
         "message_id": message.message_id,
         "conversation_id": message.conversation_id,
         "host_ip": host_ip,
         "realm_address": candidates[host_ip],
     }
+
+
+async def respond(client_key, task_id, content, mode=MessageMode.SAFE):
+    """The host answers a task. Only possible once, only by the host that received it."""
+    host_ip = clients.get_client_ip(client_key)
+    if host_ip is None:
+        errors.handle_error(Exceptions.CLIENT_NOT_FOUND)
+        return Exceptions.CLIENT_NOT_FOUND
+    incoming = task_store.get_incoming(task_id)
+    if incoming is None or incoming["host_ip"] != host_ip:
+        errors.handle_error(Exceptions.TASK_NOT_FOUND, "Respond to an unknown task or a task of another host")
+        return Exceptions.TASK_NOT_FOUND
+    message = create_message(
+        host_ip, incoming["caller_ip"], content, ContentType.RESPONSE, mode,
+        conversation_id=incoming["conversation_id"], causation_id=task_id,
+    )
+    if is_exception(message):
+        return message
+    result = await router.deliver(message)
+    if is_exception(result):
+        return result
+    task_store.remove_incoming(task_id)
+    return {"message_id": message.message_id, "task_id": task_id}
+
+
+async def verify_remote_task(message, peer_url):
+    """A task that came from another server: check again that the realm allows this caller to use this host."""
+    try:
+        content = json.loads(message.payload)
+        command_name = content["command_name"]
+        realm_address = content["realm_address"]
+    except (ValueError, TypeError, KeyError):
+        errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} sent a task without command data")
+        return Exceptions.NOT_ALLOWED
+    if not isinstance(command_name, str) or not address.is_valid_address(realm_address):
+        errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} sent a task with invalid command data")
+        return Exceptions.NOT_ALLOWED
+    if address.server_of(realm_address) == peer_url:
+        # The realm lives on the sending server itself - it already checked it, asking it again proves nothing
+        return True
+    hosts = await realm_service.execute(message.sender_ip, realm_address, "resolve_hosts", {"command_name": command_name})
+    if is_exception(hosts) or not isinstance(hosts, list) or message.recipient_ip not in hosts:
+        errors.handle_error(Exceptions.NOT_ALLOWED, f"{peer_url} sent a task the realm does not allow")
+        return Exceptions.NOT_ALLOWED
+    return True
