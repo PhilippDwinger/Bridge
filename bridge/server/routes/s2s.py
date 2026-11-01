@@ -325,14 +325,42 @@ async def store_backup(payload: dict, request: Request):
     size = backup.blob_size(blob)
     if size > protocol.max_backup_mb * 1024 * 1024:
         return _error(Exceptions.MESSAGE_TOO_LARGE)
-    if not backup_store.store(peer_url, blob, size):
+    epoch = blob.get("epoch", 0)
+    if not isinstance(epoch, int) or isinstance(epoch, bool):
+        epoch = 0
+    if not backup_store.store(peer_url, blob, size, epoch):
+        return _error(Exceptions.SERVER_FULL)
+    return _ok()
+
+
+@Router.post("/backup/relay")
+async def relay_backup(payload: dict, request: Request):
+    # A trusted server hands us the backup of ANOTHER server to keep (resilience: A -> B, B relays A's backup to C).
+    # We still cannot read it; we only keep the newest copy per owner. The owner gets it back via /backup/fetch.
+    peer_url = _authenticate_server(request)
+    if peer_url is None:
+        return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
+    blob = payload.get("backup")
+    if not isinstance(blob, dict) or not isinstance(blob.get("data"), str):
+        return _error(Exceptions.ARGUMENT_ERROR)
+    owner_url = address.normalize_url(blob.get("server_url"))
+    if owner_url is None or owner_url == url_env.base_root:
+        # No valid owner, or it is our own backup - we never keep our own
+        return _error(Exceptions.ARGUMENT_ERROR)
+    epoch = blob.get("epoch", 0)
+    if not isinstance(epoch, int) or isinstance(epoch, bool):
+        return _error(Exceptions.ARGUMENT_ERROR)
+    size = backup.blob_size(blob)
+    if size > protocol.max_backup_mb * 1024 * 1024:
+        return _error(Exceptions.MESSAGE_TOO_LARGE)
+    if not backup_store.store(owner_url, blob, size, epoch):
         return _error(Exceptions.SERVER_FULL)
     return _ok()
 
 
 @Router.post("/backup/fetch")
 async def fetch_backup(request: Request):
-    # A trusted server asks for its own backup (only its own)
+    # A trusted server asks for its own backup (only its own - keyed by the caller's URL)
     peer_url = _authenticate_server(request)
     if peer_url is None:
         return _error(Exceptions.SERVER_NOT_TRUSTED, 403)

@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+argon2-cffi
+httpx
+tzdata
+cryptography

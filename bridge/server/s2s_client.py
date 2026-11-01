@@ -229,6 +229,11 @@ async def backup_store(peer_url, blob):
 async def backup_fetch(peer_url):
     return await _authorized_post(peer_url, "/s2s/backup/fetch", {}, timeout=BACKUP_TIMEOUT_SECONDS)
 
+async def backup_relay(peer_url, blob):
+    # Hand a backup we keep for ANOTHER server on to this peer (resilience chain A -> B -> C)
+    result = await _authorized_post(peer_url, "/s2s/backup/relay", {"backup": blob}, timeout=BACKUP_TIMEOUT_SECONDS)
+    return True if result is True else result
+
 async def realm_push(peer_url, view):
     """Realm server -> member server: the new view of a realm after a change."""
     return await _authorized_post(peer_url, "/s2s/realm/push", {"view": view})

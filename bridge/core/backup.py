@@ -28,10 +28,12 @@ try:
 except ImportError:  # backup is optional - Bridge runs without it
     AESGCM = None
 
-BACKUP_VERSION = 1
+BACKUP_VERSION = 2
 KEY_ITERATIONS = 300_000
 
 _key = None
+# (peer_url, owner_url) -> highest epoch we already relayed to that peer (so we forward each copy only once)
+_relayed = {}
 # What happened - shown by /admin/backup/status
 state = {
     "restore_done": False,
@@ -74,6 +76,7 @@ def set_password(password, server_url):
     salt = f"bridge-backup|{server_url}".encode("utf-8")
     _key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, KEY_ITERATIONS, 32)
     _sent_to.clear()  # new key -> every peer gets a fresh backup
+    _relayed.clear()
 # endregion key
 
 
@@ -92,10 +95,14 @@ def create_snapshot(include_messages=True):
         for entry in mailbox.pending_messages.values():
             pools.setdefault(str(entry["pool_name"]), []).insert(0, entry["message"].to_dict())
         mailboxes[client_key] = pools
+    now = _now()
     return {
         "version": BACKUP_VERSION,
         "server_url": url_env.base_root,
-        "created_at": _now().isoformat(),
+        "created_at": now.isoformat(),
+        # Version counter of this server's backups. Climbs with the wall clock, so it keeps rising across restarts
+        # and a newer backup always wins over an older one - also when it was relayed through other servers.
+        "epoch": int(now.timestamp() * 1000),
         "clients": clients,
         "mailboxes": mailboxes,
         "sessions": {token: {key: _iso(value) for key, value in entry.items()}
@@ -224,22 +231,34 @@ def encrypt(snapshot):
     data = zlib.compress(json.dumps(snapshot, separators=(",", ":")).encode("utf-8"), 6)
     nonce = secrets.token_bytes(12)
     created_at = snapshot["created_at"]
-    associated = f"{snapshot['server_url']}|{created_at}".encode("utf-8")
+    epoch = int(snapshot.get("epoch", 0))
+    associated = _aad(snapshot["server_url"], created_at, epoch, BACKUP_VERSION)
     encrypted = AESGCM(_key).encrypt(nonce, data, associated)
     return {
         "version": BACKUP_VERSION,
         "server_url": snapshot["server_url"],
         "created_at": created_at,
+        "epoch": epoch,
         "nonce": base64.b64encode(nonce).decode("ascii"),
         "data": base64.b64encode(encrypted).decode("ascii"),
     }
 
 
+def _aad(server_url, created_at, epoch, version):
+    # The authenticated header. Version 1 backups (no epoch) used only server_url|created_at.
+    if version >= 2:
+        return f"{server_url}|{created_at}|{epoch}|v{version}".encode("utf-8")
+    return f"{server_url}|{created_at}".encode("utf-8")
+
+
 def decrypt(blob):
     if AESGCM is None or _key is None:
         return Exceptions.FAILED
+    # A newer server must still be able to read an older backup of itself (rolling upgrade): try the header of the
+    # blob's own version.
     try:
-        associated = f"{blob['server_url']}|{blob['created_at']}".encode("utf-8")
+        version = int(blob.get("version", 1))
+        associated = _aad(blob["server_url"], blob["created_at"], int(blob.get("epoch", 0)), version)
         data = AESGCM(_key).decrypt(base64.b64decode(blob["nonce"]), base64.b64decode(blob["data"]), associated)
         return json.loads(zlib.decompress(data).decode("utf-8"))
     except Exception as error:
@@ -312,6 +331,29 @@ async def backup_now(force=False):
         state["last_backup_peers"] = sorted(set(state["last_backup_peers"]) | set(sent_to))
         errors.debug_print(f"Backup ({size} bytes) sent to {len(sent_to)} server(s)")
     return {"sent_to": sent_to, "size_bytes": size}
+async def relay_held_backups():
+    """Spreads the backups we keep for OTHER servers to our other trusted peers, so a backup survives even when the
+    server that first kept it goes down (A -> B, B relays A's backup to C; if B closes, C still has it and A gets it
+    back from C). Each copy is forwarded to a peer only once per epoch. The owner itself is never a target - it does
+    not keep its own backup."""
+    if not available():
+        return
+    from bridge.banker import backup_store
+    held = backup_store.held_backups()
+    if not held:
+        return
+    peers = [peer["url"] for peer in _connected_peers()]
+    for owner_url, blob, size, epoch in held:
+        for peer_url in peers:
+            if peer_url == owner_url:
+                continue  # never give a server its own backup to keep
+            if _relayed.get((peer_url, owner_url), -1) >= epoch:
+                continue  # that peer already got this (or a newer) copy from us
+            result = await s2s_client.backup_relay(peer_url, blob)
+            if result is True:
+                _relayed[(peer_url, owner_url)] = epoch
+    if len(_relayed) > 100_000:
+        _relayed.clear()
 # endregion backup
 
 
@@ -348,8 +390,9 @@ async def restore_from_peers(only_if_fresh=True):
             result = {"restored": False, "reason": "no backup found"}
         state["last_restore"] = result
         return result
-    # Newest first - if one cannot be read (broken, other password, a peer lying about the date), the next one
-    found.sort(key=lambda item: item[1]["created_at"], reverse=True)
+    # Newest first (by epoch, then date) - if one cannot be read (broken, other password, a peer lying about the
+    # date/epoch), the next one is tried.
+    found.sort(key=lambda item: (int(item[1].get("epoch", 0)), item[1]["created_at"]), reverse=True)
     newest, snapshot = None, None
     for peer_url, blob in found:
         candidate = await asyncio.to_thread(decrypt, blob)
@@ -394,6 +437,7 @@ async def run():
         if protocol.backup_mode == "peers":
             try:
                 await backup_now()
+                await relay_held_backups()
             except Exception as error:
                 state["last_error"] = f"backup: {error!r}"
                 errors.handle_error(Exceptions.FAILED, f"Backup failed: {error!r}")
@@ -404,6 +448,8 @@ async def final_backup():
     if protocol.backup_mode == "peers" and state["restore_done"] and available() and not state.get("paused"):
         try:
             await asyncio.wait_for(backup_now(), 10)
+            # Hand the backups we keep for others on to another peer before we go, so they are not lost with us
+            await asyncio.wait_for(relay_held_backups(), 10)
         except Exception as error:
             errors.handle_error(Exceptions.FAILED, f"Final backup failed: {error!r}")
 
