@@ -84,6 +84,24 @@ async def client_list(payload: dict, request: Request):
     return {"clients": bridge._get_clients()}
 
 
+@Router.post("/realms")
+async def realm_list(payload: dict, request: Request):
+    bridge = await _verify_admin(payload, request)
+    return {"realms": bridge._get_realms()}
+
+
+@Router.post("/overview")
+async def overview(payload: dict, request: Request):
+    # One call for the server's own admin dashboard: full status (counts, trusted peers, friends, backup,
+    # settings, errors - all token-free) plus the client and realm lists.
+    bridge = await _verify_admin(payload, request)
+    return {
+        "status": bridge._get_status(),
+        "clients": bridge._get_clients(),
+        "realms": bridge._get_realms(),
+    }
+
+
 @Router.post("/mailbox")
 async def mailbox_view(payload: dict, request: Request):
     # Shows what waits in a client's mailbox without taking anything out (debugging / tester)

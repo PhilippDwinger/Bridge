@@ -32,15 +32,19 @@ async def root_page() -> str:
  .mark b {{ color:#F7F8FB; }}
  .state {{ margin-top:16px; font-size:19px; display:inline-flex; align-items:center; gap:10px; }}
  .dot {{ width:12px; height:12px; border-radius:50%; background:{dot}; box-shadow:0 0 0 4px {dot}22; }}
- .meta {{ margin-top:24px; font-size:13px; opacity:.6; line-height:1.9; word-break:break-all; }}
- a {{ color:#6B9BFF; text-decoration:none; }}
- a:hover {{ text-decoration:underline; }}
+ .dash {{ display:inline-block; margin-top:22px; padding:11px 20px; border-radius:12px; background:#3369FF; color:#fff;
+          font-weight:600; font-size:15px; text-decoration:none; }}
+ .dash:hover {{ background:#2a5be6; }}
+ .meta {{ margin-top:22px; font-size:13px; opacity:.6; line-height:1.9; word-break:break-all; }}
+ a.j {{ color:#6B9BFF; text-decoration:none; }}
+ a.j:hover {{ text-decoration:underline; }}
 </style></head>
 <body><div class="card">
  <div class="mark">br<b>.</b></div>
  <div class="state"><span class="dot"></span>Bridge {state}</div>
+ <a class="dash" href="/admin">Server-Dashboard →</a>
  <div class="meta">Protokoll {version}{("<br>" + url) if url else ""}<br>
-   <a href="/server/status">Status (JSON)</a></div>
+   <a class="j" href="/server/status">Status (JSON)</a></div>
 </div></body></html>"""
 
 

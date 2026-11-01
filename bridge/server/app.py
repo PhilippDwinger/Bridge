@@ -21,6 +21,7 @@ from bridge.server.routes.express import Router as ExpressRouter
 from bridge.server.routes.friends import Router as FriendsRouter, S2SRouter as FriendsS2SRouter
 from bridge.server.routes.messages import Router as MessageRouter
 from bridge.server.routes.realms import Router as RealmRouter
+from bridge.server.routes.dashboard import Router as DashboardRouter
 from bridge.server.routes.s2s import Router as S2SRouter
 from bridge.server.routes.status import Router as StatusRouter
 
@@ -87,6 +88,7 @@ def create_app(bridge_instance) -> FastAPI:
         return await call_next(request)
 
     app.include_router(StatusRouter)
+    app.include_router(DashboardRouter)
     app.include_router(ClientRouter)
     app.include_router(MessageRouter)
     app.include_router(RealmRouter)
@@ -98,7 +100,7 @@ def create_app(bridge_instance) -> FastAPI:
     app.include_router(FriendsRouter)
     app.include_router(S2SRouter)
     app.include_router(FriendsS2SRouter)
-    for router in (StatusRouter, ClientRouter, MessageRouter, RealmRouter, CommandRouter, ConversationRouter, ExpressRouter,
-                   AgentRouter, AdminRouter, FriendsRouter, S2SRouter, FriendsS2SRouter):
+    for router in (StatusRouter, DashboardRouter, ClientRouter, MessageRouter, RealmRouter, CommandRouter, ConversationRouter,
+                   ExpressRouter, AgentRouter, AdminRouter, FriendsRouter, S2SRouter, FriendsS2SRouter):
         metrics.known_paths.update(getattr(route, "path", "") for route in router.routes)
     return app

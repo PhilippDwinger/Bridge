@@ -304,6 +304,29 @@ class Bridge:
             })
         return result
 
+    def _get_realms(self):
+        result = []
+        for realm_id, realm in realm_store.realm_storage.items():
+            result.append({
+                "realm_id": realm_id,
+                "address": realm.address,
+                "name": realm.name,
+                "realm_type": str(realm.realm_type),
+                "owner_ip": realm.owner_ip,
+                "is_public": realm_id == realm_store.public_realm_id,
+                "member_count": len(realm.members),
+                "commands": sum(len(hosts) for hosts in realm.commands.values()),
+                "topics": len(realm.topics),
+                "created_at": realm.created_at.isoformat(),
+                "version": realm.version,
+            })
+        return result
+
+    def get_realms(self, password):
+        if not self.verify_password(password):
+            return Exceptions.NOT_ALLOWED
+        return self._get_realms()
+
     def _get_mailbox_view(self, client_ip):
         client_key = ip_store.get_client_key(client_ip)
         mailbox = mailbox_store.get_mailbox(client_key) if client_key else None
