@@ -128,11 +128,22 @@ _PAGE = r"""<!doctype html>
   <div class="tiles" id="tiles"></div>
 
   <section>
+    <h2>Adresse dieses Servers</h2>
+    <div class="card">
+      <div class="barrow">
+        <code class="mono" id="selfUrl" style="font-size:15px;word-break:break-all;flex:1 1 260px"></code>
+        <button class="btn btn--sm" data-act="copy-self" type="button">Kopieren</button>
+      </div>
+      <p class="hint">Genau diese Adresse beim anderen Server unter „Vertraute Server" eintragen (ohne /admin).</p>
+    </div>
+  </section>
+
+  <section>
     <h2>Vertraute Server <span class="c" id="tCount">0</span></h2>
     <div class="card" id="trusted"></div>
     <p class="muted" style="font-size:12.5px;margin:8px 2px 0">
-      Zwei Server werden „Freunde", wenn <b>beide</b> die URL des anderen eintragen. „Wartet auf Gegenseite" heißt:
-      der andere Server muss dich noch eintragen.</p>
+      Zwei Server werden „Freunde", wenn <b>beide</b> die Adresse des anderen eintragen. „Wartet" heißt: der andere
+      Server hat dich noch nicht eingetragen oder ist gerade nicht erreichbar – der Grund steht darunter.</p>
   </section>
 
   <section>
@@ -251,6 +262,7 @@ function render(d, blocked){
     ? '<span class="pill pill--info"><span class="dot"></span>Startet / stellt wieder her …</span>'
     : '<span class="pill pill--ok"><span class="dot"></span>Läuft</span>';
   $("srvUrl").textContent=s.url||"";
+  $("selfUrl").textContent=s.url||"";
   $("ver").textContent="Protokoll "+(s.protocol_version||"?");
   $("when").textContent=new Date().toLocaleTimeString("de-DE");
 
@@ -263,17 +275,19 @@ function render(d, blocked){
   // Vertraute Server (mit Steuerung)
   const ts=s.trusted_servers||[]; $("tCount").textContent=ts.length;
   const trows = ts.map(t=>{
-    const ok=t.status==="connected"; const pill=ok?'pill--ok':(t.status==="pending"?'pill--warn':'pill--neutral');
-    const label= t.status==="connected"?"Verbunden":(t.status==="pending"?"Wartet auf Gegenseite":esc(t.status));
+    const ok=t.status==="connected", wait=(t.status==="waiting"||t.status==="pending");
+    const pill=ok?'pill--ok':(wait?'pill--warn':'pill--neutral');
+    const label=ok?"Verbunden":(wait?"Wartet":esc(t.status));
+    const why=(!ok && t.last_error) ? '<div class="muted" style="font-size:12px;white-space:normal;max-width:340px;margin-top:4px">'+esc(t.last_error)+'</div>' : '';
     return '<tr><td class="mono">'+esc(t.url)+'</td>'+
-      '<td><span class="pill '+pill+'"><span class="dot"></span>'+label+'</span></td>'+
+      '<td><span class="pill '+pill+'"><span class="dot"></span>'+label+'</span>'+why+'</td>'+
       '<td class="mono">'+esc(t.protocol_version||"–")+'</td><td class="mono">'+esc(t.commit||"–")+'</td>'+
       '<td class="act"><button class="btn btn--sm btn--ghost" data-act="trusted-connect" data-url="'+esc(t.url)+'">Neu verbinden</button> '+
       '<button class="btn btn--sm btn--ghost" data-act="trusted-remove" data-url="'+esc(t.url)+'">Entfernen</button></td></tr>';
   }).join("");
   $("trusted").innerHTML =
     (ts.length ? rows(["Server-URL","Status","Version","Commit",""], trows) : '<div class="empty">Noch keine vertrauten Server.</div>')
-    + '<div class="addrow"><input class="in mono" id="t-add" placeholder="https://anderer-server.ts.net" autocomplete="off">'
+    + '<div class="addrow"><input class="in mono" id="t-add" placeholder="Adresse des anderen Servers, z. B. https://pc.ts.net:8443" autocomplete="off">'
     + '<button class="btn" data-act="trusted-add" type="button">Hinzufügen</button></div>';
 
   // Blockierte Server
@@ -326,6 +340,13 @@ function render(d, blocked){
     : '<span class="muted">Keine Fehler erfasst.</span>';
 }
 
+function fallbackCopy(text, done){
+  const ta=document.createElement("textarea"); ta.value=text; ta.style.position="fixed"; ta.style.opacity="0";
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); done(); }catch(e){ msg("err","Kopieren ging nicht – bitte von Hand markieren."); }
+  ta.remove();
+}
+
 async function act(fn, okText){
   if(busy) return; busy=true;
   try{ const r=await fn(); if(okText) msg("ok", okText); await load(); }
@@ -336,8 +357,15 @@ async function act(fn, okText){
 document.addEventListener("click", ev=>{
   const btn=ev.target.closest("[data-act]"); if(!btn) return;
   const a=btn.dataset.act, url=btn.dataset.url;
-  if(a==="trusted-add"){ const v=($("t-add").value||"").trim(); if(!v){msg("err","Bitte eine URL eingeben.");return;}
-    act(()=>admin("trusted/add",{url:v}), "Vertrauter Server eingetragen – wartet auf die Gegenseite."); }
+  if(a==="copy-self"){ const u=$("selfUrl").textContent||"";
+    const done=()=>msg("ok","Adresse kopiert: "+u);
+    if(navigator.clipboard&&window.isSecureContext){ navigator.clipboard.writeText(u).then(done,()=>fallbackCopy(u,done)); }
+    else fallbackCopy(u,done);
+    return; }
+  if(a==="trusted-add"){ let v=($("t-add").value||"").trim();
+    v=v.replace(/\/(admin|server|s2s)(\/.*)?$/i,"").replace(/\/+$/,"");   // aus der Adresszeile kopiertes /admin weg
+    if(!v){msg("err","Bitte die Adresse des anderen Servers eingeben.");return;}
+    act(()=>admin("trusted/add",{url:v}), "Eingetragen: "+v+" – verbindet, sobald der andere Server dich auch eingetragen hat."); }
   else if(a==="trusted-remove"){ act(()=>admin("trusted/remove",{url}), "Entfernt."); }
   else if(a==="trusted-connect"){ act(()=>admin("trusted/connect",{url}), "Verbindung wird neu aufgebaut."); }
   else if(a==="blocked-add"){ const v=($("b-add").value||"").trim(); if(!v){msg("err","Bitte eine URL eingeben.");return;}

@@ -11,11 +11,18 @@ MAX_ADDRESS_LENGTH = 512
 
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
+# Top-level routes of a Bridge server. A server address never ends in one of them - if someone pastes e.g.
+# "https://x.ts.net/admin" (copied from the dashboard's address bar), the server is "https://x.ts.net".
+# Without this, "https://x.ts.net/admin" would count as a different server and trust could never connect.
+_BRIDGE_ROUTES = {"admin", "server", "s2s", "client", "message", "command", "realm", "express", "agent",
+                  "conversation", "friends"}
+
 
 def normalize_url(url):
     """Returns the canonical form of a server URL or None if it is not a valid http(s) URL.
     Canonical: lower case, no default port (https://x:443 = https://x), no dot at the end of the host, no "/" at the
-    end - otherwise the same server could appear under several names (block list, limits per server)."""
+    end, no Bridge route at the end (https://x/admin = https://x) - otherwise the same server could appear under
+    several names (trust, block list, limits per server)."""
     if not isinstance(url, str) or len(url) > 300:
         return None
     url = url.strip()
@@ -39,7 +46,13 @@ def normalize_url(url):
     if ":" in host:
         host = f"[{host}]"  # IPv6
     netloc = host if port is None or port == DEFAULT_PORTS[scheme] else f"{host}:{port}"
-    normalized = urlunsplit((scheme, netloc, parts.path.rstrip("/"), "", ""))
+    path = parts.path.rstrip("/")
+    segments = path.split("/")
+    for index, segment in enumerate(segments):
+        if segment.lower() in _BRIDGE_ROUTES:
+            path = "/".join(segments[:index]).rstrip("/")
+            break
+    normalized = urlunsplit((scheme, netloc, path, "", ""))
     try:
         import httpx
         httpx.URL(normalized)

@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import json
+import os
 import time
 
 import httpx
@@ -37,20 +38,52 @@ HEADER_TOKEN = "X-Bridge-Token"
 # same machine goes out to the internet and back onto itself (hairpin) and often fails. With this map the
 # servers talk to each other directly over localhost, while keeping their public URL as identity everywhere else.
 _local_peers = {}
+# Optional JSON file with that map, kept up to date by whoever runs several servers on this machine (e.g. the
+# BridgeControll app). It is read again whenever it changes, so a server that was started BEFORE another one
+# still learns the newcomer's local address.
+_local_peers_file = {"path": None, "mtime": None}
 
 
 def set_local_peers(mapping):
     from bridge.core import address
-    _local_peers.clear()
+    fresh = {}
     for public, local in (mapping or {}).items():
         normalized = address.normalize_url(public)
         if normalized and isinstance(local, str) and local.strip():
-            _local_peers[normalized] = local.rstrip("/")
+            fresh[normalized] = local.strip().rstrip("/")
+    _local_peers.clear()
+    _local_peers.update(fresh)
+
+
+def set_local_peers_file(path):
+    _local_peers_file["path"] = path
+    _local_peers_file["mtime"] = None
+    _reload_local_peers_file()
+
+
+def _reload_local_peers_file():
+    path = _local_peers_file["path"]
+    if not path:
+        return
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return
+    if mtime == _local_peers_file["mtime"]:
+        return
+    try:
+        with open(path, encoding="utf-8") as handle:
+            mapping = json.load(handle)
+    except (OSError, ValueError):
+        return          # half-written file - try again on the next request
+    _local_peers_file["mtime"] = mtime
+    set_local_peers(mapping if isinstance(mapping, dict) else {})
 
 
 def _target(peer_url):
     """The address to actually open the HTTP connection to (localhost for a local neighbour, else the URL itself).
     The identity (from_url, tokens, trust) always stays peer_url - only the transport changes."""
+    _reload_local_peers_file()
     return _local_peers.get(peer_url, peer_url)
 
 # peer_url -> secret we are currently delivering (generator side)
