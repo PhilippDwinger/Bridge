@@ -1,11 +1,13 @@
-"""The server's own admin dashboard at /admin - a small, self-contained, password-protected web page.
+"""The server's own admin dashboard at /admin - a small, self-contained, password-protected control panel.
 
-It shows everything about THIS Bridge server (clients, realms, messages, friends, trusted servers, backup,
-settings, activity). It is reachable over the server's public URL, so an admin can look at a server from anywhere
-with just the admin password - Bridge needs no extra app for this.
+It shows everything about THIS Bridge server AND lets the admin control it: add/remove/reconnect trusted servers
+(server-to-server "friendships" by URL), change the settings, block/unblock servers, back up now or restore, change
+the admin password, and reset the server. Reachable over the server's public URL, so an admin can run a server from
+anywhere with just the admin password - Bridge needs no extra app for this.
 
 Self-contained on purpose: the HTML/CSS/JS is inline (brand colours as values, system fonts), so the page has no
-outside dependency and works even when Bridge runs completely on its own.
+outside dependency and works even when Bridge runs completely on its own. Every control calls the existing
+password-protected /admin/* endpoints.
 """
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
@@ -30,59 +32,73 @@ _PAGE = r"""<!doctype html>
        font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:15px;}
   .mono{font-family:ui-monospace,"IBM Plex Mono",Consolas,monospace;}
   a{color:var(--blue-text);}
-  .wrap{max-width:1080px;margin:0 auto;padding:22px 18px 60px;}
+  .wrap{max-width:1080px;margin:0 auto;padding:22px 18px 70px;}
 
-  /* login */
   #login{min-height:100vh;display:grid;place-items:center;padding:20px;}
   .login-card{width:100%;max-width:360px;background:var(--surface);border:1px solid var(--line);
     border-radius:18px;padding:30px 26px;box-shadow:0 18px 50px rgba(14,26,51,.10);text-align:center;}
   .mark{font-weight:800;font-size:40px;letter-spacing:-.03em;color:var(--blue);}
   .mark b{color:var(--text);}
   .login-card p{color:var(--muted);font-size:13.5px;margin:6px 0 20px;}
-  input[type=password],input[type=text]{width:100%;height:46px;border:1px solid var(--line);border-radius:12px;
-    padding:0 14px;font-size:15px;background:var(--surface);color:var(--text);outline:none;}
-  input:focus{border-color:var(--blue);box-shadow:0 0 0 4px rgba(51,105,255,.16);}
+  input,select{font-family:inherit;}
+  input[type=password],input[type=text],input.in,select{width:100%;height:44px;border:1px solid var(--line);
+    border-radius:11px;padding:0 13px;font-size:14.5px;background:var(--surface);color:var(--text);outline:none;}
+  input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 4px rgba(51,105,255,.16);}
   button{font-family:inherit;cursor:pointer;}
-  .btn{height:44px;padding:0 18px;border-radius:12px;border:1px solid transparent;background:var(--blue);
-    color:#fff;font-size:15px;font-weight:600;display:inline-flex;align-items:center;gap:8px;justify-content:center;}
+  .btn{height:44px;padding:0 18px;border-radius:11px;border:1px solid transparent;background:var(--blue);
+    color:#fff;font-size:14.5px;font-weight:600;display:inline-flex;align-items:center;gap:8px;justify-content:center;white-space:nowrap;}
   .btn:hover{background:#2a5be6;}
   .btn--ghost{background:transparent;border-color:var(--line);color:var(--text2);}
   .btn--ghost:hover{background:var(--blue-50);color:var(--blue-text);border-color:var(--blue);}
+  .btn--danger{background:var(--err);} .btn--danger:hover{background:#8C1C25;}
+  .btn--sm{height:36px;padding:0 12px;font-size:13px;border-radius:9px;}
   .btn--full{width:100%;margin-top:16px;}
   .err{color:var(--err);font-size:13.5px;margin-top:12px;min-height:18px;}
 
-  /* topbar */
   .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:22px;}
   .top .mark{font-size:30px;}
   .top .sub{color:var(--muted);font-size:13px;}
   .grow{flex:1 1 auto;}
-  .pill{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 11px;border-radius:999px;font-size:13px;font-weight:600;}
+  .pill{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 10px;border-radius:999px;font-size:12.5px;font-weight:600;}
   .pill--ok{background:var(--ok-bg);color:var(--ok);} .pill--info{background:var(--blue-50);color:var(--blue-text);}
   .pill--warn{background:var(--warn-bg);color:var(--warn);} .pill--neutral{background:#EEF1F6;color:var(--text2);}
   .dot{width:8px;height:8px;border-radius:50%;background:currentColor;}
 
-  /* tiles */
   .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:26px;}
   .tile{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;}
   .tile .v{font-size:28px;font-weight:700;letter-spacing:-.02em;}
   .tile .l{font-size:12.5px;color:var(--muted);margin-top:2px;}
 
-  section{margin-bottom:28px;}
+  section{margin-bottom:26px;}
   h2{font-size:17px;font-weight:700;letter-spacing:-.01em;margin:0 0 12px;display:flex;align-items:center;gap:10px;}
   h2 .c{font-size:12.5px;font-weight:600;color:var(--muted);background:#EEF1F6;border-radius:999px;padding:2px 9px;}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;}
+  .card--danger{border-color:#EDC3C7;}
   table{width:100%;border-collapse:collapse;font-size:13.5px;}
-  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;}
+  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle;}
   th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em;}
   tr:last-child td{border-bottom:0;}
   td.mono{color:var(--text2);}
-  .empty{padding:18px 16px;color:var(--muted);font-size:13.5px;}
+  td.act{text-align:right;}
+  .empty{padding:16px;color:var(--muted);font-size:13.5px;}
+  .addrow{display:flex;gap:8px;padding:14px;border-top:1px solid var(--line);flex-wrap:wrap;}
+  .addrow input{flex:1;min-width:200px;}
   .kv{display:flex;flex-wrap:wrap;gap:8px;}
   .kv span{display:inline-flex;gap:6px;align-items:center;background:#F1F4F9;border:1px solid var(--line);
     border-radius:8px;padding:5px 10px;font-size:13px;}
   .kv b{font-weight:600;color:var(--text2);}
   .muted{color:var(--muted);}
-  @media(max-width:620px){th,td{padding:9px 10px;} .wrap{padding:16px 12px 50px;}}
+  .setgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;padding:16px;}
+  .setfield{display:flex;flex-direction:column;gap:5px;}
+  .setfield label{font-size:12.5px;color:var(--muted);font-weight:600;}
+  .barrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:14px 16px;}
+  .hint{font-size:12.5px;color:var(--muted);padding:0 16px 14px;}
+  .msgs{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:60;width:min(340px,calc(100vw - 32px));}
+  .msg{padding:12px 14px;border-radius:12px;background:var(--surface);border:1px solid var(--line);
+    box-shadow:0 12px 30px rgba(14,26,51,.16);font-size:14px;}
+  .msg--ok{border-left:4px solid var(--ok);} .msg--err{border-left:4px solid var(--err);color:var(--err);}
+  .msg--info{border-left:4px solid var(--blue);}
+  @media(max-width:620px){th,td{padding:9px 10px;} .wrap{padding:16px 12px 60px;}}
 </style>
 </head>
 <body>
@@ -111,56 +127,129 @@ _PAGE = r"""<!doctype html>
 
   <div class="tiles" id="tiles"></div>
 
+  <section>
+    <h2>Vertraute Server <span class="c" id="tCount">0</span></h2>
+    <div class="card" id="trusted"></div>
+    <p class="muted" style="font-size:12.5px;margin:8px 2px 0">
+      Zwei Server werden „Freunde", wenn <b>beide</b> die URL des anderen eintragen. „Wartet auf Gegenseite" heißt:
+      der andere Server muss dich noch eintragen.</p>
+  </section>
+
+  <section>
+    <h2>Blockierte Server <span class="c" id="bCount">0</span></h2>
+    <div class="card" id="blocked"></div>
+  </section>
+
   <section><h2>Clients <span class="c" id="cCount">0</span></h2><div class="card" id="clients"></div></section>
   <section><h2>Realms <span class="c" id="rCount">0</span></h2><div class="card" id="realms"></div></section>
-  <section><h2>Vertraute Server <span class="c" id="tCount">0</span></h2><div class="card" id="trusted"></div></section>
-  <section><h2>Freunde</h2><div class="card" id="friends"></div></section>
-  <section><h2>Backup</h2><div class="card" id="backup"></div></section>
-  <section><h2>Einstellungen</h2><div class="card" id="settings" style="padding:14px 16px"></div></section>
+
+  <section>
+    <h2>Backup</h2>
+    <div class="card">
+      <div id="backup"></div>
+      <div class="barrow" style="border-top:1px solid var(--line)">
+        <button class="btn btn--sm" data-act="backup-now" type="button">Jetzt sichern</button>
+        <button class="btn btn--sm btn--ghost" data-act="backup-restore" type="button">Von Partnern wiederherstellen</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Einstellungen</h2>
+    <div class="card">
+      <div class="setgrid" id="settings"></div>
+      <div class="barrow" style="border-top:1px solid var(--line)">
+        <button class="btn btn--sm" data-act="settings-save" type="button">Einstellungen speichern</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Verwaltung</h2>
+    <div class="card card--danger">
+      <div class="barrow">
+        <input class="in" id="pw-new" type="text" placeholder="Neues Admin-Passwort" style="max-width:280px">
+        <button class="btn btn--sm" data-act="pw-change" type="button">Passwort ändern</button>
+      </div>
+      <div class="barrow" style="border-top:1px solid var(--line)">
+        <button class="btn btn--sm btn--ghost" data-act="agent-reset" type="button">Agent zurücksetzen</button>
+        <button class="btn btn--sm btn--danger" data-act="reset" type="button">Server zurücksetzen</button>
+        <span class="muted" style="font-size:12.5px">„Zurücksetzen" löscht Clients, Nachrichten und Realms. Vertraute Server bleiben.</span>
+      </div>
+    </div>
+  </section>
+
   <section><h2>Aktivität</h2><div class="card" id="activity" style="padding:14px 16px"></div></section>
 
-  <p class="muted" style="font-size:12.5px">Bridge <span id="ver" class="mono"></span> · aktualisiert <span id="when"></span> · Auto-Aktualisierung alle 5 s</p>
+  <p class="muted" style="font-size:12.5px">Bridge <span id="ver" class="mono"></span> · aktualisiert <span id="when"></span></p>
 </div>
+
+<div class="msgs" id="msgs"></div>
 
 <script>
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 let PW=sessionStorage.getItem("bridge-admin-pw")||"";
-let timer=null;
+let timer=null, busy=false;
 
-function fmtTime(iso){ if(!iso) return "–"; try{const d=new Date(iso);return d.toLocaleString("de-DE");}catch(e){return iso;} }
+function fmtTime(iso){ if(!iso) return "–"; try{return new Date(iso).toLocaleString("de-DE");}catch(e){return iso;} }
 function ago(iso){ if(!iso) return "–"; const s=(Date.now()-new Date(iso).getTime())/1000;
   if(s<60) return Math.max(0,Math.round(s))+" s"; if(s<3600) return Math.round(s/60)+" min";
   if(s<86400) return Math.round(s/3600)+" h"; return Math.round(s/86400)+" d"; }
 function uptime(sec){ sec=sec||0; const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
   if(d) return d+" d "+h+" h"; if(h) return h+" h "+m+" min"; if(m) return m+" min"; return sec+" s"; }
 
-async function load(){
-  if(!PW){ showLogin(); return; }
-  let r;
-  try{ r=await fetch("/admin/overview",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({password:PW})}); }
-  catch(e){ $("srvState").innerHTML='<span class="pill pill--warn"><span class="dot"></span>Server nicht erreichbar</span>'; return; }
-  if(r.status===403||r.status===401){ PW=""; sessionStorage.removeItem("bridge-admin-pw"); showLogin("Falsches Passwort."); return; }
-  if(!r.ok){ $("srvState").innerHTML='<span class="pill pill--warn"><span class="dot"></span>Fehler '+r.status+'</span>'; return; }
-  render(await r.json());
+function msg(kind, text){
+  const el=document.createElement("div"); el.className="msg msg--"+kind; el.textContent=text;
+  $("msgs").appendChild(el); setTimeout(()=>{ el.style.opacity="0"; el.style.transition="opacity .3s"; setTimeout(()=>el.remove(),300); }, 4200);
 }
 
-function showLogin(msg){ if(timer){clearInterval(timer);timer=null;} $("app").hidden=true; $("login").style.display="grid";
-  $("loginErr").textContent=msg||""; $("pw").value=""; $("pw").focus(); }
-function showApp(){ $("login").style.display="none"; $("app").hidden=false;
-  if(!timer) timer=setInterval(load,5000); }
+async function admin(path, body){
+  const r=await fetch("/admin/"+path,{method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify(Object.assign({password:PW}, body||{}))});
+  if(r.status===403||r.status===401){ PW=""; sessionStorage.removeItem("bridge-admin-pw"); showLogin("Falsches Passwort oder Sitzung abgelaufen."); throw new Error("auth"); }
+  let data=null; try{ data=await r.json(); }catch(e){}
+  if(!r.ok){
+    let m="Fehler "+r.status; const d=data&&data.detail;
+    if(d) m = (typeof d==="string") ? d : (d.message||d.name||JSON.stringify(d));
+    throw new Error(m);
+  }
+  return data||{};
+}
+
+async function load(){
+  if(!PW){ showLogin(); return; }
+  let ov, blocked=[];
+  try{ ov=await admin("overview"); }
+  catch(e){ if(e.message==="auth") return; $("srvState").innerHTML='<span class="pill pill--warn"><span class="dot"></span>nicht erreichbar</span>'; return; }
+  try{ blocked=(await admin("blocked/list")).blocked_servers||[]; }catch(e){}
+  render(ov, blocked);
+}
+
+function showLogin(m){ if(timer){clearInterval(timer);timer=null;} $("app").hidden=true; $("login").style.display="grid";
+  $("loginErr").textContent=m||""; $("pw").value=""; $("pw").focus(); }
+function showApp(){ $("login").style.display="none"; $("app").hidden=false; if(!timer) timer=setInterval(load,6000); }
 
 function tile(v,l){ return '<div class="tile"><div class="v">'+v+'</div><div class="l">'+esc(l)+'</div></div>'; }
 function rows(head,body){ return '<table><thead><tr>'+head.map(h=>'<th>'+esc(h)+'</th>').join("")+'</tr></thead><tbody>'+body+'</tbody></table>'; }
 
-function render(d){
+const SET=[
+  ["friends_mode","Freunde-Modus",["open","trusted","local","off"]],
+  ["relay_mode","Weiterleiten (Relay)",["off","trusted"]],
+  ["accept_relayed","Weitergeleitetes annehmen",["ja","nein"]],
+  ["backup_mode","Backup",["peers","off"]],
+  ["routing","Routing",["direct","agent"]],
+  ["agent_mode","Agent",["learn","frozen","off"]],
+  ["conversation_mode","Konversationen",["all","started","off"]],
+];
+
+function render(d, blocked){
   showApp();
   const s=d.status||{};
-  const ready=!!(s.backup?s.backup.ready:true);
-  const stateReady = (s.backup && s.backup.ready===false) ? false : true;
-  $("srvState").innerHTML = stateReady
-    ? '<span class="pill pill--ok"><span class="dot"></span>Läuft</span>'
-    : '<span class="pill pill--info"><span class="dot"></span>Startet / stellt wieder her …</span>';
+  const starting = (s.backup && s.backup.ready===false);
+  $("srvState").innerHTML = starting
+    ? '<span class="pill pill--info"><span class="dot"></span>Startet / stellt wieder her …</span>'
+    : '<span class="pill pill--ok"><span class="dot"></span>Läuft</span>';
   $("srvUrl").textContent=s.url||"";
   $("ver").textContent="Protokoll "+(s.protocol_version||"?");
   $("when").textContent=new Date().toLocaleTimeString("de-DE");
@@ -168,14 +257,39 @@ function render(d){
   $("tiles").innerHTML =
     tile(s.clients??0,"Clients")+tile((d.realms||[]).length,"Realms")+tile(s.sessions??0,"Sessions")+
     tile(s.open_tasks??0,"Offene Tasks")+tile(s.conversations??0,"Konversationen")+
-    tile(s.scheduled_messages??0,"Geplante Nachr.")+tile((s.trusted_servers||[]).length,"Vertraute")+
+    tile((s.trusted_servers||[]).length,"Vertraute")+tile(s.stored_backups??0,"Backups gelagert")+
     tile("↑ "+uptime(s.uptime_seconds),"Laufzeit");
+
+  // Vertraute Server (mit Steuerung)
+  const ts=s.trusted_servers||[]; $("tCount").textContent=ts.length;
+  const trows = ts.map(t=>{
+    const ok=t.status==="connected"; const pill=ok?'pill--ok':(t.status==="pending"?'pill--warn':'pill--neutral');
+    const label= t.status==="connected"?"Verbunden":(t.status==="pending"?"Wartet auf Gegenseite":esc(t.status));
+    return '<tr><td class="mono">'+esc(t.url)+'</td>'+
+      '<td><span class="pill '+pill+'"><span class="dot"></span>'+label+'</span></td>'+
+      '<td class="mono">'+esc(t.protocol_version||"–")+'</td><td class="mono">'+esc(t.commit||"–")+'</td>'+
+      '<td class="act"><button class="btn btn--sm btn--ghost" data-act="trusted-connect" data-url="'+esc(t.url)+'">Neu verbinden</button> '+
+      '<button class="btn btn--sm btn--ghost" data-act="trusted-remove" data-url="'+esc(t.url)+'">Entfernen</button></td></tr>';
+  }).join("");
+  $("trusted").innerHTML =
+    (ts.length ? rows(["Server-URL","Status","Version","Commit",""], trows) : '<div class="empty">Noch keine vertrauten Server.</div>')
+    + '<div class="addrow"><input class="in mono" id="t-add" placeholder="https://anderer-server.ts.net" autocomplete="off">'
+    + '<button class="btn" data-act="trusted-add" type="button">Hinzufügen</button></div>';
+
+  // Blockierte Server
+  blocked=blocked||[]; $("bCount").textContent=blocked.length;
+  const brows=blocked.map(u=>'<tr><td class="mono">'+esc(u)+'</td><td class="act">'+
+    '<button class="btn btn--sm btn--ghost" data-act="blocked-remove" data-url="'+esc(u)+'">Entsperren</button></td></tr>').join("");
+  $("blocked").innerHTML =
+    (blocked.length ? rows(["Server-URL",""], brows) : '<div class="empty">Keine blockierten Server.</div>')
+    + '<div class="addrow"><input class="in mono" id="b-add" placeholder="https://zu-blockierender-server.ts.net" autocomplete="off">'
+    + '<button class="btn btn--ghost" data-act="blocked-add" type="button">Blockieren</button></div>';
 
   // Clients
   const cl=d.clients||[]; $("cCount").textContent=cl.length;
-  $("clients").innerHTML = cl.length ? rows(["Client-IP","Name","Realms","Wartend","Erstellt","Letztes Signal"],
+  $("clients").innerHTML = cl.length ? rows(["Client-IP","Name","Realms","Wartend","Letztes Signal"],
     cl.map(c=>'<tr><td class="mono">'+esc(c.client_ip)+'</td><td>'+esc(c.name||"–")+'</td><td>'+((c.realms||[]).length)+
-    '</td><td>'+(c.waiting_messages||0)+'</td><td class="mono">'+fmtTime(c.created_at)+'</td><td class="mono">vor '+ago(c.last_signal)+'</td></tr>').join(""))
+    '</td><td>'+(c.waiting_messages||0)+'</td><td class="mono">vor '+ago(c.last_signal)+'</td></tr>').join(""))
     : '<div class="empty">Noch keine Clients angemeldet.</div>';
 
   // Realms
@@ -185,41 +299,65 @@ function render(d){
     (r.commands||0)+'</td><td>'+(r.topics||0)+'</td><td>'+(r.is_public?'<span class="pill pill--info">öffentlich</span>':'')+'</td></tr>').join(""))
     : '<div class="empty">Keine Realms.</div>';
 
-  // Trusted
-  const ts=s.trusted_servers||[]; $("tCount").textContent=ts.length;
-  $("trusted").innerHTML = ts.length ? rows(["Server","Status","Version","Commit","Verbunden seit"],
-    ts.map(t=>{const ok=t.status==="connected";const pill=ok?'pill--ok':(t.status==="pending"?'pill--warn':'pill--neutral');
-    return '<tr><td class="mono">'+esc(t.url)+'</td><td><span class="pill '+pill+'"><span class="dot"></span>'+esc(t.status)+
-    '</span></td><td class="mono">'+esc(t.protocol_version||"–")+'</td><td class="mono">'+esc(t.commit||"–")+
-    '</td><td class="mono">'+(t.connected_at?fmtTime(t.connected_at):"–")+'</td></tr>';}).join(""))
-    : '<div class="empty">Keine vertrauten Server eingetragen.</div>';
-
-  // Friends
-  const f=s.friends||{};
-  $("friends").innerHTML='<div class="empty"><div class="kv">'+
-    '<span><b>Modus</b> '+esc(f.mode??"?")+'</span>'+
-    Object.keys(f).filter(k=>k!=="mode"&&typeof f[k]!=="object").map(k=>'<span><b>'+esc(k)+'</b> '+esc(f[k])+'</span>').join("")+
-    '</div></div>';
-
   // Backup
   const b=s.backup||{};
-  $("backup").innerHTML='<div class="empty"><div class="kv">'+
+  $("backup").innerHTML='<div class="barrow"><div class="kv">'+
     '<span><b>Modus</b> '+esc(b.mode??"?")+'</span>'+
     '<span><b>Bereit</b> '+(b.ready?"ja":"nein")+'</span>'+
     (b.last_backup_at?'<span><b>Letztes Backup</b> vor '+ago(b.last_backup_at)+'</span>':'')+
     '<span><b>Für andere gelagert</b> '+(s.stored_backups??0)+'</span>'+
     '</div></div>';
 
-  // Settings
-  const set=s.settings||{};
-  $("settings").innerHTML='<div class="kv">'+Object.keys(set).map(k=>'<span><b>'+esc(k)+'</b> '+esc(set[k])+'</span>').join("")+'</div>';
+  // Einstellungen (editierbar) - nur neu aufbauen, wenn nicht gerade im Fokus
+  if(document.activeElement===document.body || !$("settings").querySelector("select")){
+    const set=s.settings||{};
+    $("settings").innerHTML = SET.map(([key,lbl,opts])=>{
+      let cur = set[key];
+      if(key==="accept_relayed") cur = cur ? "ja":"nein";
+      return '<div class="setfield"><label>'+esc(lbl)+'</label><select class="in" data-set="'+key+'">'+
+        opts.map(o=>'<option'+(String(o)===String(cur)?' selected':'')+'>'+esc(o)+'</option>').join("")+'</select></div>';
+    }).join("");
+  }
 
-  // Activity / errors
+  // Aktivität
   const errs=s.errors||{}; const ek=Object.keys(errs);
   $("activity").innerHTML = ek.length
     ? '<div class="kv">'+ek.map(k=>'<span><b>'+esc(k)+'</b> '+esc(errs[k])+'</span>').join("")+'</div>'
     : '<span class="muted">Keine Fehler erfasst.</span>';
 }
+
+async function act(fn, okText){
+  if(busy) return; busy=true;
+  try{ const r=await fn(); if(okText) msg("ok", okText); await load(); }
+  catch(e){ if(e.message!=="auth") msg("err", e.message); }
+  finally{ busy=false; }
+}
+
+document.addEventListener("click", ev=>{
+  const btn=ev.target.closest("[data-act]"); if(!btn) return;
+  const a=btn.dataset.act, url=btn.dataset.url;
+  if(a==="trusted-add"){ const v=($("t-add").value||"").trim(); if(!v){msg("err","Bitte eine URL eingeben.");return;}
+    act(()=>admin("trusted/add",{url:v}), "Vertrauter Server eingetragen – wartet auf die Gegenseite."); }
+  else if(a==="trusted-remove"){ act(()=>admin("trusted/remove",{url}), "Entfernt."); }
+  else if(a==="trusted-connect"){ act(()=>admin("trusted/connect",{url}), "Verbindung wird neu aufgebaut."); }
+  else if(a==="blocked-add"){ const v=($("b-add").value||"").trim(); if(!v){msg("err","Bitte eine URL eingeben.");return;}
+    act(()=>admin("blocked/add",{url:v}), "Server blockiert."); }
+  else if(a==="blocked-remove"){ act(()=>admin("blocked/remove",{url}), "Entsperrt."); }
+  else if(a==="backup-now"){ act(()=>admin("backup/now"), "Backup ausgelöst."); }
+  else if(a==="backup-restore"){ if(confirm("Alles im Arbeitsspeicher mit dem neuesten Backup der Partner ersetzen?"))
+    act(()=>admin("backup/restore"), "Wiederherstellung gestartet."); }
+  else if(a==="settings-save"){ const body={};
+    $("settings").querySelectorAll("select[data-set]").forEach(sel=>{ let v=sel.value;
+      if(sel.dataset.set==="accept_relayed") v=(v==="ja"); body[sel.dataset.set]=v; });
+    act(()=>admin("settings",body), "Einstellungen gespeichert."); }
+  else if(a==="pw-change"){ const np=($("pw-new").value||"").trim(); if(np.length<4){msg("err","Neues Passwort ist zu kurz.");return;}
+    if(confirm("Admin-Passwort wirklich ändern?")) act(async()=>{ await admin("password/change",{new_password:np});
+      PW=np; sessionStorage.setItem("bridge-admin-pw",np); $("pw-new").value=""; }, "Passwort geändert."); }
+  else if(a==="agent-reset"){ if(confirm("BridgeAgent auf die Grundwerte zurücksetzen?"))
+    act(()=>admin("agent",{action:"reset"}), "Agent zurückgesetzt."); }
+  else if(a==="reset"){ if(confirm("Server wirklich zurücksetzen? Clients, Nachrichten und Realms werden gelöscht (vertraute Server bleiben)."))
+    act(()=>admin("reset"), "Server zurückgesetzt."); }
+});
 
 $("loginForm").addEventListener("submit",e=>{e.preventDefault();PW=$("pw").value;sessionStorage.setItem("bridge-admin-pw",PW);load();});
 $("refreshBtn").addEventListener("click",load);
