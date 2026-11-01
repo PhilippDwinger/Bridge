@@ -16,11 +16,12 @@ import secrets
 import zlib
 
 from bridge import errors
-from bridge.banker import (client_key_store, ip_store, mailbox_store, realm_store, session_store, task_store,
-                           trust_store)
+from bridge.banker import (client_key_store, friend_store, ip_store, mailbox_store, realm_store, schedule_store,
+                           session_store, status_store, task_store, trust_store)
 from bridge.core import protocol
 from bridge.errors.exceptions import Exceptions, is_exception
 from bridge.server import s2s_client, url_env
+from bridge.subservices.bridge_agent import agent
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -39,6 +40,10 @@ state = {
     "last_backup_peers": [],
     "last_restore": None,
     "last_error": None,
+    # Set when own backups at the peers could not be read at the start - regular backups wait for an admin
+    "paused": None,
+    # The last backup was too big and was sent without the mailbox contents
+    "without_messages": False,
 }
 # peer_url -> (digest of the last snapshot sent, connected_at of the peer at that time)
 _sent_to = {}
@@ -73,13 +78,13 @@ def set_password(password, server_url):
 
 
 # region snapshot
-def create_snapshot():
-    """Everything in RAM as JSON-ready data."""
+def create_snapshot(include_messages=True):
+    """Everything in RAM as JSON-ready data. include_messages=False: without mailbox contents (if it is too big)."""
     clients = {}
     for client_key, entry in client_key_store.client_key_storage.items():
         clients[client_key] = {key: _iso(value) for key, value in entry.items()}
     mailboxes = {}
-    for client_key, mailbox in mailbox_store.mailbox_storage.items():
+    for client_key, mailbox in (mailbox_store.mailbox_storage.items() if include_messages else ()):
         pools = {}
         for pool_name in mailbox.POLL_ORDER:
             pools[str(pool_name)] = [message.to_dict() for message in mailbox._get_pool(pool_name)]
@@ -103,6 +108,15 @@ def create_snapshot():
                            for task_id, entry in task_store.outgoing_tasks.items()},
         "incoming_tasks": {task_id: {key: _iso(value) for key, value in entry.items()}
                            for task_id, entry in task_store.incoming_tasks.items()},
+        # What the BridgeAgent learned on this server (the whole snapshot is compressed and encrypted)
+        "agent": agent.to_state() if agent.enabled() else None,
+        # Planned messages - sent after a restore (late ones right away, with late_by_seconds)
+        "scheduled": {message_id: {"client_key": entry["client_key"], "send_at": entry["send_at"].isoformat(),
+                                   "message": entry["message"].to_dict(), "lifetime_seconds": entry["lifetime_seconds"],
+                                   "default_lifetime": entry["default_lifetime"], "created_at": entry["created_at"].isoformat()}
+                      for message_id, entry in schedule_store.scheduled.items()},
+        # BridgeFriends: friendships, invitations (only the argon2 key, never a password), presence, block list
+        "friends": friend_store.to_state(),
     }
 
 
@@ -158,6 +172,7 @@ def restore_snapshot(snapshot):
     for token, entry in snapshot["sessions"].items():
         session_store.session_storage[token] = {key: _parse(value) if key != "client_key" else value
                                                 for key, value in entry.items()}
+    session_store.rebuild_index()
 
     classes = {RealmType.PUBLIC: PublicRealm, RealmType.PROTECTED: ProtectedRealm, RealmType.PRIVATE: PrivateRealm}
     for realm_state in snapshot["realms"]:
@@ -173,6 +188,24 @@ def restore_snapshot(snapshot):
         task_store.outgoing_tasks[task_id] = {key: _parse(value) if key == "expires_at" else value for key, value in entry.items()}
     for task_id, entry in snapshot["incoming_tasks"].items():
         task_store.incoming_tasks[task_id] = {key: _parse(value) if key == "expires_at" else value for key, value in entry.items()}
+    task_store.rebuild_counts()
+    if snapshot.get("agent"):
+        agent.load_state(snapshot["agent"])
+    schedule_store.reset()
+    for message_id, entry in (snapshot.get("scheduled") or {}).items():
+        planned = message_from_dict(entry["message"])
+        if is_exception(planned) or entry["client_key"] not in client_key_store.client_key_storage:
+            continue
+        # Our own planned message: its lifetime may be longer than what we accept from other servers
+        planned.expires_at = _parse(entry["message"]["expires_at"])
+        schedule_store.add(message_id, {"client_key": entry["client_key"], "send_at": _parse(entry["send_at"]),
+                                        "message": planned, "lifetime_seconds": entry.get("lifetime_seconds"),
+                                        "default_lifetime": entry.get("default_lifetime", True),
+                                        "created_at": _parse(entry["created_at"])})
+        status_store.remember_scheduled(planned)
+
+    if "friends" in snapshot:
+        friend_store.load_state(snapshot["friends"])
 
     return {
         "clients": len(client_key_store.client_key_storage),
@@ -224,29 +257,47 @@ def _connected_peers():
 
 
 # region backup
+def _digest(snapshot):
+    return hashlib.sha256(json.dumps({key: value for key, value in snapshot.items() if key != "created_at"},
+                                     sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 async def backup_now(force=False):
     """Sends the current snapshot to every connected trusted server that does not have it yet."""
     if not available():
         state["last_error"] = "cryptography is not installed (pip install cryptography)"
         return Exceptions.FAILED
+    if state.get("paused") and not force:
+        # Own backups at the peers could not be read at the start - they are not overwritten automatically
+        return {"sent_to": [], "size_bytes": 0, "paused": state["paused"]}
+    state["paused"] = None
     peers = _connected_peers()
     if not peers:
         return {"sent_to": [], "size_bytes": 0}
     snapshot = create_snapshot()
-    digest = hashlib.sha256(json.dumps({key: value for key, value in snapshot.items() if key != "created_at"},
-                                       sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    # Hashing, packing and encrypting run in a thread - the server keeps answering meanwhile
+    digest = await asyncio.to_thread(_digest, snapshot)
     targets = [peer for peer in peers
                if force or _sent_to.get(peer["url"]) != (digest, peer["connected_at"])]
     if not targets:
         return {"sent_to": [], "size_bytes": state["last_backup_size"] or 0, "unchanged": True}
-    blob = encrypt(snapshot)
+    blob = await asyncio.to_thread(encrypt, snapshot)
     if is_exception(blob):
         return blob
     size = blob_size(blob)
+    state["without_messages"] = False
     if size > protocol.max_backup_mb * 1024 * 1024:
-        state["last_error"] = f"Backup too large ({size} bytes)"
-        errors.handle_error(Exceptions.FAILED, state["last_error"])
-        return Exceptions.FAILED
+        # Too big (e.g. one client keeps huge messages): better a backup of everything else than none at all
+        blob = await asyncio.to_thread(encrypt, create_snapshot(include_messages=False))
+        if is_exception(blob):
+            return blob
+        size = blob_size(blob)
+        state["without_messages"] = True
+        errors.handle_error(Exceptions.FAILED, "Backup too large - sent without the mailbox contents")
+        if size > protocol.max_backup_mb * 1024 * 1024:
+            state["last_error"] = f"Backup too large even without messages ({size} bytes)"
+            errors.handle_error(Exceptions.FAILED, state["last_error"])
+            return Exceptions.FAILED
     sent_to = []
     for peer in targets:
         result = await s2s_client.backup_store(peer["url"], blob)
@@ -273,20 +324,44 @@ async def restore_from_peers(only_if_fresh=True):
         result = {"restored": False, "reason": "server already has data"}
         state["last_restore"] = result
         return result
-    newest = None
+    found = []
+    unanswered = []
     for peer in _connected_peers():
-        blob = await s2s_client.backup_fetch(peer["url"])
-        if isinstance(blob, dict) and blob.get("server_url") == url_env.base_root:
-            if newest is None or blob.get("created_at", "") > newest[1].get("created_at", ""):
-                newest = (peer["url"], blob)
-    if newest is None:
-        result = {"restored": False, "reason": "no backup found"}
+        blob = None
+        for attempt in range(3):
+            blob = await s2s_client.backup_fetch(peer["url"])
+            if not is_exception(blob):
+                break
+            await asyncio.sleep(1)
+        if is_exception(blob):
+            # Not the same as "no backup there": the peer may hold our newest backup
+            unanswered.append(peer["url"])
+        elif isinstance(blob, dict) and blob.get("server_url") == url_env.base_root and isinstance(blob.get("created_at"), str):
+            found.append((peer["url"], blob))
+    if not found:
+        if unanswered:
+            # Do not overwrite a backup we could not see with an empty server - an admin decides
+            state["paused"] = f"could not ask {', '.join(unanswered)} for our backup - /admin/backup/now resumes backups"
+            result = {"restored": False, "reason": state["paused"]}
+            errors.handle_error(Exceptions.FAILED, state["paused"])
+        else:
+            result = {"restored": False, "reason": "no backup found"}
         state["last_restore"] = result
         return result
-    snapshot = decrypt(newest[1])
-    if is_exception(snapshot):
-        state["last_restore"] = {"restored": False, "reason": "backup could not be decrypted"}
-        return snapshot
+    # Newest first - if one cannot be read (broken, other password, a peer lying about the date), the next one
+    found.sort(key=lambda item: item[1]["created_at"], reverse=True)
+    newest, snapshot = None, None
+    for peer_url, blob in found:
+        candidate = await asyncio.to_thread(decrypt, blob)
+        if not is_exception(candidate) and isinstance(candidate, dict):
+            newest, snapshot = (peer_url, blob), candidate
+            break
+    if snapshot is None:
+        # Do not overwrite these backups with an empty server - an admin decides (/admin/backup/now resumes)
+        state["paused"] = "own backups were found at the peers but none could be read (password changed?)"
+        state["last_restore"] = {"restored": False, "reason": state["paused"]}
+        errors.handle_error(Exceptions.FAILED, state["paused"])
+        return Exceptions.FAILED
     counts = restore_snapshot(snapshot)
     if is_exception(counts):
         return counts
@@ -303,10 +378,10 @@ async def run():
         if protocol.backup_mode == "peers" and available() and trust_store.list_servers():
             loop = asyncio.get_running_loop()
             deadline = loop.time() + protocol.backup_restore_wait_seconds
-            while loop.time() < deadline and not _connected_peers():
+            # Wait for all trusted servers (any of them may hold the newest backup), at most the wait time
+            while loop.time() < deadline and len(_connected_peers()) < len(trust_store.list_servers()):
                 await asyncio.sleep(0.5)
             if _connected_peers():
-                await asyncio.sleep(1.5)  # give the other trusted servers a moment to connect too
                 await restore_from_peers(only_if_fresh=True)
     except Exception as error:
         state["last_error"] = f"restore: {error!r}"
@@ -326,7 +401,7 @@ async def run():
 
 async def final_backup():
     """Last backup when the server shuts down normally."""
-    if protocol.backup_mode == "peers" and state["restore_done"] and available():
+    if protocol.backup_mode == "peers" and state["restore_done"] and available() and not state.get("paused"):
         try:
             await asyncio.wait_for(backup_now(), 10)
         except Exception as error:

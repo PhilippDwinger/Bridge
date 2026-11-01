@@ -9,10 +9,11 @@ from bridge.security import authorizer
 from bridge.security.hasher import hash_password, verify_password
 from bridge.server import runtime, s2s_client, url_env
 from bridge.server.connection_modes import ConnectionMode
-from bridge.server.server import start_server
+from bridge.server.server import start_server, stop_server
 from bridge.realm import service as realm_service
 from bridge.core import backup, clients
-from bridge.banker import backup_store, status_store
+from bridge.banker import backup_store, conversation_store, friend_store, mirror_store, schedule_store, status_store
+from bridge.realm import sync as realm_sync
 
 
 def verify_bridge_password(password, bridge_password_hash):
@@ -109,6 +110,9 @@ class Bridge:
         if server_url == self.public_url:
             errors.handle_error(Exceptions.ARGUMENT_ERROR, "A server cannot trust itself")
             return Exceptions.ARGUMENT_ERROR
+        if friend_store.is_blocked(server_url):
+            errors.handle_error(Exceptions.ARGUMENT_ERROR, f"{server_url} is blocked - remove it from the block list first")
+            return Exceptions.ARGUMENT_ERROR
         result = trust_store.add_server(server_url)
         if is_exception(result):
             return result
@@ -149,6 +153,49 @@ class Bridge:
         return self._get_trusted_servers()
     # endregion trusted servers
 
+    # region blocked servers
+    # A blocked server: no friendships and no friend connections with it, no relayed messages from it.
+    # Trusted servers cannot be blocked (remove the trust first). The block list is part of the backup.
+    def _block_server(self, url):
+        server_url = address.normalize_url(url)
+        if server_url is None or server_url == self.public_url:
+            errors.handle_error(Exceptions.ARGUMENT_ERROR, f"Invalid server URL to block: {url!r}")
+            return Exceptions.ARGUMENT_ERROR
+        if trust_store.matches_trusted(server_url):
+            errors.handle_error(Exceptions.ARGUMENT_ERROR, f"{server_url} is trusted - remove it from the trusted list first")
+            errors.set_client_details(problems=["a trusted server cannot be blocked - remove the trust first"])
+            return Exceptions.ARGUMENT_ERROR
+        from bridge.subservices.bridge_friends import link as friend_link
+        friend_store.blocked.add(server_url)
+        friend_link.drop(server_url)
+        return sorted(friend_store.blocked)
+
+    def _unblock_server(self, url):
+        server_url = address.normalize_url(url)
+        if server_url is None:
+            errors.handle_error(Exceptions.ARGUMENT_ERROR, f"Invalid server URL: {url!r}")
+            return Exceptions.ARGUMENT_ERROR
+        # Unblock by host and port, so any spelling of the same server (scheme, port, path) removes the block.
+        key = address.server_key(server_url)
+        matches = [blocked_url for blocked_url in friend_store.blocked if address.server_key(blocked_url) == key]
+        if not matches:
+            errors.handle_error(Exceptions.KEY_ERROR, f"{url!r} is not blocked")
+            return Exceptions.KEY_ERROR
+        for blocked_url in matches:
+            friend_store.blocked.discard(blocked_url)
+        return sorted(friend_store.blocked)
+
+    def block_server(self, password, url):
+        if not self.verify_password(password):
+            return Exceptions.NOT_ALLOWED
+        return self._block_server(url)
+
+    def unblock_server(self, password, url):
+        if not self.verify_password(password):
+            return Exceptions.NOT_ALLOWED
+        return self._unblock_server(url)
+    # endregion blocked servers
+
     # region control
     def _reset(self):
         # Removes all clients, sessions, messages and realms. Trusted servers stay.
@@ -157,6 +204,12 @@ class Bridge:
         ip_store.reset()
         client_key_store.reset()
         realm_store.reset()
+        mirror_store.reset()
+        schedule_store.reset()
+        from bridge.messenger import conversations
+        conversations.reset()
+        # Friendships, invitations and presence go - the block list stays (like the trusted list)
+        friend_store.reset()
         task_store.reset()
         status_store.reset()
         authorizer.reset()
@@ -184,19 +237,31 @@ class Bridge:
             "max_clients": protocol.max_clients,
             "realms": len(realm_store.realm_storage),
             "open_tasks": len(task_store.incoming_tasks),
+            "scheduled_messages": len(schedule_store.scheduled),
+            "conversations": len(conversation_store.conversations),
             "public_realm_address": realm_service.get_public_realm_address(),
             "trusted_servers": trust_store.list_servers(),
             "settings": self._get_settings(),
             "backup": {key: value for key, value in backup.status().items() if key != "stored_for_other_servers"},
             "stored_backups": len(backup_store.stored_backups),
+            "realm_sync": realm_sync.status(),
+            "friends": self._friends_status(),
             "errors": {error.name: entry["amount"] for error, entry in errors.tracker.get_errors().items()},
         }
+
+    def _friends_status(self):
+        from bridge.subservices.bridge_friends import service as friends
+        return friends.status()
 
     # region settings
     SETTINGS = {
         "relay_mode": ("off", "trusted"),
         "accept_relayed": (True, False),
         "backup_mode": ("peers", "off"),
+        "agent_mode": ("learn", "frozen", "off"),
+        "conversation_mode": ("all", "started", "off"),
+        "routing": ("direct", "agent"),
+        "friends_mode": ("open", "trusted", "local", "off"),
     }
 
     def _get_settings(self):
@@ -283,3 +348,8 @@ class Bridge:
     def start_server(self, connection_mode: ConnectionMode = ConnectionMode.UNSAFE,
                      ssl_keyfile="localhost+2-key.pem", ssl_certfile="localhost+2.pem") -> None:
         start_server(self, self.host, self.port, connection_mode, ssl_keyfile, ssl_certfile)
+
+    def stop_server(self) -> bool:
+        """Stops the running server normally (like Ctrl+C, the last backup is sent first).
+        Can be called from another thread. False if no server is running."""
+        return stop_server()

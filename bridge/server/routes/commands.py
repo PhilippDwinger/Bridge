@@ -18,6 +18,8 @@ async def call(payload: dict):
         mode=get_field(payload, "mode", str, required=False, default=str(MessageMode.SAFE)),
         strategy=get_field(payload, "strategy", str, required=False, default="least_busy"),
         wait_seconds=get_field(payload, "wait_seconds", (int, float), required=False, default=0),
+        # Progress of the host while the task runs: off (default) | latest | all
+        progress=get_field(payload, "progress", str, required=False, default="off"),
     ))
 
 
@@ -32,4 +34,16 @@ async def respond(payload: dict):
         get_field(payload, "task_id", str),
         payload.get("content"),
         mode=get_field(payload, "mode", str, required=False, default=str(MessageMode.SAFE)),
+    ))
+
+
+@Router.post("/progress")
+async def progress(payload: dict):
+    # The host reports an intermediate state. Dropped (delivered: false) if the caller did not accept progress.
+    client_key = authenticate(payload)
+    return check(await commands.send_progress(
+        client_key,
+        get_field(payload, "task_id", str),
+        payload.get("content"),
+        percent=get_field(payload, "percent", (int, float), required=False),
     ))

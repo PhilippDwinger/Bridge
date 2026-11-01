@@ -9,22 +9,52 @@ ADDRESS_SPLIT = "<|BRIDGE_IP_SPLIT|>"
 MAX_ADDRESS_LENGTH = 512
 
 
+DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 def normalize_url(url):
-    """Returns the canonical form of a server URL or None if it is not a valid http(s) URL."""
-    if not isinstance(url, str):
+    """Returns the canonical form of a server URL or None if it is not a valid http(s) URL.
+    Canonical: lower case, no default port (https://x:443 = https://x), no dot at the end of the host, no "/" at the
+    end - otherwise the same server could appear under several names (block list, limits per server)."""
+    if not isinstance(url, str) or len(url) > 300:
         return None
     url = url.strip()
     if not url or ADDRESS_SPLIT in url:
         return None
     try:
+        url.encode("ascii")
         parts = urlsplit(url)
-    except ValueError:
+        port = parts.port
+        host = parts.hostname
+    except (ValueError, UnicodeEncodeError):
         return None
-    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+    scheme = parts.scheme.lower()
+    if scheme not in DEFAULT_PORTS or not host:
         return None
     if parts.query or parts.fragment or parts.username or parts.password:
         return None
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
+    host = host.lower().rstrip(".")
+    if not host or any(char in host for char in " %\\"):
+        return None
+    if ":" in host:
+        host = f"[{host}]"  # IPv6
+    netloc = host if port is None or port == DEFAULT_PORTS[scheme] else f"{host}:{port}"
+    normalized = urlunsplit((scheme, netloc, parts.path.rstrip("/"), "", ""))
+    try:
+        import httpx
+        httpx.URL(normalized)
+    except Exception:
+        return None
+    return normalized
+
+
+def server_key(url):
+    """Host and port of a server URL (without scheme and path) - for the block list and limits per server:
+    https://evil.example and http://evil.example/x are the same server for them."""
+    normalized = normalize_url(url) if isinstance(url, str) else None
+    if normalized is None:
+        return url
+    return urlsplit(normalized).netloc
 
 
 def make_address(server_url, local_id):

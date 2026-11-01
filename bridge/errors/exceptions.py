@@ -118,6 +118,70 @@ class Exceptions:
         hint="url_env.base_root is not set. Create the Bridge object (it sets the public URL) before creating clients."
     )
 
+    ARGS_INVALID = ExceptionInfo(
+        name="Arguments Invalid",
+        type="warning",
+        status_code=400,
+        default_message="The arguments do not match the signature of the command. See 'details'.",
+        hint="The host gave the command a signature with validate=strict (BridgeExpress)."
+    )
+
+    RESPONSE_INVALID = ExceptionInfo(
+        name="Response Invalid",
+        type="warning",
+        status_code=400,
+        default_message="The response does not match the return type of the command. See 'details'.",
+        hint="The command has a signature with validate=strict, so the response must fit 'returns'."
+    )
+
+    SIGNATURE_MISMATCH = ExceptionInfo(
+        name="Signature Mismatch",
+        type="warning",
+        status_code=409,
+        default_message="Another host already hosts this command with a different signature.",
+        hint="All hosts of a command need the same signature (params, returns, validate). Without a signature the existing one is used."
+    )
+
+    TIMEZONE_MISSING = ExceptionInfo(
+        name="Timezone Missing",
+        type="warning",
+        status_code=400,
+        default_message="A point in time needs a timezone: an offset like +01:00 / Z, or the field 'timezone' (e.g. 'Europe/Berlin').",
+        hint="Bridge never guesses the timezone of a time."
+    )
+
+    ALREADY_EXPIRED = ExceptionInfo(
+        name="Already Expired",
+        type="warning",
+        status_code=400,
+        default_message="The end of the lifetime is already over (or before the message would be sent). See 'details'.",
+        hint="expires_at / expires_in_seconds of the message."
+    )
+
+    SEND_TIME_PASSED = ExceptionInfo(
+        name="Send Time Passed",
+        type="warning",
+        status_code=400,
+        default_message="The planned send time is already over (if_past = reject). See 'details'.",
+        hint="Use if_past = send to send it right away with a warning instead."
+    )
+
+    TOO_MANY_SCHEDULED = ExceptionInfo(
+        name="Too Many Scheduled",
+        type="warning",
+        status_code=429,
+        default_message="This client has too many planned messages. Cancel some or wait until they are sent.",
+        hint="protocol.max_scheduled_per_client"
+    )
+
+    AGENT_OFF = ExceptionInfo(
+        name="Agent Off",
+        type="warning",
+        status_code=503,
+        default_message="The BridgeAgent is switched off on this server.",
+        hint="Server setting agent_mode is 'off'. Use 'learn' or 'frozen' to get estimates."
+    )
+
     SERVER_STARTING = ExceptionInfo(
         name="Server Starting",
         type="warning",
@@ -270,6 +334,40 @@ class Exceptions:
         hint="Check that the other server runs, that its public URL is correct and reachable from this server."
     )
     # endregion server to server
+
+    # region BridgeFriends
+    FRIENDS_OFF = ExceptionInfo(
+        name="Friends Off",
+        type="warning",
+        status_code=403,
+        default_message="Friendships are switched off on this server, or not allowed with this server (friends_mode).",
+        hint="Admin setting friends_mode: open (own, trusted and neutral servers) | trusted | local | off."
+    )
+
+    FRIEND_INVITE_INVALID = ExceptionInfo(
+        name="Friend Invite Invalid",
+        type="warning",
+        status_code=403,
+        default_message="Unknown friend address or wrong password (or the invitation expired).",
+        hint="The same answer for an unknown name and a wrong password - so nobody can find out which names exist."
+    )
+
+    FRIEND_NOT_FOUND = ExceptionInfo(
+        name="Friend Not Found",
+        type="warning",
+        status_code=404,
+        default_message="This client is not your friend, or the friendship is not active (yet).",
+        hint="Check /friends/list. A friendship waiting for a manual answer is not active yet."
+    )
+
+    FRIEND_SERVER_NOT_ALLOWED = ExceptionInfo(
+        name="Friend Server Not Allowed",
+        type="warning",
+        status_code=403,
+        default_message="Friendships with this server are not possible (blocked, not allowed, or not reachable as a friend server).",
+        hint="The server is on the block list, friends_mode does not allow it, or its address is private while this server is public."
+    )
+    # endregion BridgeFriends
 
     # region error system
     ERROR_HANDLING_ERROR = ExceptionInfo(

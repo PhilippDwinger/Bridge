@@ -106,6 +106,11 @@ def delete_client(client_key):
         return Exceptions.CLIENT_NOT_FOUND
     session_store.remove_sessions_of_client(client_key)
     mailbox_store.remove_mailbox(client_key)
+    from bridge.banker import schedule_store
+    schedule_store.remove_client(client_key)
+    # Realms: leave them, own local realms are removed (see realm.service.forget_client)
+    from bridge.realm import service as realm_service
+    realm_service.forget_client(entry.get("client_ip"), list(entry.get("realms", [])))
     ip_store.remove_ip(entry.get("client_ip"))
     client_key_store.remove_client(client_key)
     return True

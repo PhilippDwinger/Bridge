@@ -1,8 +1,8 @@
 from fastapi import APIRouter
 
 from bridge.core import address, clients
-from bridge.errors.exceptions import Exceptions
-from bridge.realm import service as realm_service, topics
+from bridge.errors.exceptions import Exceptions, is_exception
+from bridge.realm import service as realm_service, sync as realm_sync, topics
 from bridge.server.routes._helpers import authenticate, check, fail, get_field
 
 # All realm actions work the same for realms on this server and on trusted servers:
@@ -66,10 +66,21 @@ async def leave(payload: dict):
     return {"left": True}
 
 
+# The realm server could not be reached - the synced copy can answer instead
+UNREACHABLE = (Exceptions.REMOTE_SERVER_ERROR, Exceptions.SERVER_NOT_TRUSTED, Exceptions.SERVER_STARTING)
+
+
 @Router.post("/info")
 async def info(payload: dict):
-    _, _, result = await _run(payload, "info")
-    return result
+    client_key = authenticate(payload)
+    realm_address = get_field(payload, "realm_address", str)
+    caller_ip = clients.get_client_ip(client_key)
+    result = await realm_service.execute(caller_ip, realm_address, "info", {})
+    if result in UNREACHABLE:
+        fallback = realm_sync.mirror_info(realm_address, caller_ip)
+        if fallback is not None:
+            return fallback
+    return check(result)
 
 
 @Router.post("/kick")
@@ -101,15 +112,29 @@ async def create_command(payload: dict):
         "command_name": get_field(payload, "command_name", str),
         "allowed_roles": get_field(payload, "allowed_roles", list, required=False),
         "description": get_field(payload, "description", str, required=False),
+        # BridgeExpress: {"params": [{"name", "type", "optional", "description"}], "returns": "...", "validate": "strict"}
+        "signature": get_field(payload, "signature", dict, required=False),
     })
     return {"created": True}
 
 
 @Router.post("/commands")
 async def list_commands(payload: dict):
-    # Command catalog: all commands of the realm the caller may use
-    _, _, catalog = await _run(payload, "list_commands")
-    return {"commands": catalog}
+    # Command catalog: all commands of the realm the caller may use.
+    # Realms on other servers: from the synced copy if it is up to date (fast, no server to server request).
+    client_key = authenticate(payload)
+    realm_address = get_field(payload, "realm_address", str)
+    caller_ip = clients.get_client_ip(client_key)
+    if address.server_of(realm_address) != address.server_of(caller_ip) and not realm_sync.is_stale(realm_address):
+        catalog = realm_sync.mirror_catalog(realm_address, caller_ip)
+        if catalog is not None:
+            return {"commands": catalog, "source": "mirror", "stale": False}
+    result = await realm_service.execute(caller_ip, realm_address, "list_commands", {})
+    if result in UNREACHABLE:
+        catalog = realm_sync.mirror_catalog(realm_address, caller_ip)
+        if catalog is not None:
+            return {"commands": catalog, "source": "mirror", "stale": True}
+    return {"commands": check(result), "source": "realm_server", "stale": False}
 
 
 @Router.post("/command/remove")

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from bridge.messenger import service as messenger_service
+from bridge.messenger import outbox, service as messenger_service
 from bridge.messenger.message import ContentType, MessageMode
 from bridge.errors.exceptions import Exceptions
 from bridge.server.routes._helpers import authenticate, check, fail, get_field
@@ -8,30 +8,72 @@ from bridge.server.routes._helpers import authenticate, check, fail, get_field
 Router = APIRouter(prefix="/message")
 
 
-@Router.post("/send")
-async def send(payload: dict):
-    # Direct message to any client on any trusted server. Tasks and responses go through /command/...
-    client_key = authenticate(payload)
+def _times(payload):
+    # When to send (send_in_seconds / send_at), how long it lives (expires_in_seconds / expires_at),
+    # "timezone" for times without offset, if_past: send (default) | reject
+    return check(outbox.plan_times(
+        send_in_seconds=get_field(payload, "send_in_seconds", (int, float), required=False),
+        send_at=get_field(payload, "send_at", str, required=False),
+        expires_in_seconds=get_field(payload, "expires_in_seconds", (int, float), required=False),
+        expires_at=get_field(payload, "expires_at", str, required=False),
+        timezone_name=get_field(payload, "timezone", str, required=False),
+        if_past=get_field(payload, "if_past", str, required=False, default="send"),
+    ))
+
+
+def _direct_only(payload):
     if "content" not in payload:
         get_field(payload, "content", object)  # reports the missing field
     content_type = get_field(payload, "content_type", str, required=False, default=str(ContentType.DIRECT))
     if content_type != ContentType.DIRECT:
         fail(Exceptions.NOT_ALLOWED, "Clients can only send direct messages. Use /command/call and /command/respond.")
-    message = check(await messenger_service.send_direct(
+
+
+@Router.post("/send")
+async def send(payload: dict):
+    # Direct message to any client on any trusted server. Tasks and responses go through /command/...
+    # mode: safe (default) | fast | compressed | temporary - optional lifetime and planned send time (see _times)
+    client_key = authenticate(payload)
+    _direct_only(payload)
+    return check(await outbox.send(
         client_key,
-        recipient_ip=get_field(payload, "recipient_ip", str),
-        content=payload.get("content"),
+        [get_field(payload, "recipient_ip", str)],
+        payload.get("content"),
         mode=get_field(payload, "mode", str, required=False, default=str(MessageMode.SAFE)),
         conversation_id=get_field(payload, "conversation_id", str, required=False),
         causation_id=get_field(payload, "causation_id", str, required=False),
+        times=_times(payload),
     ))
-    return {
-        "message_id": message.message_id,
-        "conversation_id": message.conversation_id,
-        "mode": str(message.mode),
-        "size_bytes": message.size_bytes,
-        "sha256": message.sha256,
-    }
+
+
+@Router.post("/broadcast")
+async def broadcast(payload: dict):
+    # The same direct message to many clients at once (each gets its own copy with the same broadcast_id)
+    client_key = authenticate(payload)
+    _direct_only(payload)
+    return check(await outbox.send(
+        client_key,
+        get_field(payload, "recipients", list),
+        payload.get("content"),
+        mode=get_field(payload, "mode", str, required=False, default=str(MessageMode.SAFE)),
+        conversation_id=get_field(payload, "conversation_id", str, required=False),
+        causation_id=get_field(payload, "causation_id", str, required=False),
+        times=_times(payload),
+        broadcast=True,
+    ))
+
+
+@Router.post("/scheduled")
+async def scheduled(payload: dict):
+    # Planned messages of this client + results of the ones already sent
+    client_key = authenticate(payload)
+    return outbox.scheduled_of(client_key)
+
+
+@Router.post("/scheduled/cancel")
+async def cancel_scheduled(payload: dict):
+    client_key = authenticate(payload)
+    return check(outbox.cancel(client_key, get_field(payload, "message_id", str)))
 
 
 @Router.post("/poll")

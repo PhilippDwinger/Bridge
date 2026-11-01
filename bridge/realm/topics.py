@@ -5,7 +5,7 @@ from bridge import errors
 from bridge.core import address, clients
 from bridge.errors.exceptions import Exceptions, get_exception_id, is_exception
 from bridge.messenger import router
-from bridge.messenger.message import ContentType, MessageMode, create_message
+from bridge.messenger.message import ContentType, MessageMode, create_message, encode_content, pack_payload
 from bridge.realm import service as realm_service
 
 # Publish/subscribe in realms:
@@ -29,9 +29,15 @@ async def publish(client_key, realm_address, topic, data, mode=MessageMode.FAST)
         return Exceptions.REMOTE_SERVER_ERROR
 
     content = {"realm_address": realm_address, "topic": topic, "data": data}
+    # Encoded (and packed) once for all subscribers
+    payload = encode_content(content)
+    if is_exception(payload):
+        return payload
+    transport = await asyncio.to_thread(pack_payload, payload) if mode == MessageMode.COMPRESSED else None
 
     async def deliver_to(subscriber_ip):
-        message = create_message(publisher_ip, subscriber_ip, content, ContentType.EVENT, mode)
+        message = create_message(publisher_ip, subscriber_ip, content, ContentType.EVENT, mode, payload=payload,
+                                 transport=transport)
         if is_exception(message):
             return subscriber_ip, message
         return subscriber_ip, await router.deliver(message)

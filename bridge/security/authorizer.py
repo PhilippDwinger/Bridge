@@ -34,6 +34,34 @@ def register_failure(key, max_attempts=None):
 
 def register_success(key):
     _failed_attempts.pop(key, None)
+
+def reserve(key, max_attempts=None):
+    """Counts an attempt BEFORE it is checked. The check (argon2) takes time - many parallel requests would all
+    pass is_locked() first and only count afterwards. False if the key is locked."""
+    if is_locked(key):
+        return False
+    if len(_failed_attempts) > 50000:
+        _forget_old()
+    register_failure(key, max_attempts)
+    return True
+
+def release(key, max_attempts=None):
+    """The reserved attempt was right: take it back (without forgetting the other failures)."""
+    entry = _failed_attempts.get(key)
+    if not entry:
+        return
+    entry["count"] = max(0, entry["count"] - 1)
+    if entry["count"] < (max_attempts or protocol.max_failed_attempts):
+        entry["locked_until"] = None
+    if entry["count"] == 0:
+        _failed_attempts.pop(key, None)
+
+def _forget_old():
+    window = datetime.timedelta(minutes=protocol.lock_minutes)
+    now = _now()
+    for key in [key for key, entry in _failed_attempts.items()
+                if now - entry["first_failure"] > window and not (entry["locked_until"] and entry["locked_until"] > now)]:
+        del _failed_attempts[key]
 # endregion brute force
 
 # region rate limit

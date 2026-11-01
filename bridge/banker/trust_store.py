@@ -37,6 +37,12 @@ def remove_server(server_url):
 def is_trusted(server_url):
     return server_url in trusted_servers
 
+def matches_trusted(server_url):
+    """True if a trusted server has the same host and port, ignoring the scheme and path."""
+    from bridge.core import address
+    key = address.server_key(server_url)
+    return any(address.server_key(url) == key for url in trusted_servers)
+
 def get_token(server_url):
     entry = trusted_servers.get(server_url)
     return entry["token"] if entry else None

@@ -2,6 +2,7 @@ import datetime
 from enum import StrEnum
 
 from bridge import errors
+from bridge.core import protocol
 from bridge.errors.exceptions import Exceptions
 from bridge.security.generator import get_free_key_in_dict
 from bridge.security.utils import save_pick
@@ -11,21 +12,32 @@ class PoolName(StrEnum):
     TASK = "task_pool"
     INSTRUCTION = "instruction_pool"
     RESPONSE = "response_pool"
+    # Intermediate states of tasks this client called (only if it accepted progress)
+    PROGRESS = "progress_pool"
     # Events of topics the client subscribed to
     EVENT = "event_pool"
+    # Messages from friends (BridgeFriends) - verified
+    FRIEND = "friend_pool"
     # Direct messages from any client. Not verified by a realm - the client decides what to do with them.
     DIRECT = "direct_pool"
 
 
+# Called with each message that went back into its pool after the pending timeout (status, wake long polls)
+on_requeued = []
+
+
 class Mailbox:
     # Highest priority first
-    POLL_ORDER = (PoolName.INSTRUCTION, PoolName.RESPONSE, PoolName.TASK, PoolName.EVENT, PoolName.DIRECT)
+    POLL_ORDER = (PoolName.INSTRUCTION, PoolName.RESPONSE, PoolName.PROGRESS, PoolName.TASK, PoolName.EVENT,
+                  PoolName.FRIEND, PoolName.DIRECT)
     # How much one waiting or pending message of a pool counts towards the busy points
     BUSY_WEIGHTS = {
         PoolName.TASK: 1,
         PoolName.INSTRUCTION: 2,
         PoolName.RESPONSE: 0,
+        PoolName.PROGRESS: 0,
         PoolName.EVENT: 0,
+        PoolName.FRIEND: 0,
         PoolName.DIRECT: 0,
     }
     MAX_MESSAGES_PER_POOL = 1000
@@ -37,9 +49,13 @@ class Mailbox:
         self.task_pool = []
         self.instruction_pool = []
         self.response_pool = []
+        self.progress_pool = []
         self.event_pool = []
+        self.friend_pool = []
         self.direct_pool = []
         self.pending_messages = {}
+        # Earliest end of life of a waiting message - the cleaner skips mailboxes with nothing to remove
+        self.next_expiry = None
     def __str__(self):
         return str(self.__dict__)
     def __repr__(self):
@@ -53,8 +69,12 @@ class Mailbox:
             return self.instruction_pool
         if pool_name == PoolName.RESPONSE:
             return self.response_pool
+        if pool_name == PoolName.PROGRESS:
+            return self.progress_pool
         if pool_name == PoolName.EVENT:
             return self.event_pool
+        if pool_name == PoolName.FRIEND:
+            return self.friend_pool
         if pool_name == PoolName.DIRECT:
             return self.direct_pool
         return None
@@ -70,23 +90,72 @@ class Mailbox:
                 f"{pool_name} is full ({len(pool)}/{self.MAX_MESSAGES_PER_POOL} messages)"
             )
             return Exceptions.MAILBOX_FULL
-        if not ignore_limit and pool_name == PoolName.DIRECT:
+        if not ignore_limit:
+            problem = self._check_bytes(message)
+            if problem is not None:
+                return problem
+        if not ignore_limit and pool_name in (PoolName.DIRECT, PoolName.FRIEND):
             sender_ip = getattr(message, "sender_ip", None)
             from_sender = sum(1 for waiting in pool if getattr(waiting, "sender_ip", None) == sender_ip)
             if from_sender >= self.MAX_DIRECT_MESSAGES_PER_SENDER:
                 errors.handle_error(
                     Exceptions.MAILBOX_FULL,
-                    f"{from_sender} direct messages from the same sender are already waiting"
+                    f"{from_sender} messages from the same sender are already waiting in {pool_name}"
                 )
                 return Exceptions.MAILBOX_FULL
         if front:
             pool.insert(0, message)
         else:
             pool.append(message)
+        expires_at = getattr(message, "expires_at", None)
+        if expires_at is not None and (self.next_expiry is None or expires_at < self.next_expiry):
+            self.next_expiry = expires_at
         return True
+
+    def _all_messages(self):
+        for pool_name in self.POLL_ORDER:
+            yield from self._get_pool(pool_name)
+        for entry in self.pending_messages.values():
+            yield entry["message"]
+
+    def _check_bytes(self, message):
+        """Byte budget: a mailbox holds at most max_mailbox_mb, one sender at most max_mailbox_mb_per_sender of it."""
+        size = getattr(message, "size_bytes", 0)
+        sender_ip = getattr(message, "sender_ip", None)
+        total = from_sender = 0
+        for waiting in self._all_messages():
+            waiting_size = getattr(waiting, "size_bytes", 0)
+            total += waiting_size
+            if getattr(waiting, "sender_ip", None) == sender_ip:
+                from_sender += waiting_size
+        if total + size > protocol.max_mailbox_mb * 1024 * 1024:
+            errors.handle_error(Exceptions.MAILBOX_FULL, f"mailbox would hold more than {protocol.max_mailbox_mb} MB")
+            return Exceptions.MAILBOX_FULL
+        if from_sender + size > protocol.max_mailbox_mb_per_sender * 1024 * 1024:
+            errors.handle_error(Exceptions.MAILBOX_FULL, f"one sender would have more than {protocol.max_mailbox_mb_per_sender} MB in it")
+            return Exceptions.MAILBOX_FULL
+        return None
 
     def add_message(self, message, pool_name : str):
         return self._insert_into_pool(message, pool_name)
+
+    def add_progress(self, message, keep):
+        """Progress of a task: at most `keep` of them wait per task (keep=1: only the newest one)."""
+        task_id = message.causation_id
+        waiting = [index for index, old in enumerate(self.progress_pool) if getattr(old, "causation_id", None) == task_id]
+        for index in reversed(waiting[:max(0, len(waiting) - keep + 1)]):
+            self.progress_pool.pop(index)
+        return self._insert_into_pool(message, PoolName.PROGRESS)
+
+    def waiting_count(self, pool_name=None):
+        """Messages waiting to be polled (all pools or one)."""
+        if pool_name is not None:
+            return len(self._get_pool(pool_name))
+        return sum(len(self._get_pool(name)) for name in self.POLL_ORDER)
+
+    def remove_progress(self, task_id):
+        """Removes waiting progress of a task (the response is there, they are out of date)."""
+        self.progress_pool[:] = [old for old in self.progress_pool if getattr(old, "causation_id", None) != task_id]
     # endregion pools
 
     # region polling
@@ -204,10 +273,41 @@ class Mailbox:
         ]
         # Reversed, so the oldest message ends up at the very front of its pool
         for pending_id in reversed(expired_pending_ids):
-            self.cancel_pending_message_with_pending_id(pending_id)
+            message = self.pending_messages[pending_id].get("message")
+            if self.cancel_pending_message_with_pending_id(pending_id) is True and message is not None:
+                for callback in on_requeued:
+                    callback(message)
         if expired_pending_ids:
             errors.debug_print(f"Requeued {len(expired_pending_ids)} expired pending message(s)")
         return len(expired_pending_ids)
+    def remove_expired(self, now=None):
+        """Deletes every message whose lifetime is over - waiting ones and fetched but not confirmed ones.
+        Returns the removed messages."""
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        if self.next_expiry is not None and self.next_expiry > now:
+            return []
+        removed = []
+        next_expiry = None
+        for pool_name in self.POLL_ORDER:
+            pool = self._get_pool(pool_name)
+            keep = []
+            for message in pool:
+                expires_at = getattr(message, "expires_at", None)
+                if expires_at is not None and expires_at <= now:
+                    removed.append(message)
+                    continue
+                keep.append(message)
+                if expires_at is not None and (next_expiry is None or expires_at < next_expiry):
+                    next_expiry = expires_at
+            pool[:] = keep
+        for pending_id, entry in list(self.pending_messages.items()):
+            expires_at = getattr(entry["message"], "expires_at", None)
+            if expires_at is not None and expires_at <= now:
+                removed.append(self.pending_messages.pop(pending_id)["message"])
+            elif expires_at is not None and (next_expiry is None or expires_at < next_expiry):
+                next_expiry = expires_at
+        self.next_expiry = next_expiry
+        return removed
     # endregion pending
 
     # region admin view

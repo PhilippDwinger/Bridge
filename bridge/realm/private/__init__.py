@@ -1,4 +1,5 @@
 from bridge import errors
+from bridge.core import protocol
 from bridge.errors.exceptions import Exceptions
 from bridge.realm import Realm, RealmType, MAX_KEY_LENGTH, _valid_name
 from bridge.security.generator import get_free_key_in_dict
@@ -73,6 +74,9 @@ class PrivateRealm(Realm):
         if not self.is_owner(client_ip):
             errors.handle_error(Exceptions.NOT_ALLOWED, "Only the owner can create access keys")
             return Exceptions.NOT_ALLOWED
+        if len(self.access_keys) >= protocol.max_access_keys_per_realm:
+            errors.handle_error(Exceptions.NOT_ALLOWED, "Too many access keys")
+            return Exceptions.NOT_ALLOWED
         if not self._validate_roles(roles):
             return Exceptions.ARGUMENT_ERROR
         if preferred_key is not None:
@@ -97,6 +101,8 @@ class PrivateRealm(Realm):
         if roles is None or not self._validate_roles(roles):
             return Exceptions.ARGUMENT_ERROR
         self.members[member_ip]["roles"] = list(dict.fromkeys(roles))
+        # Without a role that may host, the member's hosted commands go
+        self.prune_hosts()
         return True
     # endregion owner functions
 

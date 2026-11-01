@@ -6,7 +6,6 @@ Needs: fastapi, uvicorn, argon2-cffi, httpx, cryptography
 import hashlib
 import json
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -81,11 +80,12 @@ def finish(server, token, data):
 
 
 def start(name):
-    env = dict(os.environ, PYTHONUNBUFFERED="1", BRIDGE_TEST_OVERRIDES=json.dumps(OVERRIDES))
+    # BRIDGE_STDIN_CONTROL: closing stdin stops the server normally (works on Windows too)
+    env = dict(os.environ, PYTHONUNBUFFERED="1", BRIDGE_TEST_OVERRIDES=json.dumps(OVERRIDES), BRIDGE_STDIN_CONTROL="1")
     logs.setdefault(name, open(os.path.join(ROOT, "tests", f"features_{name}.log"), "a"))
     processes[name] = subprocess.Popen(
         [sys.executable, "tests/run_server.py", str(PORTS[name]), PASSWORD[name]] + [URL[other] for other in TRUSTS[name]],
-        cwd=ROOT, stdout=logs[name], stderr=logs[name], env=env)
+        cwd=ROOT, stdin=subprocess.PIPE, stdout=logs[name], stderr=logs[name], env=env)
     for _ in range(300):
         try:
             response = httpx.get(URL[name] + "/server/status", timeout=1)
@@ -102,8 +102,8 @@ def stop(name, hard=False):
     if hard:
         process.kill()
     else:
-        process.send_signal(signal.SIGINT)  # like Ctrl+C - the server makes a last backup
-    process.wait(15)
+        process.stdin.close()  # normal stop like Ctrl+C - the server makes a last backup
+    process.wait(25)
 
 
 def wait_connected(server, count, seconds=10):
@@ -211,9 +211,11 @@ def scenarios():
     post("B", "/realm/command/create", {"session_token": tb1, "realm_address": public_b, "command_name": "work"})
     post("A", "/command/call", {"session_token": ta1, "command_name": "work", "realm_address": public_b, "mode": "fast"})
     time.sleep(3.5)  # both hosts are inactive now (test setting: 3 seconds)
-    post("B", "/client/me", {"session_token": tb1})  # b1 shows a sign of life
     busy_host = None
     for _ in range(3):
+        # b1 shows a sign of life right before every call (b2 stays idle) - so the check does not depend on
+        # how fast the computer is. b1 gets more and more tasks and is still preferred, because it is active.
+        post("B", "/client/me", {"session_token": tb1})
         status, data = post("A", "/command/call", {"session_token": ta1, "command_name": "work", "realm_address": public_b, "mode": "fast"})
         busy_host = data["host_ip"]
         if busy_host != b1:
@@ -222,6 +224,75 @@ def scenarios():
     for token in (tb1, tb2):
         while receive("B", token)[0]:
             pass
+
+    print("Progress of long tasks (only if the caller accepts it)")
+    post("B", "/realm/command/create", {"session_token": tb1, "realm_address": public_b, "command_name": "long"})
+
+    def call_long(progress):
+        status, data = post("A", "/command/call", {"session_token": ta1, "command_name": "long", "realm_address": public_b,
+                                                   "mode": "fast", "progress": progress})
+        task_id = data["task_id"]
+        for _ in range(20):  # b1 still has older "work" tasks waiting - take until the new one comes
+            meta, task = receive("B", tb1, wait=3, content_types=["task"])
+            if meta is None or meta["message_id"] == task_id:
+                return task_id, task
+        return task_id, None
+
+    def report(task_id, percent, content=None, token=None):
+        return post("B", "/command/progress", {"session_token": token or tb1, "task_id": task_id, "percent": percent,
+                                               "content": content})
+
+    def progress_of_a1():
+        found = []
+        while True:
+            meta, content = receive("A", ta1, content_types=["progress"])
+            if meta is None:
+                return found
+            found.append((meta, content))
+
+    status, data = post("A", "/command/call", {"session_token": ta1, "command_name": "long", "realm_address": public_b,
+                                               "progress": "sometimes"})
+    check("unknown progress mode -> 400", status == 400, data)
+    task_id, task = call_long("off")
+    check("progress off: the host sees accepts_progress = false", task and task["accepts_progress"] is False, task)
+    status, data = report(task_id, 50)
+    check("... progress is dropped, no error (delivered: false)", status == 200 and data["delivered"] is False, data)
+    check("... and nothing reaches the caller", progress_of_a1() == [])
+    post("B", "/command/respond", {"session_token": tb1, "task_id": task_id, "content": "done", "mode": "fast"})
+    receive("A", ta1, wait=3, content_types=["response"])
+
+    task_id, task = call_long("latest")
+    check("progress latest: the host sees accepts_progress = true", task and task["accepts_progress"] is True, task)
+    for percent in (10, 50, 90):
+        report(task_id, percent, {"step": percent})
+    found = progress_of_a1()
+    check("latest: only the newest progress waits (90 %)", len(found) == 1 and found[0][1]["percent"] == 90
+          and found[0][1]["content"] == {"step": 90}, found)
+    check("progress is verified and points to the task", found and found[0][0]["verified"] and found[0][0]["causation_id"] == task_id,
+          found and found[0][0])
+    status, data = report(task_id, 95, token=tb2)
+    check("another client cannot report progress for the task -> 404", status == 404, data)
+    status, data = report(task_id, 120)
+    check("percent over 100 -> 400", status == 400, data)
+    status, data = report(task_id, 99, "x" * 5000)
+    check("progress over 4 KiB -> 413", status == 413, data)
+    report(task_id, 99)
+    post("B", "/command/respond", {"session_token": tb1, "task_id": task_id, "content": "done", "mode": "fast"})
+    time.sleep(0.2)
+    check("latest: the response removes the out-of-date progress", progress_of_a1() == [])
+    receive("A", ta1, wait=3, content_types=["response"])
+    status, data = report(task_id, 100)
+    check("after the response no more progress -> 404", status == 404, data)
+
+    task_id, task = call_long("all")
+    answers = [report(task_id, percent)[1] for percent in range(1, 8)]
+    delivered = [answer["delivered"] for answer in answers]
+    check("all: max 5 per second, the rest is dropped", delivered == [True] * 5 + [False] * 2
+          and answers[-1]["reason"] == "too_many_per_second", answers)
+    found = progress_of_a1()
+    check("all: every progress arrives in order", [content["percent"] for _, content in found] == [1, 2, 3, 4, 5], found)
+    post("B", "/command/respond", {"session_token": tb1, "task_id": task_id, "content": "done", "mode": "fast"})
+    receive("A", ta1, wait=3, content_types=["response"])
 
     print("Topics (publish/subscribe across servers)")
     post("A", "/realm/topic/subscribe", {"session_token": ta1, "realm_address": public_b, "topic": "news"})

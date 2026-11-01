@@ -1,3 +1,4 @@
+import contextvars
 import datetime
 import os
 import sys
@@ -96,14 +97,31 @@ def _format_fatal_report(error: ExceptionInfo, msg: str, reason: str | None = No
         border,
     ])
 
+# Extra details for the client about the HTTP error of the current request (e.g. which argument is wrong).
+# Per request (contextvars), so parallel requests never see each other's details.
+_client_details = contextvars.ContextVar("bridge_client_details", default=None)
+
+def set_client_details(**details):
+    """Public details for the next HTTP error of this request. Only things the client may see - no internals!"""
+    _client_details.set(details)
+
+def pop_client_details():
+    details = _client_details.get()
+    _client_details.set(None)
+    return details
+
 def _http_detail(error: ExceptionInfo) -> dict:
     # Only public information - msg, hint and stack stay in the server log.
     # "error" is a stable id clients can check in code (e.g. "MAILBOX_FULL").
-    return {
+    detail = {
         "error": get_exception_id(error) or "UNKNOWN_ERROR",
         "name": error.name,
         "message": error.default_message or "N/A",
     }
+    extra = pop_client_details()
+    if extra:
+        detail["details"] = extra
+    return detail
 # endregion report formatting
 
 def http_exception(error) -> HTTPException:

@@ -4,6 +4,8 @@ import asyncio
 mailbox_storage = {}
 # client_key -> asyncio.Event, set when something arrives. Used when a client polls and waits (long polling).
 _signals = {}
+# True while the server stops: waiting polls answer right away instead of holding up the shutdown
+closing = False
 
 def get_mailbox(client_key):
     return mailbox_storage.get(client_key)
@@ -28,6 +30,19 @@ def notify(client_key):
     if signal is not None:
         signal.set()
 
+def wake_all_for_shutdown():
+    """The server stops: every waiting poll returns now (empty), so the stop and the last backup are not held up."""
+    global closing
+    closing = True
+    for signal in _signals.values():
+        signal.set()
+
 def reset():
     mailbox_storage.clear()
     _signals.clear()
+
+
+def opening():
+    """The server starts (again in the same process): long polls wait normally again."""
+    global closing
+    closing = False

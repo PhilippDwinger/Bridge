@@ -2,6 +2,7 @@ from fastapi import Request
 
 from bridge import errors
 from bridge.core import clients
+from bridge.core.jsoncheck import json_problem, number_problem  # noqa: F401 (json_problem is used by routes)
 from bridge.errors.exceptions import Exceptions, is_exception
 
 # Small helpers shared by all routes. Request bodies are plain JSON objects (works well with Roblox/Lua).
@@ -34,6 +35,14 @@ def get_field(payload, key, expected_type, required=True, default=None):
     if not isinstance(value, expected_type):
         type_name = expected_type.__name__ if isinstance(expected_type, type) else str(expected_type)
         fail(Exceptions.CLIENT_PAYLOAD_ERROR, f"Field '{key}' must be of type {type_name}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Seconds, counts, percent ... - a number with 400 digits would break float() / timedelta() later
+        problem = number_problem(value)
+        if problem:
+            fail(Exceptions.CLIENT_PAYLOAD_ERROR, f"Field '{key}': {problem}")
+    problem = json_problem(value)
+    if problem:
+        fail(Exceptions.CLIENT_PAYLOAD_ERROR, f"Field '{key}': {problem}")
     return value
 
 

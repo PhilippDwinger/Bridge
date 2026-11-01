@@ -6,6 +6,7 @@ from starlette.concurrency import run_in_threadpool
 from bridge import errors
 from bridge.core import clients, protocol
 from bridge.errors.exceptions import Exceptions
+from bridge.realm import sync as realm_sync
 from bridge.security import authorizer
 from bridge.security.hasher import hash_password, verify_password
 from bridge.server.routes._helpers import authenticate, check, fail, get_field, remote_host
@@ -40,16 +41,26 @@ async def register(payload: dict, request: Request):
 async def login(payload: dict, request: Request):
     client_ip = get_field(payload, "client_ip", str)
     password = get_field(payload, "password", str)
-    limiter_key = f"login:{remote_host(request)}"
-    if authorizer.is_locked(limiter_key):
+    # Two counters: per caller address and account (5 tries) and per caller address over all accounts (more tries,
+    # because one address can be shared by many clients). The per-account counter is cleared only for the account
+    # that logged in - guessing one account by logging into an own account in between does not reset it. A
+    # successful login clears the per-address counter, so a shared address (NAT/proxy) is not locked out by the
+    # wrong logins of other clients behind it. Attempts are counted before the slow check, so parallel requests
+    # cannot slip past the lock.
+    host_key = f"login:{remote_host(request)}"
+    pair_key = f"login:{remote_host(request)}:{client_ip}"
+    host_limit = protocol.max_failed_attempts * protocol.login_host_attempt_multiplier
+    if authorizer.is_locked(host_key) or authorizer.is_locked(pair_key):
         fail(Exceptions.TOO_MANY_ATTEMPTS, f"Login locked for {remote_host(request)}")
+    authorizer.reserve(host_key, host_limit)
+    authorizer.reserve(pair_key)
 
     client_key, hashed_password = clients.get_login_data(client_ip)
     password_ok = hashed_password is not None and await run_in_threadpool(verify_password, password, hashed_password)
     if not password_ok:
-        authorizer.register_failure(limiter_key)
         fail(Exceptions.INVALID_CREDENTIALS, "Login failed")
-    authorizer.register_success(limiter_key)
+    authorizer.register_success(host_key)
+    authorizer.register_success(pair_key)
 
     session_token, expires_at = check(clients.create_session(client_key))
     remaining = expires_at - datetime.datetime.now(datetime.timezone.utc)
@@ -70,7 +81,10 @@ async def logout(payload: dict):
 @Router.post("/me")
 async def me(payload: dict):
     client_key = authenticate(payload)
-    return check(clients.get_client_info(client_key))
+    info = check(clients.get_client_info(client_key))
+    # Name, type, version and "stale" of every realm - realms on other servers come from the synced copy
+    info["realm_details"] = realm_sync.realm_details(info["realms"])
+    return info
 
 
 @Router.post("/direct")

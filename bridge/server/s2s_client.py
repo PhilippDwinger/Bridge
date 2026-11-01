@@ -1,4 +1,7 @@
 import asyncio
+import gzip
+import json
+import time
 
 import httpx
 
@@ -9,6 +12,7 @@ from bridge.errors.exceptions import Exceptions, get_exception_from_id
 from bridge.security.generator import generate_key
 from bridge.security.hasher import sha256_hex, secrets_equal
 from bridge.server import url_env
+from bridge.server.compression import GZIP_MIN_REQUEST_BYTES
 
 # region trust / handshake
 # Two servers only talk if BOTH admins added the other one's URL.
@@ -46,10 +50,43 @@ def get_pending_secret(peer_url):
     return _pending_secrets.get(peer_url)
 
 
+# One shared HTTP client for all server to server requests (per event loop and TLS setting).
+# It keeps connections open and does not load the TLS certificates again for every request -
+# a new client per request made every cross-server call much slower (especially on Windows).
+_http = {"loop": None, "clients": {}}
+
+def _get_http_client():
+    loop = asyncio.get_running_loop()
+    if _http["loop"] is not loop:
+        _http["loop"], _http["clients"] = loop, {}
+    verify = protocol.s2s_verify_tls
+    client = _http["clients"].get(verify)
+    if client is None or client.is_closed:
+        # Idle connections are dropped after 2 s - before the other server closes them (uvicorn: 5 s),
+        # so we never send on a connection that is just being closed
+        client = httpx.AsyncClient(verify=verify, limits=httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                                                                      keepalive_expiry=2))
+        _http["clients"][verify] = client
+    return client
+
+async def close_http_clients():
+    """Called when the server stops."""
+    clients, _http["clients"] = list(_http["clients"].values()), {}
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
 async def _post(peer_url, path, body, headers=None, timeout=None):
     timeout = timeout or protocol.s2s_timeout_seconds
-    async with httpx.AsyncClient(timeout=timeout, verify=protocol.s2s_verify_tls) as client:
-        response = await client.post(peer_url + path, json=body, headers=headers or {})
+    data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = dict(headers or {}, **{"Content-Type": "application/json"})
+    if len(data) >= GZIP_MIN_REQUEST_BYTES:
+        # Big requests between servers travel gzip compressed (the other server unpacks them)
+        data = gzip.compress(data, 6)
+        headers["Content-Encoding"] = "gzip"
+    response = await _get_http_client().post(peer_url + path, content=data, headers=headers, timeout=timeout)
     try:
         data = response.json()
     except ValueError:
@@ -83,6 +120,7 @@ async def _run_generator(peer_url):
         if status == 200 and isinstance(data, dict) and data.get("ok"):
             trust_store.set_connected(peer_url, secret)
             errors.debug_print(f"Connected with trusted server {peer_url}")
+            _after_connect(peer_url)
             return True
         error = _error_from_answer(data)
         trust_store.set_waiting(peer_url, f"rejected: {data.get('error') if isinstance(data, dict) else status}")
@@ -130,11 +168,22 @@ async def _authorized_post(peer_url, path, body, retry=True, timeout=None):
             return result
         token = trust_store.get_token(peer_url)
     headers = {HEADER_FROM: url_env.base_root, HEADER_TOKEN: token}
+    from bridge.subservices.bridge_agent import agent, routing
+    started = time.monotonic()
     try:
         status, data = await _post(peer_url, path, body, headers, timeout)
     except httpx.HTTPError as error:
+        # Health of the line - the agent avoids broken lines (routing = agent)
+        routing.request_failed(peer_url)
         errors.handle_error(Exceptions.REMOTE_SERVER_ERROR, f"{peer_url}{path}: {error!r}")
         return Exceptions.REMOTE_SERVER_ERROR
+    if status >= 500:
+        routing.request_failed(peer_url)
+    else:
+        routing.request_ok(peer_url)
+        if not path.startswith("/s2s/backup/"):
+            # Latency of the line (BridgeAgent). Backups are big and rare - they would only disturb it.
+            agent.s2s_sample(peer_url, time.monotonic() - started)
     if status == 403 and isinstance(data, dict) and data.get("error") == "SERVER_NOT_TRUSTED":
         # The other side lost or changed the token (e.g. restart) - one new handshake, then retry once
         trust_store.set_waiting(peer_url, "token rejected")
@@ -147,6 +196,9 @@ async def _authorized_post(peer_url, path, body, retry=True, timeout=None):
     if not data["ok"]:
         error = _error_from_answer(data)
         errors.debug_print(f"{peer_url}{path} answered with error {error.name}")
+        if isinstance(data.get("details"), dict):
+            # Public details of the other server (e.g. which argument is wrong) go on to our client
+            errors.set_client_details(**data["details"])
         return error
     return data.get("result")
 
@@ -177,6 +229,32 @@ async def backup_store(peer_url, blob):
 async def backup_fetch(peer_url):
     return await _authorized_post(peer_url, "/s2s/backup/fetch", {}, timeout=BACKUP_TIMEOUT_SECONDS)
 
+async def realm_push(peer_url, view):
+    """Realm server -> member server: the new view of a realm after a change."""
+    return await _authorized_post(peer_url, "/s2s/realm/push", {"view": view})
+
+async def realm_versions(peer_url, realm_addresses):
+    """Member server -> realm server: current versions of these realms."""
+    return await _authorized_post(peer_url, "/s2s/realm/versions", {"realm_addresses": realm_addresses})
+
+async def realm_mirror(peer_url, realm_address):
+    """Member server -> realm server: the view of one realm for us."""
+    return await _authorized_post(peer_url, "/s2s/realm/mirror", {"realm_address": realm_address})
+
+async def agent_hosts(peer_url, entries):
+    """BridgeAgent: queue / waiting / working time of hosts of the other server."""
+    return await _authorized_post(peer_url, "/s2s/agent/hosts", {"hosts": entries})
+
+async def agent_task(peer_url, task_id, caller_ip):
+    return await _authorized_post(peer_url, "/s2s/agent/task", {"task_id": task_id, "caller_ip": caller_ip})
+
+async def agent_client(peer_url, client_ip, asking_ip):
+    return await _authorized_post(peer_url, "/s2s/agent/client", {"client_ip": client_ip, "asking_ip": asking_ip})
+
+async def links(peer_url):
+    """The line table of the other server (BridgeAgent routing)."""
+    return await _authorized_post(peer_url, "/s2s/links", {})
+
 async def realm_code_join(peer_url, caller_ip, code):
     return await _authorized_post(peer_url, "/s2s/realm/code", {"caller_ip": caller_ip, "code": code})
 
@@ -186,6 +264,13 @@ async def busy_points(peer_url, client_ips):
 async def ping(peer_url):
     return await _authorized_post(peer_url, "/s2s/ping", {})
 # endregion authorized requests
+
+
+def _after_connect(peer_url):
+    # Exchange the realm states right away (lazy import: realm.sync uses this module)
+    from bridge.realm import sync
+    from bridge.server import runtime
+    runtime.schedule(sync.on_connected(peer_url))
 
 
 def confirm_secret_hash(peer_url, secret_sha256):

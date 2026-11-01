@@ -14,7 +14,8 @@ def normalize_lua_hybrid_tables(value):
     has_keyed_items = False
 
     for key, item in value.items():
-        if isinstance(key, str) and key.isdecimal() and int(key) > 0 and str(int(key)) == key:
+        # len check first: int() of thousands of digits raises (Python limit) - such keys are no array index anyway
+        if isinstance(key, str) and len(key) <= 15 and key.isdecimal() and int(key) > 0 and str(int(key)) == key:
             array_items.append((int(key), item))
         else:
             has_keyed_items = True

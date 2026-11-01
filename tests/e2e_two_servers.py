@@ -89,22 +89,38 @@ def wait_for(server):
     return False
 
 
+def start_server(args, log, env):
+    # BRIDGE_STDIN_CONTROL: closing stdin stops the server normally (works on Windows too)
+    return subprocess.Popen([sys.executable, "tests/run_server.py"] + args, cwd=ROOT, stdin=subprocess.PIPE,
+                            stdout=log, stderr=log, env=dict(env, BRIDGE_STDIN_CONTROL="1"))
+
+
+def stop_server(process):
+    if process.poll() is not None:
+        return
+    process.stdin.close()  # normal stop like Ctrl+C
+    try:
+        process.wait(25)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(5)
+
+
 def main():
     env = dict(os.environ, PYTHONUNBUFFERED="1", BRIDGE_TEST_OVERRIDES='{"backup_restore_wait_seconds": 3}')
     log_a = open(os.path.join(ROOT, "tests", "server_a.log"), "w")
     log_b = open(os.path.join(ROOT, "tests", "server_b.log"), "w")
     # A trusts B from the start, B does not trust A yet
-    server_a = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_A), PASSWORD_A, B], cwd=ROOT, stdout=log_a, stderr=log_a, env=env)
+    server_a = start_server([str(PORT_A), PASSWORD_A, B], log_a, env)
     env_b = dict(env, BRIDGE_TEST_OVERRIDES='{"max_registrations_per_host": 6, "backup_restore_wait_seconds": 3}')
-    server_b = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_B), PASSWORD_B], cwd=ROOT, stdout=log_b, stderr=log_b, env=env_b)
+    server_b = start_server([str(PORT_B), PASSWORD_B], log_b, env_b)
     try:
         assert wait_for(A) and wait_for(B), "servers did not start"
         run_scenarios()
         print("Restart of a server (everything is RAM only)")
         post(B, "/admin/trusted/add", {"password": PASSWORD_B, "url": A})
-        server_a.terminate()
-        server_a.wait(5)
-        server_a = subprocess.Popen([sys.executable, "tests/run_server.py", str(PORT_A), PASSWORD_A, B], cwd=ROOT, stdout=log_a, stderr=log_a, env=env)
+        stop_server(server_a)
+        server_a = start_server([str(PORT_A), PASSWORD_A, B], log_a, env)
         check("A is back", wait_for(A))
         time.sleep(1.5)
         status, data = post(A, "/admin/trusted/list", {"password": PASSWORD_A})
@@ -114,10 +130,8 @@ def main():
         check("B -> restarted A works with the new token", status == 200, data)
         check("message arrives", receive(A, t_a_new)[2] == "welcome back")
     finally:
-        server_a.terminate()
-        server_b.terminate()
-        server_a.wait(5)
-        server_b.wait(5)
+        stop_server(server_a)
+        stop_server(server_b)
     print(f"\n{results['ok']} ok, {results['fail']} failed")
     sys.exit(1 if results["fail"] else 0)
 
@@ -177,6 +191,14 @@ def run_scenarios():
     check("missing field -> 400 CLIENT_PAYLOAD_ERROR", status == 400 and error_id(data) == "CLIENT_PAYLOAD_ERROR", data)
 
     print("Trust between servers")
+    # Both admins have to add the other server on their own - one side alone never connects
+    status, data = post(A, "/admin/trusted/list", {"password": PASSWORD_A})
+    check("only A trusts B -> A waits, not connected", data["trusted_servers"][0]["status"] == "waiting", data)
+    status, data = post(B, "/admin/trusted/list", {"password": PASSWORD_B})
+    check("... and B did not add A by itself", data["trusted_servers"] == [], data)
+    status, data = post(A, "/admin/trusted/connect", {"password": PASSWORD_A, "url": B})
+    status, data = post(A, "/admin/trusted/list", {"password": PASSWORD_A})
+    check("connect again by hand -> still waiting", data["trusted_servers"][0]["status"] == "waiting", data)
     status, data = post(A, "/message/send", {"session_token": t_a1, "recipient_ip": b1, "content": "hello B"})
     check("B does not trust A yet -> 403 SERVER_NOT_TRUSTED", status == 403 and error_id(data) == "SERVER_NOT_TRUSTED", data)
     status, data = post(B, "/admin/trusted/add", {"password": "wrong", "url": A})
@@ -234,7 +256,8 @@ def run_scenarios():
     check("a2 calls 'add' -> routed to b1", status == 200 and data["host_ip"] == b1, data)
     task_id = data.get("message_id")
     mode, meta, content = receive(B, t_b1)
-    check("b1 gets the task (Lua table normalized)", content == {"command_name": "add", "command_args": [2, 3], "realm_address": private}, content)
+    check("b1 gets the task (Lua table normalized)", content == {"command_name": "add", "command_args": [2, 3], "realm_address": private,
+                                                            "accepts_progress": False, "progress_mode": "off"}, content)
     check("task is verified", meta["content_type"] == "task" and meta["verified"] is True and meta["message_id"] == task_id)
     status, data = post(A, "/command/respond", {"session_token": t_a1, "task_id": task_id, "content": 666})
     check("someone else cannot answer the task -> 404 TASK_NOT_FOUND", status == 404 and error_id(data) == "TASK_NOT_FOUND", data)
