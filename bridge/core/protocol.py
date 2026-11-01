@@ -24,6 +24,18 @@ protocol_3_0 = ProtocolVersion(
 )
 
 current_protocol = protocol_3_0
+
+def compatible(peer_version):
+    """Two servers can talk when they share the same MAJOR protocol version (3.x <-> 3.y). A server that sends no
+    version (older build) is treated as compatible, so a rolling upgrade never breaks an existing mesh."""
+    if not isinstance(peer_version, str) or not peer_version:
+        return True
+    return peer_version.split(".")[0] == current_protocol.version.split(".")[0]
+
+# Behind a TLS proxy (e.g. nginx on an Oracle VM, or a platform like Render): read X-Forwarded-For so the rate
+# limits see the real client address instead of the proxy. Set via BRIDGE_TRUST_PROXY. Only turn this on when a
+# trusted proxy sits in front - otherwise clients could fake their address.
+trust_proxy = False
 # endregion wire protocol
 
 # region server limits (not part of the wire protocol)

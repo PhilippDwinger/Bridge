@@ -1,0 +1,12 @@
+[Unit]
+Description=Bridge auto-update (pull newest commit, restart if safe)
+After=network-online.target bridge.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bridge
+WorkingDirectory=/opt/bridge
+EnvironmentFile=/etc/bridge.env
+# needs sudo to restart the bridge service (see DEPLOY_ORACLE.md for the one sudoers line)
+ExecStart=/opt/bridge/tools/auto_update.sh

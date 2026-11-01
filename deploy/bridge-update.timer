@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for a new Bridge commit regularly
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Random extra delay so several servers in the mesh do not update at the same moment ("nach und nach")
+RandomizedDelaySec=4min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

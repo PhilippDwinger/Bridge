@@ -1,0 +1,16 @@
+[Unit]
+Description=Bridge server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bridge
+WorkingDirectory=/opt/bridge
+EnvironmentFile=/etc/bridge.env
+ExecStart=/opt/bridge/.venv/bin/python main.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

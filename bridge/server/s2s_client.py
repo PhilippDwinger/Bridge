@@ -104,12 +104,15 @@ def _error_from_answer(data, default=Exceptions.REMOTE_SERVER_ERROR):
 
 async def _run_generator(peer_url):
     async with _lock_for(peer_url):
+        from bridge.core import version as ver
         secret = generate_key(32)
         _pending_secrets[peer_url] = secret
         try:
             status, data = await _post(peer_url, "/s2s/handshake/deliver", {
                 "from_url": url_env.base_root,
                 "secret": secret,
+                "protocol_version": ver.protocol_version(),
+                "commit": ver.commit(),
             })
         except httpx.HTTPError as error:
             trust_store.set_waiting(peer_url, f"unreachable: {type(error).__name__}")
@@ -118,8 +121,15 @@ async def _run_generator(peer_url):
         finally:
             _pending_secrets.pop(peer_url, None)
         if status == 200 and isinstance(data, dict) and data.get("ok"):
-            trust_store.set_connected(peer_url, secret)
-            errors.debug_print(f"Connected with trusted server {peer_url}")
+            # The other server tells us its version in the answer
+            info = data.get("result") if isinstance(data.get("result"), dict) else {}
+            peer_version = info.get("protocol_version")
+            if not protocol.compatible(peer_version):
+                trust_store.set_waiting(peer_url, f"incompatible version {peer_version} (we are {ver.protocol_version()})")
+                errors.handle_error(Exceptions.SERVER_NOT_TRUSTED, f"{peer_url} runs incompatible version {peer_version}")
+                return Exceptions.SERVER_NOT_TRUSTED
+            trust_store.set_connected(peer_url, secret, peer_version, info.get("commit"))
+            errors.debug_print(f"Connected with trusted server {peer_url} (version {peer_version})")
             _after_connect(peer_url)
             return True
         error = _error_from_answer(data)

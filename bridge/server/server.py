@@ -34,6 +34,10 @@ def start_server(bridge_instance, host: str, port: int, connection_mode: Connect
         # Safety net: requests still running after this are cancelled, so the last backup is not held back
         "timeout_graceful_shutdown": protocol.shutdown_grace_seconds,
     }
+    if protocol.trust_proxy:
+        # Behind a trusted TLS proxy: believe X-Forwarded-For so the rate limits see the real client address
+        options["proxy_headers"] = True
+        options["forwarded_allow_ips"] = "*"
     if connection_mode == ConnectionMode.SAFE:
         options.update(ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
 

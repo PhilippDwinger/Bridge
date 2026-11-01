@@ -183,3 +183,22 @@ async def backup_restore(payload: dict, request: Request):
     # Replaces everything in RAM with the newest backup from the trusted servers
     await _verify_admin(payload, request)
     return check(await backup.restore_from_peers(only_if_fresh=False))
+
+
+@Router.post("/version")
+async def version_info(payload: dict, request: Request):
+    # This server's version/commit and what the trusted peers run (for rolling upgrades)
+    await _verify_admin(payload, request)
+    from bridge.banker import trust_store
+    from bridge.core import version as ver
+    peers = [{"url": s["url"], "status": s["status"], "protocol_version": s.get("protocol_version"),
+              "commit": s.get("commit")} for s in trust_store.list_servers()]
+    return {**ver.info(), "peers": peers}
+
+
+@Router.post("/update/ready")
+async def update_ready(payload: dict, request: Request):
+    # True when it is safe to restart for a code update (a connected trusted peer holds our data). The auto-updater
+    # calls /admin/backup/now first, then this, then pulls the new commit and restarts.
+    await _verify_admin(payload, request)
+    return backup.update_ready()

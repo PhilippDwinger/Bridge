@@ -454,6 +454,26 @@ async def final_backup():
             errors.handle_error(Exceptions.FAILED, f"Final backup failed: {error!r}")
 
 
+def update_ready():
+    """Is it safe to restart this server for a code update right now? Only when a connected trusted peer already
+    holds our current data, so the restart (RAM is wiped) loses nothing. The auto-updater checks this before it
+    pulls a new commit and restarts the process."""
+    if not is_ready():
+        return {"ready": False, "reason": "server is still starting / restoring"}
+    if state.get("paused"):
+        return {"ready": False, "reason": state["paused"]}
+    has_data = bool(client_key_store.client_key_storage) or len(realm_store.realm_storage) > 1
+    peers = {peer["url"] for peer in _connected_peers()}
+    if not has_data:
+        return {"ready": True, "reason": "no data to lose", "connected_peers": sorted(peers)}
+    if not peers:
+        return {"ready": False, "reason": "data present but no connected trusted peer to hold it"}
+    holding = sorted(peers.intersection(_sent_to.keys()))
+    if not holding:
+        return {"ready": False, "reason": "data not backed up to a connected peer yet - call /admin/backup/now first"}
+    return {"ready": True, "connected_peers": sorted(peers), "holding_backup": holding}
+
+
 def status():
     from bridge.banker import backup_store
     return {

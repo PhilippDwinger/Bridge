@@ -24,6 +24,9 @@ def add_server(server_url):
         "added_at": _now(),
         "connected_at": None,
         "last_error": None,
+        # Filled during the handshake - which Bridge version/commit the other server runs (for rolling upgrades)
+        "protocol_version": None,
+        "commit": None,
     }
     return True
 
@@ -47,7 +50,7 @@ def get_token(server_url):
     entry = trusted_servers.get(server_url)
     return entry["token"] if entry else None
 
-def set_connected(server_url, token):
+def set_connected(server_url, token, peer_version=None, commit=None):
     entry = trusted_servers.get(server_url)
     if not entry:
         return False
@@ -55,6 +58,10 @@ def set_connected(server_url, token):
     entry["status"] = STATUS_CONNECTED
     entry["connected_at"] = _now()
     entry["last_error"] = None
+    if peer_version is not None:
+        entry["protocol_version"] = peer_version
+    if commit is not None:
+        entry["commit"] = commit
     return True
 
 def set_waiting(server_url, error=None):
@@ -80,6 +87,8 @@ def list_servers():
             "added_at": entry["added_at"].isoformat(),
             "connected_at": entry["connected_at"].isoformat() if entry["connected_at"] else None,
             "last_error": entry["last_error"],
+            "protocol_version": entry.get("protocol_version"),
+            "commit": entry.get("commit"),
         }
         for entry in trusted_servers.values()
     ]

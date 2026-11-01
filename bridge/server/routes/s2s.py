@@ -78,6 +78,11 @@ async def handshake_deliver(payload: dict):
     secret = payload.get("secret")
     if not isinstance(secret, str) or len(secret) < 32 or s2s_client.is_generator_for(peer_url):
         return _error(Exceptions.ARGUMENT_ERROR)
+    from bridge.core import version as ver
+    peer_version = payload.get("protocol_version")
+    if not protocol.compatible(peer_version):
+        errors.handle_error(Exceptions.SERVER_NOT_TRUSTED, f"{peer_url} runs incompatible version {peer_version}")
+        return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
     # Call back the server at its registered URL - only the real server can confirm the secret
     try:
         status, data = await s2s_client._post(peer_url, "/s2s/handshake/confirm", {
@@ -90,10 +95,11 @@ async def handshake_deliver(payload: dict):
     if status != 200 or not isinstance(data, dict) or not data.get("ok"):
         errors.handle_error(Exceptions.SERVER_NOT_TRUSTED, f"{peer_url} did not confirm the handshake secret")
         return _error(Exceptions.SERVER_NOT_TRUSTED, 403)
-    trust_store.set_connected(peer_url, secret)
-    errors.debug_print(f"Connected with trusted server {peer_url}")
+    trust_store.set_connected(peer_url, secret, peer_version, payload.get("commit"))
+    errors.debug_print(f"Connected with trusted server {peer_url} (version {peer_version})")
     s2s_client._after_connect(peer_url)
-    return _ok()
+    # Tell the generator our own version in the answer
+    return _ok(ver.info())
 
 
 @Router.post("/handshake/confirm")
