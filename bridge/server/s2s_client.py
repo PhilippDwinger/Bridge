@@ -31,6 +31,28 @@ from bridge.server.compression import GZIP_MIN_REQUEST_BYTES
 HEADER_FROM = "X-Bridge-From"
 HEADER_TOKEN = "X-Bridge-Token"
 
+# Local neighbours: a peer's public URL (its identity) -> a direct connection address on this machine
+# (e.g. "https://me.ts.net:8443" -> "http://127.0.0.1:8002"). When several Bridge servers run on the SAME
+# machine, each is reachable from outside under its public Tailscale/Funnel URL, but reaching that URL from the
+# same machine goes out to the internet and back onto itself (hairpin) and often fails. With this map the
+# servers talk to each other directly over localhost, while keeping their public URL as identity everywhere else.
+_local_peers = {}
+
+
+def set_local_peers(mapping):
+    from bridge.core import address
+    _local_peers.clear()
+    for public, local in (mapping or {}).items():
+        normalized = address.normalize_url(public)
+        if normalized and isinstance(local, str) and local.strip():
+            _local_peers[normalized] = local.rstrip("/")
+
+
+def _target(peer_url):
+    """The address to actually open the HTTP connection to (localhost for a local neighbour, else the URL itself).
+    The identity (from_url, tokens, trust) always stays peer_url - only the transport changes."""
+    return _local_peers.get(peer_url, peer_url)
+
 # peer_url -> secret we are currently delivering (generator side)
 _pending_secrets = {}
 _handshake_locks = {}
@@ -86,7 +108,7 @@ async def _post(peer_url, path, body, headers=None, timeout=None):
         # Big requests between servers travel gzip compressed (the other server unpacks them)
         data = gzip.compress(data, 6)
         headers["Content-Encoding"] = "gzip"
-    response = await _get_http_client().post(peer_url + path, content=data, headers=headers, timeout=timeout)
+    response = await _get_http_client().post(_target(peer_url) + path, content=data, headers=headers, timeout=timeout)
     try:
         data = response.json()
     except ValueError:
