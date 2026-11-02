@@ -6,7 +6,7 @@
 	     cube - neighbouring blocks are merged into bigger parts (greedy meshing), so a flat map is only a few parts
 	  2. follows every change (topic mcworld.changes): placed / broken blocks, whole chunks after big changes, a full
 	     reload after a Minecraft restart or a lost connection
-	  3. players: the script PlayerSync (same game) shows the Minecraft players with a Roblox avatar and sends ours to
+	  3. players: the script PlayerSync (same game) shows the Minecraft players (as Minecraft characters) and sends ours to
 	     Minecraft (shown there as mannequins). Same coordinates: 1 block = 3 studs, the lowest Minecraft layer at y 0.
 	  4. textures + items (command mcworld.assets): pictures from the Minecraft game itself - textured blocks (for now
 	     the grass block) get their own parts with a Texture per side; the client script MinecraftClient turns the
@@ -15,16 +15,25 @@
 	     break blocks like in creative mode; shown here at once, Minecraft confirms over mcworld.changes
 	  6. health like Minecraft (20 = 10 hearts): fall damage (Fall), hitting a Minecraft player's NPC (Attack ->
 	     command mcworld.hurt), Minecraft players hitting our mannequins (direct message "mc.hurt" from the mod)
+	  7. everybody is a Minecraft player: StarterCharacter = MinecraftCharacter (Minecraft's model, hitbox, speeds,
+	     jump; Workspace.Gravity like Minecraft). Skins (command mcworld.skin): every model with the attribute
+	     McSkinUser gets McSkin (key of the picture) + slim / wide arms; the client asks GetSkin for the pixels.
+	     Roblox players wear a Minecraft default skin (fixed by their user id) or "/skin <Minecraft name>".
+	  8. chat both ways (RemoteEvent Chat): Roblox messages -> command mcworld.chat, "/..." -> command mcworld.command
+	     (the Minecraft command runs as the player's mannequin, the answer comes back into his chat), Minecraft's chat
+	     (topic mcworld.chat) -> everybody's chat
 
 	Needs in ServerStorage: Bridge, MinecraftWorldConfig, MinecraftWorldClient (shared Bridge client), PlayerSyncConfig.
 ]]
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
 
 local Bridge = require(ServerStorage:WaitForChild("Bridge"))
 local Config = require(ServerStorage:WaitForChild("MinecraftWorldConfig"))
 local client = require(ServerStorage:WaitForChild("MinecraftWorldClient"))
+local Character = require(ReplicatedStorage:WaitForChild("MinecraftCharacter"))
 
 local INFO = Config.WorldPrefix .. ".info"
 local CHUNKS = Config.WorldPrefix .. ".chunks"
@@ -32,6 +41,11 @@ local CHANGES = Config.WorldPrefix .. ".changes"
 local ASSETS = Config.WorldPrefix .. ".assets"
 local EDIT = Config.WorldPrefix .. ".edit"
 local HURT = Config.WorldPrefix .. ".hurt"
+local SKIN = Config.WorldPrefix .. ".skin"
+local CHAT = Config.WorldPrefix .. ".chat"
+local COMMAND = Config.WorldPrefix .. ".command"
+local CHAT_PER_5S = 6 -- messages / commands per player in 5 seconds
+local MAX_CHAT = 256 -- characters, like Minecraft
 local MAX_HEALTH = 20 -- Minecraft: 10 hearts
 local ATTACK_REACH = 5 -- blocks (Minecraft creative 5, survival 3) + a little slack below
 local ATTACKS_PER_SECOND = 4
@@ -55,6 +69,25 @@ local MAX_ASK = 64 -- unknown blocks per assets call
 
 -- Characters only come when there is ground to stand on
 Players.CharacterAutoLoads = false
+
+-- Everybody looks and moves like a Minecraft player (the rig, its measurements and speeds: MinecraftCharacter)
+workspace.Gravity = Character.GRAVITY
+pcall(function()
+	StarterPlayer.LoadCharacterAppearance = false -- no Roblox clothes / hats on the Minecraft body
+end)
+if not StarterPlayer:FindFirstChild("StarterCharacter") then
+	local template = Character.build({ name = "StarterCharacter" })
+	template.Parent = StarterPlayer
+end
+do
+	-- no Roblox "Animate" script in the characters (it would play Roblox animations): the client plays Minecraft's
+	local scripts = StarterPlayer:FindFirstChild("StarterCharacterScripts")
+	if scripts and not scripts:FindFirstChild("Animate") then
+		local empty = Instance.new("LocalScript")
+		empty.Name = "Animate"
+		empty.Parent = scripts
+	end
+end
 
 local worldFolder = workspace:FindFirstChild("MinecraftWorld") or Instance.new("Folder")
 worldFolder.Name = "MinecraftWorld"
@@ -87,6 +120,8 @@ local moveRemote = remote("RemoteEvent", "Move") -- client says: (sneaking, spri
 local attackRemote = remote("RemoteEvent", "Attack") -- client: (NPC model) hits a Minecraft player
 local fallRemote = remote("RemoteEvent", "Fall") -- client: (blocks fallen) - Minecraft's fall damage
 local hurtRemote = remote("RemoteEvent", "Hurt") -- server -> client: (amount, from position or nil) red flash, knockback
+local getSkin = remote("RemoteFunction", "GetSkin") -- client asks: (skin key) -> {w, h, pixels} (64 x 64)
+local chatRemote = remote("RemoteEvent", "Chat") -- client: (text) / server -> client: ("mc", kind, text, from) | ("reply", lines)
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -523,6 +558,87 @@ function afterNewPictures()
 end
 -- endregion
 
+-- region skins (every model with McSkinUser: Roblox characters + the NPCs of Minecraft players)
+local skins = {} -- key -> {w, h, pixels}
+local userSkins = {} -- user id -> {key, slim, name}
+local skinAsks = {} -- user id -> true while asking
+
+local function fetchSkin(userId, set)
+	local args: { [string]: any } = { u = userId }
+	if set ~= nil then
+		args.set = set
+	end
+	local ok, result = pcall(client.Call, client, SKIN, args, { Timeout = 20 })
+	if ok and type(result) == "table" and result.ok == true and type(result.key) == "string" then
+		if not skins[result.key] then
+			skins[result.key] = decodeTexture(result)
+		end
+		if skins[result.key] then
+			userSkins[userId] = { key = result.key, slim = result.slim == true, name = result.name }
+			return true, result
+		end
+		return false, "skin picture broken"
+	end
+	return false, if ok and type(result) == "table" then result.reason else tostring(result)
+end
+
+local function dress(model)
+	local userId = model:GetAttribute("McSkinUser")
+	local skin = userSkins[userId]
+	if skin and model.Parent then
+		Character.setShape(model, skin.slim)
+		model:SetAttribute("McSkin", skin.key)
+	end
+end
+
+local function dressAll(userId)
+	for _, item in ipairs(workspace:GetDescendants()) do
+		if item:IsA("Model") and item:GetAttribute("McSkinUser") == userId then
+			dress(item)
+		end
+	end
+end
+
+local function wantSkin(model)
+	local userId = model:GetAttribute("McSkinUser")
+	if type(userId) ~= "number" then
+		return
+	end
+	if userSkins[userId] then
+		dress(model)
+		return
+	end
+	if skinAsks[userId] then
+		return -- dressAll does it when the answer is there
+	end
+	skinAsks[userId] = true
+	task.spawn(function()
+		fetchSkin(userId, nil)
+		skinAsks[userId] = nil
+		dressAll(userId)
+	end)
+end
+
+-- New NPCs of Minecraft players (PlayerSync builds them): every half second a look for undressed ones
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		local npcs = workspace:FindFirstChild("BridgeRemotePlayers")
+		if npcs then
+			for _, item in ipairs(npcs:GetDescendants()) do
+				if item:IsA("Model") and item:GetAttribute("McSkinUser") ~= nil and item:GetAttribute("McSkin") == nil then
+					wantSkin(item)
+				end
+			end
+		end
+	end
+end)
+
+getSkin.OnServerInvoke = function(_player, key)
+	return if type(key) == "string" then skins[key] else nil
+end
+-- endregion
+
 -- region loading
 local function areaChunks(info)
 	local list = {}
@@ -696,7 +812,7 @@ local function itemById(id)
 	return nil
 end
 
--- Somebody's character stands in the block (feet 3 studs under the root part, head 2 above)
+-- Somebody's character stands in the block (Minecraft's hitbox: 0.6 x 1.8 blocks from the feet up)
 local function characterInBlock(center, scale)
 	for _, other in ipairs(Players:GetPlayers()) do
 		local character = other.Character
@@ -704,8 +820,10 @@ local function characterInBlock(center, scale)
 		if root then
 			local p = root.Position
 			local half = scale / 2
-			if math.abs(p.X - center.X) < half + 1 and math.abs(p.Z - center.Z) < half + 1
-				and p.Y - 3 < center.Y + half and p.Y + 2 > center.Y - half then
+			local feet = p.Y - Character.ROOT_HEIGHT
+			local width = Character.HITBOX.X / 2
+			if math.abs(p.X - center.X) < half + width and math.abs(p.Z - center.Z) < half + width
+				and feet < center.Y + half and feet + Character.HITBOX.Y > center.Y - half then
 				return true
 			end
 		end
@@ -789,6 +907,11 @@ editRemote.OnServerEvent:Connect(onEdit)
 -- region health + damage
 local function setupHealth(character)
 	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 10)
+	local player = Players:GetPlayerFromCharacter(character)
+	if player then
+		character:SetAttribute("McSkinUser", player.UserId)
+		wantSkin(character)
+	end
 	if humanoid then
 		humanoid.MaxHealth = MAX_HEALTH
 		humanoid.Health = MAX_HEALTH
@@ -817,6 +940,7 @@ local function hurt(player, amount, from)
 		return
 	end
 	humanoid:TakeDamage(amount)
+	Character.flashRed(character)
 	hurtRemote:FireClient(player, amount, from)
 end
 
@@ -881,13 +1005,130 @@ end)
 -- endregion
 
 -- Sneaking / sprinting: attributes on the character - the client scripts show the pose, PlayerSync sends it to Minecraft
-moveRemote.OnServerEvent:Connect(function(player, sneak, sprint)
+moveRemote.OnServerEvent:Connect(function(player, sneak, sprint, pitch)
 	local character = player.Character
 	if character then
 		character:SetAttribute("McSneak", sneak == true)
 		character:SetAttribute("McSprint", sprint == true and sneak ~= true)
+		if type(pitch) == "number" and pitch == pitch then
+			character:SetAttribute("McPitch", math.clamp(pitch, -1.58, 1.58)) -- the head looks up / down (radians)
+		end
 	end
 end)
+
+-- region chat + commands
+local chatTokens = {}
+local function allowChat(player)
+	local now = os.clock()
+	local bucket = chatTokens[player] or { tokens = CHAT_PER_5S, at = now }
+	bucket.tokens = math.min(CHAT_PER_5S, bucket.tokens + (now - bucket.at) * CHAT_PER_5S / 5)
+	bucket.at = now
+	chatTokens[player] = bucket
+	if bucket.tokens < 1 then
+		return false
+	end
+	bucket.tokens -= 1
+	return true
+end
+Players.PlayerRemoving:Connect(function(player)
+	chatTokens[player] = nil
+end)
+
+local function reply(player, lines)
+	chatRemote:FireClient(player, "reply", lines)
+end
+
+local function setSkin(player, name)
+	local ok, result = fetchSkin(player.UserId, name)
+	if ok then
+		dressAll(player.UserId)
+		reply(player, { if name == "" then "Skin: Minecraft-Standard" else "Skin: " .. tostring(result.name or name) })
+	else
+		reply(player, { "Skin nicht gefunden: " .. tostring(result) })
+	end
+end
+
+local function runCommand(player, command)
+	local ok, result = pcall(client.Call, client, COMMAND, { u = player.UserId, name = player.DisplayName, command = command },
+		{ Timeout = 20 })
+	if not ok or type(result) ~= "table" then
+		reply(player, { "Minecraft antwortet nicht: " .. tostring(result) })
+		return
+	end
+	local lines = {}
+	for _, line in ipairs(if type(result.output) == "table" then result.output else {}) do
+		if type(line) == "string" then
+			table.insert(lines, line)
+		end
+	end
+	if #lines == 0 then
+		table.insert(lines, "/" .. command)
+	end
+	reply(player, lines)
+	-- the command moved his mannequin (/tp @s ...): his character goes there too (teleport = root part at 3 studs)
+	local teleport = result.teleport
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if type(teleport) == "table" and root then
+		local feet = Vector3.new(tonumber(teleport[1]) or 0, (tonumber(teleport[2]) or 0) - 3, tonumber(teleport[3]) or 0)
+		local turn = root.CFrame - root.Position
+		character:PivotTo(CFrame.new(feet + Vector3.new(0, Character.ROOT_HEIGHT, 0)) * turn)
+	end
+end
+
+chatRemote.OnServerEvent:Connect(function(player, text)
+	if type(text) ~= "string" then
+		return
+	end
+	text = string.gsub(string.gsub(text, "^%s+", ""), "%s+$", "")
+	if text == "" or utf8.len(text) == nil or #text > MAX_CHAT * 4 or not allowChat(player) then
+		return
+	end
+	if string.sub(text, 1, 1) == "/" then
+		local word, rest = string.match(text, "^/(%S+)%s*(.-)$")
+		if word and string.lower(word) == "skin" then
+			task.spawn(setSkin, player, rest or "")
+		elseif word then
+			task.spawn(runCommand, player, string.sub(text, 2))
+		end
+		return
+	end
+	task.spawn(function()
+		local ok, err = pcall(client.Call, client, CHAT,
+			{ u = player.UserId, name = player.DisplayName, text = text, label = Config.Label }, { Timeout = 10 })
+		if not ok and Config.Debug then
+			warn("[MinecraftWorld] chat not sent: " .. tostring(err))
+		end
+	end)
+end)
+
+client:Subscribe(nil, CHAT, function(data)
+	if type(data) == "table" and type(data.text) == "string" then
+		chatRemote:FireAllClients("mc", tostring(data.kind or "chat"), data.text, data.from)
+	end
+end)
+
+-- "/..." are Minecraft commands: never into the Roblox chat of the others (the client hides it from the writer too)
+task.spawn(function()
+	local ok, channels = pcall(function()
+		return game:GetService("TextChatService"):WaitForChild("TextChannels", 60)
+	end)
+	if not ok or not channels then
+		return
+	end
+	local function guard(channel)
+		if channel:IsA("TextChannel") then
+			channel.ShouldDeliverCallback = function(message)
+				return string.sub(message.Text or "", 1, 1) ~= "/"
+			end
+		end
+	end
+	for _, channel in ipairs(channels:GetChildren()) do
+		guard(channel)
+	end
+	channels.ChildAdded:Connect(guard)
+end)
+-- endregion
 -- endregion
 
 client:Subscribe(nil, CHANGES, function(data)

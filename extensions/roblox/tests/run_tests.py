@@ -170,6 +170,8 @@ def main():
     failed |= subprocess.run([LUNE, "run", "test_units.luau"], cwd=HERE).returncode != 0
     print("== MinecraftImages (textures, item icons)")
     failed |= subprocess.run([LUNE, "run", "test_images.luau"], cwd=HERE).returncode != 0
+    print("== MinecraftCharacter + animations")
+    failed |= subprocess.run([LUNE, "run", "test_character.luau"], cwd=HERE).returncode != 0
 
     print("== live test against a real Bridge server")
     url = f"http://127.0.0.1:{PORT}"

@@ -25,8 +25,18 @@ shim.services.RunService.Heartbeat = {
 		return { Disconnect = function() end }
 	end,
 }
-local workspaceRoot = Instance.new("Folder")
+local workspaceRoot = Instance.new("Workspace")
 workspaceRoot.Name = "Workspace"
+local starterPlayer = Instance.new("Folder")
+starterPlayer.Name = "StarterPlayer"
+local starterScripts = Instance.new("Folder")
+starterScripts.Name = "StarterCharacterScripts"
+starterScripts.Parent = starterPlayer
+shim.services.StarterPlayer = starterPlayer
+shim.services.KeyframeSequenceProvider = { RegisterKeyframeSequence = function()
+	return "rbxassetid://0"
+end }
+local requireModule -- below
 
 local function makeCharacter(name)
 	local model = Instance.new("Model")
@@ -70,9 +80,15 @@ local function newPlayer(userId, name)
 	local player = { UserId = userId, Name = name, DisplayName = name, Character = nil, Parent = Players, loads = 0 }
 	function player.LoadCharacter(self)
 		self.loads += 1
-		local character, rootPart = makeCharacter(name)
+		-- the game's StarterCharacter: a Minecraft character (MinecraftCharacter)
+		local character = requireModule("MinecraftCharacter").build({ name = name })
+		character:SetAttribute("McSkinUser", userId)
 		character.Parent = workspaceRoot
 		self.Character = character
+		local rootPart = character:FindFirstChild("HumanoidRootPart")
+		rootPart.Position = rootPart.CFrame.Position -- (Lune keeps Position apart from CFrame)
+		rootPart.AssemblyLinearVelocity = Vector3.zero
+		character:FindFirstChildOfClass("Humanoid").FloorMaterial = Enum.Material.Plastic
 		self.rootPart = rootPart
 	end
 	return player
@@ -82,9 +98,10 @@ local modules = {}
 local sources = {
 	MinecraftWorldClient = "../examples/MinecraftWorld/Client.luau",
 	PlayerSyncConfig = "../examples/MinecraftWorld/PlayerSyncConfig.luau",
+	MinecraftCharacter = "../examples/MinecraftWorld/MinecraftCharacter.luau",
 }
 local env
-local function requireModule(name)
+function requireModule(name)
 	if name == "Bridge" then
 		return Bridge
 	end
@@ -106,7 +123,7 @@ shim.services.ServerStorage = {
 }
 
 -- Remotes (Lune has no networking): plain tables that remember what the script connects and fires
-local fired = { assetsChanged = 0 }
+local fired = { assetsChanged = 0, toClient = {}, toAll = {} }
 local editHandler = nil
 local fakeRemotes = {
 	GetAssets = { Name = "GetAssets" },
@@ -122,7 +139,13 @@ local handlers = {} -- remote name -> OnServerEvent handler
 local remoteFolder = { Name = "MinecraftWorld", FindFirstChild = function(_, name)
 	if not fakeRemotes[name] then
 		-- any other remote (Move, Attack, Fall, Hurt): remembers its handler, firing to clients does nothing
-		fakeRemotes[name] = { Name = name, FireClient = function() end, FireAllClients = function() end,
+		fakeRemotes[name] = { Name = name,
+			FireClient = function(_, _player, ...)
+				table.insert(fired.toClient, { name, ... })
+			end,
+			FireAllClients = function(_, ...)
+				table.insert(fired.toAll, { name, ... })
+			end,
 			OnServerEvent = { Connect = function(_, callback)
 				handlers[name] = callback
 				return { Disconnect = function() end }
@@ -130,12 +153,17 @@ local remoteFolder = { Name = "MinecraftWorld", FindFirstChild = function(_, nam
 	end
 	return fakeRemotes[name]
 end }
-shim.services.ReplicatedStorage = { FindFirstChild = function(_, name)
-	return if name == "MinecraftWorld" then remoteFolder else nil
-end }
+shim.services.ReplicatedStorage = {
+	FindFirstChild = function(_, name)
+		return if name == "MinecraftWorld" then remoteFolder else nil
+	end,
+	WaitForChild = function(_, name)
+		return "module:" .. name
+	end,
+}
 env = setmetatable({
 	game = game, workspace = workspaceRoot, Instance = Instance, Vector3 = Vector3, CFrame = CFrame, Enum = Enum,
-	Color3 = Color3, task = task, warn = warn, buffer = buffer,
+	Color3 = Color3, Vector2 = roblox.Vector2, task = task, warn = warn, buffer = buffer,
 	require = function(target)
 		return requireModule(string.sub(target, 8))
 	end,
@@ -198,7 +226,31 @@ local function observe()
 		for _, serverFolder in ipairs(remote:GetChildren()) do
 			for _, model in ipairs(serverFolder:GetChildren()) do
 				table.insert(result.npcs, serverFolder.Name .. "/" .. model.Name)
+				local root = model:FindFirstChild("HumanoidRootPart")
+				local textures = 0
+				for _, item in ipairs(model:GetDescendants()) do
+					if item:IsA("Texture") and item:GetAttribute("McSkinFace") then
+						textures += 1
+					end
+				end
+				result.npc = { name = model.Name, skin = model:GetAttribute("McSkin"), slim = model:GetAttribute("McSlim"),
+					skinUser = model:GetAttribute("McSkinUser"), rootY = root and root.CFrame.Position.Y, textures = textures,
+					parts = #model:GetChildren(), pitch = model:GetAttribute("McPitch") }
 			end
+		end
+	end
+	if paddy.Character then
+		result.paddy = { skin = paddy.Character:GetAttribute("McSkin"), slim = paddy.Character:GetAttribute("McSlim"),
+			skinUser = paddy.Character:GetAttribute("McSkinUser") }
+	end
+	result.starterCharacter = starterPlayer:FindFirstChild("StarterCharacter") ~= nil
+	result.animateBlocked = starterScripts:FindFirstChild("Animate") ~= nil
+	result.gravity = workspaceRoot.Gravity
+	result.toClient = fired.toClient
+	result.toAll = {}
+	for _, call in ipairs(fired.toAll) do
+		if call[1] == "Chat" then
+			table.insert(result.toAll, call)
 		end
 	end
 	return result
@@ -211,8 +263,9 @@ while os.clock() - started < scenario.seconds do
 	local t = os.clock() - started
 	if paddy.rootPart then
 		-- our player stands on the Minecraft spawn and walks a bit
+		-- feet on the grass (Minecraft y -60 = 12 studs), the root part of a Minecraft character above
 		local x = 1.5 + math.sin(t) * 3
-		paddy.rootPart.CFrame = CFrame.new(Vector3.new(x, 15, 1.5))
+		paddy.rootPart.CFrame = CFrame.new(Vector3.new(x, 12 + requireModule("MinecraftCharacter").ROOT_HEIGHT, 1.5))
 		paddy.rootPart.Position = paddy.rootPart.CFrame.Position
 	end
 	for _, callback in ipairs(heartbeat) do
@@ -235,6 +288,15 @@ while os.clock() - started < scenario.seconds do
 				blocks = payload and payload.blocks }
 		elseif event.action == "sneak" then
 			paddy.Character:SetAttribute("McSneak", event.value == true)
+		elseif event.action == "chat" then
+			-- what the client sends when our player writes in the chat ("/..." = a Minecraft command)
+			handlers.Chat(paddy, event.text)
+		elseif event.action == "skin" then
+			-- what a client asks for the pixels of a skin
+			local key = (if event.npc then (observe().npc or {}).skin else paddy.Character:GetAttribute("McSkin"))
+			local picture = fakeRemotes.GetSkin.OnServerInvoke and fakeRemotes.GetSkin.OnServerInvoke(paddy, key)
+			observations[event.name] = { key = key, w = picture and picture.w, h = picture and picture.h,
+				bytes = picture and buffer.len(picture.pixels) }
 		elseif event.action == "edit" then
 			-- a click of our player: the RemoteEvent from the client script
 			editHandler(paddy, event.what, event.x, event.y, event.z, event.item)

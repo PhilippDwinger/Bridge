@@ -39,6 +39,24 @@ function Images.solid(w: number, h: number, r: number, g: number, b: number, a: 
 	return { w = w, h = h, pixels = out }
 end
 
+--- A part of a picture (x, y, w, h in pixels; outside the picture = transparent) - e.g. one face out of a skin.
+function Images.crop(picture: Picture, x: number, y: number, w: number, h: number): Picture
+	local out = buffer.create(w * h * 4)
+	local source = picture.pixels
+	for row = 0, h - 1 do
+		local sy = y + row
+		if sy >= 0 and sy < picture.h then
+			for column = 0, w - 1 do
+				local sx = x + column
+				if sx >= 0 and sx < picture.w then
+					buffer.writeu32(out, (row * w + column) * 4, buffer.readu32(source, (sy * picture.w + sx) * 4))
+				end
+			end
+		end
+	end
+	return { w = w, h = h, pixels = out }
+end
+
 local function sample(picture: Picture, u: number, v: number, shade: number, out: buffer, offset: number)
 	local x = math.clamp(math.floor(u * picture.w), 0, picture.w - 1)
 	local y = math.clamp(math.floor(v * picture.h), 0, picture.h - 1)

@@ -56,5 +56,20 @@ check("block icon: top face = top texture, full bright", tr == 200 and tg == 100
 check("block icon: left face = side texture * 0.8", lr == 80 and lg == 160 and lb == 40 and la == 255, lr .. "," .. lg)
 check("block icon: right face = side texture * 0.6", rr == 60 and rg == 120 and rb == 30 and ra == 255, rr .. "," .. rg)
 
+-- crop: one face out of a skin (here a 4x3 picture, the 2x2 part at 1,1; outside = transparent)
+local sheet = Images.solid(4, 3, 0, 0, 0)
+for y = 0, 2 do
+	for x = 0, 3 do
+		buffer.writeu8(sheet.pixels, (y * 4 + x) * 4, x * 10 + y)
+	end
+end
+local face = Images.crop(sheet, 1, 1, 2, 2)
+local edge = Images.crop(sheet, 3, 2, 2, 2)
+local c00 = pixel(face, 0, 0)
+local c11 = pixel(face, 1, 1)
+local _, _, _, outside = pixel(edge, 1, 1)
+check("crop: the part of the picture (a face of a skin), outside the picture transparent",
+	face.w == 2 and face.h == 2 and c00 == 11 and c11 == 22 and pixel(edge, 0, 0) == 32 and outside == 0)
+
 print(string.format("\n%d ok, %d failed", results.ok, results.fail))
 process.exit(if results.fail > 0 then 1 else 0)

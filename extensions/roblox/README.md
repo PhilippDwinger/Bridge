@@ -158,9 +158,8 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Änderungen (`/fill`, Explosion) lädt das Spiel die betroffenen Chunks neu. Startet Minecraft neu oder war die
   Verbindung weg, lädt es alles neu.
 - **Spieler:** Das Script `PlayerSync` (dasselbe wie im Testspiel) teilt sich den Bridge-Client mit der Welt
-  (`MinecraftWorldClient`). Minecraft-Spieler erscheinen mit einem Roblox-Avatar, Roblox-Spieler in Minecraft als
-  Mannequins mit Minecraft-Aussehen. Lauftempo 13 und Sprunghöhe 4,5 passen zu Minecraft (1 Block hoch springen).
-  Der gemeinsame Client fragt alle 0,15 s (eigene Spieler raus, Minecraft-Spieler und Blöcke rein, ein Request) und darf
+  (`MinecraftWorldClient`). Roblox-Spieler sind in Minecraft Mannequins, Minecraft-Spieler in Roblox NPCs – beide
+  stehen genau auf dem Boden (der Snapshot sagt mit `f`, wie hoch der Root-Part über den Füßen ist). Der gemeinsame Client fragt alle 0,15 s (eigene Spieler raus, Minecraft-Spieler und Blöcke rein, ein Request) und darf
   460 der 500 HTTP-Anfragen pro Minute nutzen – im Spiel nutzt sonst nichts HttpService.
 - Die Spieler spawnen erst, wenn die Welt da ist, und zwar auf dem Minecraft-Spawn. Antwortet Minecraft 15 Sekunden
   lang nicht, warten sie auf einer Plattform hoch oben.
@@ -180,15 +179,37 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   macht den Schaden, mit Rückstoß von deinem Mannequin). Schlägt ein Minecraft-Spieler dein Mannequin, verlierst du
   Leben (Schaden wie in Minecraft, auch mit Schwert): roter Blitz, Kamera kippt, Rückstoß. Die Lebensleiste eines
   Minecraft-Spielers zeigt sich über seinem NPC, wenn er nicht voll ist.
-- **Schleichen + Sprinten:** **Shift halten** = schleichen (langsam, Augen tiefer, geduckte Haltung), **Strg** beim
-  Laufen = sprinten (schneller, weiteres Sichtfeld) – Minecrafts Tempo. Alle sehen die Haltung; Minecraft-Spieler
-  schleichen und sprinten in Roblox genauso (NPC duckt sich / rennt), Roblox-Spieler ducken sich in Minecraft.
-  Shift-Lock ist dafür im Spiel aus.
-- **Arm schwingen:** Schlägt oder baut jemand, schwingt der Arm – in Roblox (eigener Charakter und NPCs der
-  Minecraft-Spieler) und in Minecraft (Mannequins der Roblox-Spieler).
-- **Bauen:** **Linksklick** baut den Block unter der Maus ab (halten = weiter), **Rechtsklick** setzt das gewählte
-  Item (in der Third-Person-Ansicht nur ein kurzer Klick ohne Kamera-Drehen). Reichweite 5 Blöcke, ein schwarzer
-  Rahmen zeigt den Block. Der Server prüft es, zeigt es sofort und schickt es über Bridge an Minecraft
+- **Alle sind Minecraft-Spieler** (`MinecraftCharacter`, ReplicatedStorage): kein Roblox-Rig mehr, sondern
+  Minecrafts Spielermodell (Kopf 8×8×8 Pixel, Körper 8×12×4, Arme 4 bzw. 3 „slim“, Beine, zweite Skin-Schicht),
+  Maßstab wie Minecraft (1 Skin-Pixel = 0,176 Studs), Hitbox 0,6 × 1,8 Blöcke. Gelenke wie in Minecraft: jedes Teil
+  hängt einzeln am `ModelRoot` (den Füßen). Der Server legt den `StarterCharacter` an und schaltet Roblox' `Animate` ab.
+- **Skins** (Command `mcworld.skin`): Minecraft-Spieler tragen ihren eigenen Skin, Roblox-Spieler einen der 18
+  Minecraft-Standardskins (fest nach UserId, wie Minecraft es mit UUIDs macht) – in Roblox und an ihrem Mannequin.
+  **`/skin <Minecraft-Name>`** im Chat übernimmt den Skin eines echten Minecraft-Accounts, `/skin` allein geht zurück.
+  Jede Fläche jedes Körperteils hat eine `Texture` (Attribut `McSkinFace` = Stelle im 64×64-Skin), der Client holt
+  die Pixel (`GetSkin`) und macht die Bilder.
+- **Bewegen wie Minecraft** (`MinecraftPlayer`, StarterPlayerScripts): Gehen 4,317 / Sprinten 5,612 / Schleichen
+  1,295 Blöcke/s, Sprung 1,25 Blöcke, Gravitation 83,5 Studs/s² (ein Sprung dauert wie in Minecraft 12 Ticks, Stürze
+  gleich lang). W A S D relativ zur Blickrichtung, **Leertaste** halten = immer wieder springen, **Shift** halten =
+  schleichen (Augen tiefer, man fällt nicht von Kanten), **Strg** = sprinten nur solange gehalten und vorwärts.
+- **Kamera wie Minecraft:** Maus gefangen, kein Cursor, **F5** (oder **V**, falls Studio F5 abfängt) wechselt
+  Ego-Sicht → von hinten → von vorne
+  (4 Blöcke, Wände ziehen die Kamera ran), Fadenkreuz in der Ego-Sicht. Mausrad = Hotbar-Fach.
+- **Animationen aus Minecraft:** `tools/make_animations.luau` rechnet Minecrafts eigenen Code (HumanoidModel 26.3:
+  Gehen, Atmen, Schleichen, Schlagen, Sterben) in KeyframeSequences um (`examples/MinecraftWorld/animations/*.rbxm`,
+  Rojo: `ReplicatedStorage.MinecraftAnimations`). `tools/upload_animations.py` lädt sie über Open Cloud als echte
+  Roblox-Animationen hoch und schreibt die IDs nach `MinecraftAnimationIds.luau`. Bis dahin spielt Studio sie direkt
+  aus den Dateien (`RegisterKeyframeSequence`, geht nur in Studio). Gehen läuft mit Minecrafts Formel: Gewicht und
+  Tempo = min(Blöcke pro Tick × 4, 1). Der Kopf folgt dem Blick (hoch/runter) bei allen.
+- **Chat:** **T** öffnet ihn. Was du schreibst, steht auch in Minecraft (`<Name · Roblox> …`), Minecrafts Chat
+  (Spieler, `/say`, Beitritte, Tode …) kommt in den Roblox-Chat. **`/…`** ist ein Minecraft-Command: er läuft als
+  dein Mannequin (`@s`, `~ ~ ~`, `/tp @s …` bewegt dich mit), die Antwort siehst nur du. Rechte: Mod-Config
+  `robloxCommandLevel` (Standard 2 = OP-Commands wie `/time`, `/gamemode`, `/give`, `/tp`).
+- **Arm schwingen:** Schlägt oder baut jemand, schwingt der Arm (Minecrafts Schlag-Animation) – in Roblox und in
+  Minecraft (Mannequins der Roblox-Spieler). Getroffene werden kurz rot wie in Minecraft.
+- **Bauen:** **Linksklick** baut den Block ab, auf den du schaust (halten = weiter), **Rechtsklick** setzt das
+  gewählte Item. Gezielt wird wie in Minecraft von den Augen aus (auch von hinten/vorne). Reichweite 5 Blöcke, ein
+  schwarzer Rahmen zeigt den Block. Der Server prüft es, zeigt es sofort und schickt es über Bridge an Minecraft
   (`mcworld.edit`); sagt Minecraft nein, lädt er den Chunk neu.
 
 So startest du es:
@@ -199,6 +220,11 @@ So startest du es:
    `rojo serve minecraft-world.project.json --port 34874` → im Rojo-Plugin Port 34874 → Connect.
 3. Einmalig für die Texturen: **Game Settings → Security → „Allow Mesh / Image APIs“** einschalten (sonst bleiben
    die Blöcke einfarbig und Hotbar/Inventar grau – das Output sagt es dann). → **Play**.
+4. Einmalig für die Animationen außerhalb von Studio: Open-Cloud-API-Key (create.roblox.com → Open Cloud → API Keys,
+   „Assets“ Read + Write) in eine Datei, dann
+   `python extensions\roblox\tools\upload_animations.py <Key-Datei> <deine UserId>` – die IDs landen in
+   `MinecraftAnimationIds.luau`, Rojo bringt sie ins Spiel. Nach Änderungen an den Animationen:
+   `lune run extensions/roblox/tools/make_animations.luau`, dann wieder hochladen.
 
 Die Texturen kommen nur, wenn Minecraft selbst läuft (Einzelspieler oder IntelliJ „Minecraft Client“). Ein
 Dedicated Server hat keine Bilder – dann bleibt alles grau, Bauen geht trotzdem.
@@ -213,7 +239,10 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
 ```
 
 - `test_units.luau` – SHA-256, Base64 und zlib gegen Python (40 Testvektoren, alle zlib-Stufen)
-- `test_images.luau` – `MinecraftImages`: Hochskalieren (scharfe Pixel), einfarbige Bilder, Block-Icon (3D-Würfel)
+- `test_images.luau` – `MinecraftImages`: Hochskalieren (scharfe Pixel), einfarbige Bilder, Block-Icon (3D-Würfel),
+  Ausschnitt (eine Fläche aus dem Skin)
+- `test_character.luau` – `MinecraftCharacter`: Minecrafts Maße und Hitbox, Skin-Flächen an der richtigen Stelle,
+  Slim-Arme, die 7 Animationen (Gehen: Bein 1,4 rad nach hinten / Arm nach vorne, Schleichen, Tod auf die linke Seite)
 - `test_live.luau` – zwei Clients: Topics, Batch-Poll, `PublishLatest` / `Subscribe` mit `Latest` (auch mit einem
   älteren Bridge-Server), direkte Nachrichten (fast/safe/compressed/auto), Commands
   (Fehler, Timeout, späte Antwort, Async), Session-Erneuerung, `SESSION_INVALID`, feste Identität, Server-Reset
@@ -228,5 +257,6 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
   **und einen echten Minecraft-Server mit der Mod** (braucht beide laufend; so in der Cloud getestet): 25 Chunks =
   75 texturierte Parts (Grundgestein, Erde, Gras mit Texturen aus den Modellen), Bilder für den Client (`GetAssets`),
   Spawn, Spieler spawnen erst mit Welt, `setblock` → Neuaufbau des Chunks, `/fill` → Chunk neu geladen, ein neuer
-  Block (Smaragd) wird nachgefragt und texturiert, Roblox-Spieler als Mannequin in Minecraft (duckt sich beim
-  Schleichen), Grasblock setzen und abbauen (kommt in Minecraft an, zu weit weg wird ignoriert)
+  Block (Smaragd) wird nachgefragt und texturiert, Roblox-Spieler als Mannequin in Minecraft (steht genau auf dem
+  Boden, duckt sich beim Schleichen), Grasblock setzen und abbauen (kommt in Minecraft an, zu weit weg wird
+  ignoriert), Minecraft-Charakter + Standardskin, `GetSkin`, Chat in beide Richtungen, `/time set day` und `/skin`

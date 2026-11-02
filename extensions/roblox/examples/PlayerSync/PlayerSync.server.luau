@@ -14,6 +14,8 @@
 
 	Needs in ServerStorage: the module "Bridge" and a ModuleScript "PlayerSyncConfig" (see config/A.luau).
 	Also used by the MinecraftWorld game: there the players of Minecraft come in the same format (topic "playersync").
+	A game can bring its own look (config BuildModel / Animate / OnHurt, e.g. Minecraft characters); f = how high the
+	root part is above the feet - every avatar stands on the ground, whatever its size.
 ]]
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -21,7 +23,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local HttpService = game:GetService("HttpService")
 
 local Bridge = require(ServerStorage:WaitForChild("Bridge"))
-local Config = require(ServerStorage:WaitForChild("PlayerSyncConfig"))
+local Config = require(ServerStorage:WaitForChild("PlayerSyncConfig")) :: any
 
 local TOPIC = Config.Topic or "playersync"
 local SAMPLE_RATE = Config.SampleRate or 20 -- the own players are measured this often; the newest goes out with each poll
@@ -133,7 +135,11 @@ end
 local createFromUserId = playersMethod("CreateHumanoidModelFromUserIdAsync", "CreateHumanoidModelFromUserId")
 local createFromDescription = playersMethod("CreateHumanoidModelFromDescriptionAsync", "CreateHumanoidModelFromDescription")
 
-local function buildModel(userId)
+local function buildModel(userId, player)
+	if Config.BuildModel then
+		local ok, result = pcall(Config.BuildModel, player)
+		return if ok then result else nil
+	end
 	local model = nil
 	if userId > 0 and createFromUserId then
 		local ok, result = pcall(createFromUserId, Players, userId)
@@ -153,6 +159,12 @@ end
 
 local function destroyNpc(npc)
 	npc.removed = true
+	if npc.controller then
+		pcall(function()
+			npc.controller:destroy()
+		end)
+		npc.controller = nil
+	end
 	if npc.model then
 		npc.model:Destroy()
 		npc.model = nil
@@ -170,6 +182,14 @@ local function removeServer(senderIp)
 	end
 	server.folder:Destroy()
 	print("[PlayerSync " .. LABEL .. "] game server " .. server.label .. " is gone")
+end
+
+-- Root part height over the feet (R15: hip height + half the root part, R6: 2 studs of legs + half)
+local function rootHeightOf(humanoid, rootPart)
+	if humanoid.RigType == Enum.HumanoidRigType.R6 then
+		return rootPart.Size.Y / 2 + 2
+	end
+	return rootPart.Size.Y / 2 + humanoid.HipHeight
 end
 
 local function setupModel(npc, model, server)
@@ -198,7 +218,9 @@ local function setupModel(npc, model, server)
 	end)
 	npc.shown = predict(npc, os.clock())
 	npc.shownYaw = npc.yaw
-	rootPart.CFrame = CFrame.new(npc.shown) * CFrame.Angles(0, npc.yaw, 0)
+	-- the snapshot says where the sender's root part is (f studs above the feet): ours may be higher / lower
+	npc.lift = if npc.rootHeight then rootHeightOf(humanoid, rootPart) - npc.rootHeight else 0
+	rootPart.CFrame = CFrame.new(npc.shown + Vector3.new(0, npc.lift, 0)) * CFrame.Angles(0, npc.yaw, 0)
 	model:SetAttribute("McSneak", npc.crouch)
 	model:SetAttribute("McSprint", npc.sprint)
 	model:SetAttribute("McUserId", npc.userId) -- who it is (a game script can hit it)
@@ -217,6 +239,11 @@ local function setupModel(npc, model, server)
 	local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator")
 	animator.Parent = humanoid
 	npc.tracks = {}
+	if Config.Animate then
+		local ok, controller = pcall(Config.Animate, model)
+		npc.controller = if ok then controller else nil
+		return
+	end
 	for name, id in pairs(ANIMATIONS[humanoid.RigType.Name] or ANIMATIONS.R15) do
 		local animation = Instance.new("Animation")
 		animation.AnimationId = id
@@ -250,7 +277,7 @@ end
 local function buildNpc(server, npc, player)
 	server.npcs[player.u] = npc
 	task.spawn(function()
-		local model = buildModel(player.u) -- yields (loads the avatar)
+		local model = buildModel(player.u, player) -- yields (loads the avatar)
 		if not model then
 			return
 		end
@@ -325,13 +352,23 @@ local function onSnapshot(data, event)
 			npc.yaw = tonumber(player.r) or 0
 			npc.crouch = player.c == true
 			npc.sprint = player.sp == true
+			npc.rootHeight = tonumber(player.f)
+			npc.pitch = tonumber(player.hp)
 			-- the player swings his arm (hits / builds): once per swing
 			local swing = player.sw == true
-			if swing and not npc.swung and npc.tracks.slash then
-				npc.tracks.slash:Play(0.05)
+			if swing and not npc.swung then
+				if npc.controller then
+					npc.controller:swing()
+				elseif npc.tracks.slash then
+					npc.tracks.slash:Play(0.05)
+				end
 			end
 			npc.swung = swing
+			local oldHealth = npc.health
 			npc.health = tonumber(player.h)
+			if npc.model and oldHealth and npc.health and npc.health < oldHealth and Config.OnHurt then
+				pcall(Config.OnHurt, npc.model)
+			end
 			npc.maxHealth = math.max(tonumber(player.mh) or 20, 1)
 			if npc.humanoid and npc.health then
 				npc.humanoid.MaxHealth = npc.maxHealth
@@ -342,6 +379,7 @@ local function onSnapshot(data, event)
 				-- the client scripts show the pose (crouching) - attributes replicate to every player
 				npc.model:SetAttribute("McSneak", npc.crouch)
 				npc.model:SetAttribute("McSprint", npc.sprint)
+				npc.model:SetAttribute("McPitch", npc.pitch)
 			end
 			npc.speed = if type(player.w) == "table"
 				then Vector3.new(npc.velocity.X, 0, npc.velocity.Z).Magnitude
@@ -364,7 +402,11 @@ local function onSnapshot(data, event)
 	end
 end
 
-local function animate(npc)
+local function animate(npc, dt)
+	if npc.controller then
+		npc.controller:update(dt, { speed = npc.speed, sneak = npc.crouch })
+		return
+	end
 	local want = if npc.air then "fall"
 		elseif npc.speed > 18 or (npc.sprint and npc.speed > 0.5) then "run"
 		elseif npc.speed > 0.5 then "walk"
@@ -398,8 +440,12 @@ RunService.Heartbeat:Connect(function(dt)
 					npc.correction = if npc.correction.Magnitude < 0.001 then Vector3.zero else npc.correction * fade
 					npc.shown = predict(npc, now) + npc.correction
 					npc.shownYaw = turnTowards(npc.shownYaw, npc.yaw, turn)
-					npc.rootPart.CFrame = CFrame.new(npc.shown) * CFrame.Angles(0, npc.shownYaw, 0)
-					animate(npc)
+					if npc.rootHeight and npc.humanoid then
+						npc.lift = rootHeightOf(npc.humanoid, npc.rootPart) - npc.rootHeight
+					end
+					npc.rootPart.CFrame = CFrame.new(npc.shown + Vector3.new(0, npc.lift or 0, 0))
+						* CFrame.Angles(0, npc.shownYaw, 0)
+					animate(npc, dt)
 				end
 			end
 		end
@@ -434,12 +480,15 @@ local function snapshot()
 				c = character:GetAttribute("McSneak") == true, -- sneaking / sprinting (set by a game script, e.g. MinecraftWorld)
 				sp = character:GetAttribute("McSprint") == true,
 				sw = character:GetAttribute("McSwing") == true,
+				f = round(rootHeightOf(humanoid, rootPart), 0.01), -- root part above the feet: the others put us on the ground
+				hp = round(tonumber(character:GetAttribute("McPitch")) or 0, 0.01), -- head pitch (radians, + = looking down)
 			}
 			table.insert(list, entry)
 			-- what counts as "moved": 5 cm, a few degrees, other velocity / air state
 			table.insert(parts, table.concat({ entry.u, steps(position.X, 0.05), steps(position.Y, 0.05),
 				steps(position.Z, 0.05), steps(entry.r, 0.05), steps(velocity.X, 0.5), steps(velocity.Y, 0.5),
-				steps(velocity.Z, 0.5), tostring(entry.a), tostring(entry.c), tostring(entry.sp), tostring(entry.sw) }, ":"))
+				steps(velocity.Z, 0.5), tostring(entry.a), tostring(entry.c), tostring(entry.sp), tostring(entry.sw),
+				steps(entry.hp, 0.05) }, ":"))
 		end
 	end
 	return list, table.concat(parts, "|")

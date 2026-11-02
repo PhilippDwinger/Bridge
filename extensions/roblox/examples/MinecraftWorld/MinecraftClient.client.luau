@@ -2,17 +2,18 @@
 	MinecraftClient - the Minecraft side of the player (LocalScript in StarterPlayerScripts)
 
 	- Textures: the server got the pictures from Minecraft (RemoteFunction GetAssets). EditableImages only exist on
-	  the client, so they are made here and put on every Texture with the attribute "McTexture" in the world.
-	  Studio / game: Game Settings > Security > "Allow Mesh / Image APIs" must be on.
-	- Hotbar (keys 1-9) and inventory (E) with Minecraft's own GUI pictures. Creative mode: items never run out.
-	  Click a slot in the inventory to pick an item up, click another one to put it down (or swap).
-	- Sneaking (hold Shift) and sprinting (Ctrl while walking) with Minecraft's speeds; everybody sees the pose -
-	  also Minecraft players (their NPCs crouch / run) and Minecraft sees ours (mannequins crouch).
+	  the client, so they are made here and put on every Texture with the attribute "McTexture" in the world - and the
+	  skins (RemoteFunction GetSkin) on every body part with "McSkinFace". Every picture is made once and kept; one
+	  that fails is tried again (no grey blocks any more). Studio / game: Game Settings > Security > "Allow Mesh /
+	  Image APIs" must be on.
+	- Hotbar (keys 1-9, mouse wheel) and inventory (E) with Minecraft's own GUI pictures. Creative mode: items never
+	  run out. Click a slot in the inventory to pick an item up, click another one to put it down (or swap).
 	- Health like Minecraft: 10 hearts over the hotbar, fall damage (more than 3 blocks), left click on a Minecraft
-	  player's NPC hits him, hits from Minecraft players come with a red flash, a tilted camera and knockback.
-	- Building: left click breaks the block under the mouse (hold = repeat), right click places the selected item.
-	  In third person the right mouse button also turns the camera: only a short click without moving places.
+	  player hits him, hits from Minecraft players come with a red flash, a tilted camera and knockback.
+	- Building: left click breaks the block you look at (hold = repeat), right click places the selected item - aimed
+	  from the eyes like in Minecraft (MinecraftPlayer says where they are and where they look).
 	  The server checks it and sends it to Minecraft over Bridge.
+	Camera, walking, sneaking / sprinting, the animations and the chat: MinecraftPlayer.
 ]]
 local AssetService = game:GetService("AssetService")
 local ContextActionService = game:GetService("ContextActionService")
@@ -27,10 +28,10 @@ local remotes = ReplicatedStorage:WaitForChild("MinecraftWorld")
 local getAssets = remotes:WaitForChild("GetAssets") :: RemoteFunction
 local assetsChanged = remotes:WaitForChild("AssetsChanged") :: RemoteEvent
 local editRemote = remotes:WaitForChild("Edit") :: RemoteEvent
-local moveRemote = remotes:WaitForChild("Move") :: RemoteEvent
 local attackRemote = remotes:WaitForChild("Attack") :: RemoteEvent
 local fallRemote = remotes:WaitForChild("Fall") :: RemoteEvent
 local hurtRemote = remotes:WaitForChild("Hurt") :: RemoteEvent
+local getSkin = remotes:WaitForChild("GetSkin") :: RemoteFunction
 
 local player = Players.LocalPlayer
 local REACH = 5 -- blocks from the eyes, like Minecraft in creative mode
@@ -44,11 +45,7 @@ local HOTBAR_KEYS = {
 }
 
 local assets = nil -- what the server sent (see MinecraftWorld: clientAssets)
-local images = {} -- EditableImages we made (destroyed when new pictures come)
-local worldContent = {} -- texture key -> Content for the world (upscaled)
-local guiContent = {} -- texture key -> Content in original size (the GUI shows it pixelated)
-local iconContent = {} -- item id -> Content of the item icon
-local imagesFailed = false
+local imagesFailed = false -- the very first picture failed: "Allow Mesh / Image APIs" is off
 
 -- region inventory state: slots 1-9 = hotbar, 10-36 = the three rows above
 local slots = table.create(36) :: { any }
@@ -67,94 +64,204 @@ end
 -- endregion
 
 -- region pictures
-local function makeImage(picture): Content?
-	if imagesFailed then
+--[[
+	Every picture is made once and kept (key -> EditableImage): new pictures from Minecraft only add the missing ones,
+	nothing that is shown gets destroyed. A picture that could not be made (memory, too many at once) is tried again
+	a moment later - and every Texture that has no picture yet waits in "waiting" until it gets one. (Before, all
+	pictures were made again after every change and one failure stopped all the rest: whole block kinds went grey.)
+]]
+local cache = {} -- cache key -> {image = EditableImage, content = Content, source = string}
+local failedAt = {} -- cache key -> os.clock() of the last failure
+local waiting = setmetatable({}, { __mode = "k" }) -- Texture -> true: still without its picture
+local RETRY = 2 -- seconds
+
+local function makeImage(cacheKey: string, source: string, build: () -> any): Content?
+	local cached = cache[cacheKey]
+	if cached and cached.source == source then
+		return cached.content
+	end
+	if imagesFailed or (failedAt[cacheKey] and os.clock() - failedAt[cacheKey] < RETRY) then
 		return nil
 	end
+	local picture = build()
 	local ok, image = pcall(function()
 		return AssetService:CreateEditableImage({ Size = Vector2.new(picture.w, picture.h) })
 	end)
 	if not ok or not image then
-		imagesFailed = true
-		warn("[MinecraftWorld] no textures: turn on 'Allow Mesh / Image APIs' (Game Settings > Security) - " .. tostring(image))
+		failedAt[cacheKey] = os.clock()
+		if next(cache) == nil then
+			imagesFailed = true
+			warn("[MinecraftWorld] no textures: turn on 'Allow Mesh / Image APIs' (Game Settings > Security) - " .. tostring(image))
+		else
+			warn("[MinecraftWorld] picture " .. cacheKey .. " not made (" .. tostring(image) .. ") - trying again")
+		end
 		return nil
 	end
 	image:WritePixelsBuffer(Vector2.zero, Vector2.new(picture.w, picture.h), picture.pixels)
-	table.insert(images, image)
-	return Content.fromObject(image)
+	if cached then
+		cached.image:Destroy() -- Minecraft sent a different picture for the same key (resource pack)
+	end
+	failedAt[cacheKey] = nil
+	local content = Content.fromObject(image)
+	cache[cacheKey] = { image = image, content = content, source = source }
+	return content
+end
+
+local function worldContent(key: any): Content?
+	local texture = type(key) == "string" and assets and assets.textures and assets.textures[key]
+	if not texture then
+		return nil
+	end
+	return makeImage("world:" .. tostring(key), buffer.tostring(texture.pixels), function()
+		return Images.upscale(texture, TEXTURE_SCALE)
+	end)
+end
+
+local function guiPicture(key: string): Content?
+	local texture = assets and assets.textures and assets.textures[key]
+	if not texture then
+		return nil
+	end
+	return makeImage("gui:" .. key, buffer.tostring(texture.pixels), function()
+		return texture
+	end)
+end
+
+local function iconContent(item): Content?
+	local textures = assets and assets.textures or {}
+	local look = item.block and assets and assets.blocks and assets.blocks[item.block]
+	local faces = look and look.faces or {}
+	local top, north, east = textures[faces.up], textures[faces.north], textures[faces.east]
+	if top and north and east then
+		local source = buffer.tostring(top.pixels) .. buffer.tostring(north.pixels) .. buffer.tostring(east.pixels)
+		return makeImage("icon:" .. item.id, source, function()
+			return Images.blockIcon(top, north, east, ICON_SIZE)
+		end)
+	end
+	return makeImage("icon:" .. item.id, "plain", function()
+		return Images.solid(16, 16, 120, 160, 80) -- a plain square when Minecraft sent no pictures
+	end)
+end
+
+-- Skins: the server keeps the 64x64 pixels per skin key, every face of a body part shows its part of it
+local skins = {} -- skin key -> picture | false (asked, none)
+local skinAsking = {}
+local SKIN_SCALE = 4
+local retryWaiting -- below
+
+local function skinPicture(key: string)
+	if skins[key] ~= nil then
+		return skins[key] or nil
+	end
+	if not skinAsking[key] then
+		skinAsking[key] = true
+		task.spawn(function()
+			local ok, result = pcall(function()
+				return getSkin:InvokeServer(key)
+			end)
+			if ok and type(result) == "table" and typeof(result.pixels) == "buffer" then
+				skins[key] = result
+			else
+				task.wait(5) -- try again later
+			end
+			skinAsking[key] = nil
+			retryWaiting()
+		end)
+	end
+	return nil
+end
+
+local function skinContent(key: string, region: string): Content?
+	local picture = skinPicture(key)
+	if not picture then
+		return nil
+	end
+	local x, y, w, h = string.match(region, "^(%d+),(%d+),(%d+),(%d+)$")
+	if not x then
+		return nil
+	end
+	return makeImage("skin:" .. key .. ":" .. region, key, function()
+		return Images.upscale(Images.crop(picture, tonumber(x) :: number, tonumber(y) :: number, tonumber(w) :: number,
+			tonumber(h) :: number), SKIN_SCALE)
+	end)
 end
 
 local function applyTexture(texture: Texture)
-	local content = worldContent[texture:GetAttribute("McTexture")]
+	local content = nil
+	local region = texture:GetAttribute("McSkinFace")
+	if type(region) == "string" then
+		local model = texture:FindFirstAncestorOfClass("Model")
+		local key = model and model:GetAttribute("McSkin")
+		if type(key) ~= "string" then
+			waiting[texture] = nil -- no skin yet: the model's colour; McSkin coming brings it
+			return
+		end
+		content = skinContent(key :: string, region)
+	else
+		content = worldContent(texture:GetAttribute("McTexture"))
+	end
 	if content then
 		texture.TextureContent = content
 		pcall(function()
 			texture.ResampleMode = Enum.ResamplerMode.Pixelated
 		end)
+		waiting[texture] = nil
+	else
+		waiting[texture] = true
 	end
 end
 
-local function applyAllTextures()
-	local worldFolder = workspace:FindFirstChild("MinecraftWorld")
-	if not worldFolder then
-		return
-	end
-	for _, item in ipairs(worldFolder:GetDescendants()) do
-		if item:IsA("Texture") then
+local function applyModel(model: Instance)
+	for _, item in ipairs(model:GetDescendants()) do
+		if item:IsA("Texture") and item:GetAttribute("McSkinFace") then
 			applyTexture(item)
 		end
 	end
 end
 
-local function buildImages()
-	for _, image in ipairs(images) do
-		image:Destroy()
-	end
-	table.clear(images)
-	table.clear(worldContent)
-	table.clear(guiContent)
-	table.clear(iconContent)
-	imagesFailed = false
-	if not assets then
-		return
-	end
-	local textures = assets.textures or {}
-	-- world: only the textures blocks use, upscaled
-	local used = {}
-	for _, look in pairs(assets.blocks or {}) do
-		for _, key in pairs(look.faces or {}) do
-			used[key] = true
+local function applyAllTextures()
+	for _, item in ipairs(workspace:GetDescendants()) do
+		if item:IsA("Texture") and (item:GetAttribute("McTexture") or item:GetAttribute("McSkinFace")) then
+			applyTexture(item)
 		end
 	end
-	for key in pairs(used) do
-		if textures[key] then
-			worldContent[key] = makeImage(Images.upscale(textures[key], TEXTURE_SCALE))
-		end
-	end
-	for _, key in pairs(assets.gui or {}) do
-		if textures[key] then
-			guiContent[key] = makeImage(textures[key])
-		end
-	end
-	for _, item in ipairs(assets.items or {}) do
-		local look = item.block and assets.blocks and assets.blocks[item.block]
-		local faces = look and look.faces or {}
-		local picture
-		if textures[faces.up] and textures[faces.north] and textures[faces.east] then
-			picture = Images.blockIcon(textures[faces.up], textures[faces.north], textures[faces.east], ICON_SIZE)
+end
+
+retryWaiting = function()
+	for texture in pairs(waiting) do
+		if texture.Parent then
+			applyTexture(texture)
 		else
-			picture = Images.solid(16, 16, 120, 160, 80) -- a plain square when Minecraft sent no pictures
+			waiting[texture] = nil
 		end
-		iconContent[item.id] = makeImage(picture)
 	end
-	applyAllTextures()
+end
+
+local function watchModel(model: Model)
+	model:GetAttributeChangedSignal("McSkin"):Connect(function()
+		applyModel(model)
+	end)
 end
 
 workspace.DescendantAdded:Connect(function(item)
-	if item:IsA("Texture") and item:GetAttribute("McTexture") then
-		applyTexture(item)
+	if item:IsA("Texture") then
+		if item:GetAttribute("McTexture") or item:GetAttribute("McSkinFace") then
+			applyTexture(item)
+		end
+		if item:GetAttribute("McSkinFace") then
+			item:GetAttributeChangedSignal("McSkinFace"):Connect(function()
+				applyTexture(item) -- slim / wide arms: another part of the skin
+			end)
+		end
+	elseif item:IsA("Model") and item:GetAttribute("McSkinUser") ~= nil then
+		watchModel(item)
 	end
 end)
+for _, item in ipairs(workspace:GetDescendants()) do
+	if item:IsA("Model") and item:GetAttribute("McSkinUser") ~= nil then
+		watchModel(item)
+	end
+end
 -- endregion
 
 -- region GUI
@@ -334,7 +441,7 @@ cursor.Visible = false
 
 local function gui(name: string): Content?
 	local key = assets and assets.gui and assets.gui[name]
-	return if key then guiContent[key] else nil
+	return if key then guiPicture(key) else nil
 end
 
 function refresh()
@@ -351,13 +458,13 @@ function refresh()
 	selection.Position = UDim2.fromOffset(-1 + (selected - 1) * 20, -1)
 	for slot = 1, 36 do
 		local item = slots[slot]
-		local content = item and iconContent[item.id] or nil
+		local content = if item then iconContent(item) else nil
 		setPicture(slotIcons[slot], content)
 		if slot <= 9 then
 			setPicture(hotbarIcons[slot], content)
 		end
 	end
-	setPicture(cursor, cursorItem and iconContent[cursorItem.id] or nil)
+	setPicture(cursor, if cursorItem then iconContent(cursorItem) else nil)
 	cursor.Visible = inventoryOpen and cursorItem ~= nil
 	local scale = guiScale()
 	cursor.Size = UDim2.fromOffset(16 * scale, 16 * scale)
@@ -415,6 +522,7 @@ local function setInventory(open: boolean)
 	end
 	inventoryOpen = open
 	dim.Visible = open
+	player:SetAttribute("McGuiOpen", open) -- MinecraftPlayer frees the mouse and stops walking
 	if open then
 		updatePreview()
 		ContextActionService:BindActionAtPriority("MinecraftInventory", blockMovement, false,
@@ -483,13 +591,19 @@ local function findTarget()
 	if not assets or not worldFolder or not head or not camera or inventoryOpen then
 		return
 	end
-	local location = if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
-		then camera.ViewportSize / 2
-		else UserInputService:GetMouseLocation()
-	local ray = camera:ViewportPointToRay(location.X, location.Y)
+	-- Like Minecraft: from the eyes where the player looks (also in third person / front view) - MinecraftPlayer says
+	-- where that is; without it the middle of the screen
+	local eye, look = player:GetAttribute("McEye"), player:GetAttribute("McLook")
+	local origin, direction
+	if typeof(eye) == "Vector3" and typeof(look) == "Vector3" then
+		origin, direction = eye, look.Unit
+	else
+		local ray = camera:ViewportPointToRay(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+		origin, direction = ray.Origin, ray.Direction
+	end
 	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
 	rayParams.FilterDescendantsInstances = if npcFolder then { worldFolder, npcFolder } else { worldFolder }
-	local result = workspace:Raycast(ray.Origin, ray.Direction * 400, rayParams)
+	local result = workspace:Raycast(origin, direction * (REACH + 1) * assets.scale, rayParams)
 	if not result then
 		return
 	end
@@ -498,13 +612,13 @@ local function findTarget()
 		while model and model:GetAttribute("McUserId") == nil do
 			model = model:FindFirstAncestorOfClass("Model")
 		end
-		if model and (result.Position - head.Position).Magnitude <= (REACH + 0.5) * assets.scale then
+		if model and (result.Position - origin).Magnitude <= (REACH + 0.5) * assets.scale then
 			targetNpc = model
 		end
 		return
 	end
 	local x, y, z = blockOf(result.Position - result.Normal * 0.05)
-	if (blockCenter(x, y, z) - head.Position).Magnitude > (REACH + 0.5) * assets.scale then
+	if (result.Position - origin).Magnitude > REACH * assets.scale then
 		return
 	end
 	local normal = Vector3.new(math.round(result.Normal.X), math.round(result.Normal.Y), math.round(result.Normal.Z))
@@ -525,33 +639,10 @@ local function inMyCharacter(x: number, y: number, z: number): boolean
 		and math.abs(delta.Z) < half + size.Z / 2 - 0.1
 end
 
--- My own arm swings when I hit / build (the animation replicates to the others; Minecraft gets it as "sw")
-local SLASH = { R15 = "rbxassetid://522635514", R6 = "rbxassetid://129967390" }
-local slashTrack, slashCharacter = nil, nil
+-- My own arm swings when I hit / build: the script MinecraftPlayer plays Minecraft's swing (replicates to the others);
+-- the server tells Minecraft ("sw": the mannequin swings too)
 local function swingArm()
-	local character = player.Character
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
-	if not animator then
-		return
-	end
-	if slashCharacter ~= character then
-		slashCharacter = character
-		slashTrack = nil
-		local animation = Instance.new("Animation")
-		animation.AnimationId = SLASH[humanoid.RigType.Name] or SLASH.R15
-		local ok, track = pcall(function()
-			return animator:LoadAnimation(animation)
-		end)
-		if ok and track then
-			track.Priority = Enum.AnimationPriority.Action
-			track.Looped = false
-			slashTrack = track
-		end
-	end
-	if slashTrack then
-		slashTrack:Play(0.05)
-	end
+	player:SetAttribute("McSwingAt", os.clock())
 end
 
 local function act(action: string)
@@ -581,10 +672,6 @@ local function act(action: string)
 end
 
 local held = {} -- "break" / "place" -> time of the last action while the button is held
-local rightDown = nil -- {at, look}: right button pressed in third person (click = place, turning the camera = not)
-local function mouseLocked(): boolean
-	return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
-end
 
 UserInputService.InputBegan:Connect(function(input, processed)
 	if input.KeyCode == Enum.KeyCode.E and not processed then
@@ -602,15 +689,10 @@ UserInputService.InputBegan:Connect(function(input, processed)
 		act("break")
 		held["break"] = os.clock()
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-		if mouseLocked() then
-			-- first person / shift lock: the camera does not turn with this button - place at once, hold = repeat
-			findTarget()
-			act("place")
-			held.place = os.clock()
-		else
-			local camera = workspace.CurrentCamera
-			rightDown = { at = os.clock(), look = camera and camera.CFrame.LookVector or Vector3.zero }
-		end
+		-- the mouse is always caught like in Minecraft (MinecraftPlayer): the right button only places
+		findTarget()
+		act("place")
+		held.place = os.clock()
 	end
 end)
 UserInputService.InputEnded:Connect(function(input)
@@ -618,15 +700,16 @@ UserInputService.InputEnded:Connect(function(input)
 		held["break"] = nil
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 		held.place = nil
-		local down = rightDown
-		rightDown = nil
-		local camera = workspace.CurrentCamera
-		-- (while the button is held Roblox keeps the mouse still and turns the camera - so look at the camera)
-		if down and camera and not inventoryOpen and os.clock() - down.at < 0.5
-			and (camera.CFrame.LookVector - down.look).Magnitude < 0.03 then
-			findTarget()
-			act("place")
-		end
+	end
+end)
+-- the mouse wheel goes through the hotbar (like Minecraft)
+UserInputService.InputChanged:Connect(function(input, processed)
+	if processed or inventoryOpen or input.UserInputType ~= Enum.UserInputType.MouseWheel then
+		return
+	end
+	local step = if input.Position.Z > 0 then -1 elseif input.Position.Z < 0 then 1 else 0
+	if step ~= 0 then
+		select((selected - 1 + step) % 9 + 1)
 	end
 end)
 
@@ -660,119 +743,6 @@ RunService.RenderStepped:Connect(function()
 end)
 -- endregion
 
--- region sneaking + sprinting (Minecraft: 4.3 / 1.3 / 5.6 blocks per second = x 3 studs)
-local WALK_SPEED, SNEAK_SPEED, SPRINT_SPEED = 13, 3.9, 16.8
-local sneaking, sprinting = false, false
-local sentSneak, sentSprint = nil, nil
-local baseFov = nil
-
-UserInputService.InputBegan:Connect(function(input, processed)
-	if processed or inventoryOpen then
-		return
-	end
-	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
-		sneaking = true
-	elseif input.KeyCode == Enum.KeyCode.LeftControl then
-		sprinting = true
-	end
-end)
-UserInputService.InputEnded:Connect(function(input)
-	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
-		sneaking = false
-	end
-end)
-
-local function updateMovement(dt: number)
-	local character = player.Character
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	local camera = workspace.CurrentCamera
-	if not humanoid or not camera then
-		return
-	end
-	if sprinting and (sneaking or inventoryOpen or humanoid.MoveDirection.Magnitude < 0.1) then
-		sprinting = false -- like Minecraft: sprinting ends when you stop or sneak
-	end
-	humanoid.WalkSpeed = if sneaking then SNEAK_SPEED elseif sprinting then SPRINT_SPEED else WALK_SPEED
-	if sneaking ~= sentSneak or sprinting ~= sentSprint then
-		sentSneak, sentSprint = sneaking, sprinting
-		moveRemote:FireServer(sneaking, sprinting)
-	end
-	local blend = math.min(1, dt * 10)
-	-- eyes lower while sneaking, a wider view while sprinting (both like Minecraft)
-	humanoid.CameraOffset = humanoid.CameraOffset:Lerp(Vector3.new(0, if sneaking then -0.9 else 0, 0), blend)
-	baseFov = baseFov or camera.FieldOfView
-	camera.FieldOfView += ((if sprinting then baseFov * 1.15 else baseFov) - camera.FieldOfView) * blend
-end
-
--- Crouching pose for every character and NPC with the attribute McSneak (R15: body forward, knees bent)
-local CROUCH = {
-	Waist = CFrame.Angles(-0.5, 0, 0),
-	Neck = CFrame.Angles(0.35, 0, 0),
-	LeftHip = CFrame.Angles(0.72, 0, 0),
-	RightHip = CFrame.Angles(0.72, 0, 0),
-	LeftKnee = CFrame.Angles(-1.44, 0, 0),
-	RightKnee = CFrame.Angles(-1.44, 0, 0),
-	LeftAnkle = CFrame.Angles(0.72, 0, 0),
-	RightAnkle = CFrame.Angles(0.72, 0, 0),
-}
-local CROUCH_DROP = 0.6 -- studs the body goes down (what the bent legs lose)
-local originals = setmetatable({}, { __mode = "k" }) -- Motor6D -> its C0 without the pose
-local crouchAmount = setmetatable({}, { __mode = "k" }) -- model -> 0 (standing) .. 1 (crouching)
-
-local function setJoint(motor: Motor6D, amount: number)
-	local original = originals[motor]
-	if not original then
-		original = motor.C0
-		originals[motor] = original
-	end
-	if motor.Name == "Root" then
-		motor.C0 = CFrame.new(0, -CROUCH_DROP * amount, 0) * original
-	else
-		motor.C0 = original * CFrame.new():Lerp(CROUCH[motor.Name], amount)
-	end
-end
-
-local function poseModel(model: Model, dt: number)
-	local wanted = if model:GetAttribute("McSneak") == true then 1 else 0
-	local current = crouchAmount[model] or 0
-	if current == wanted then
-		return
-	end
-	current += (wanted - current) * math.min(1, dt * 12)
-	if math.abs(current - wanted) < 0.02 then
-		current = wanted
-	end
-	crouchAmount[model] = current
-	for _, item in ipairs(model:GetDescendants()) do
-		if item:IsA("Motor6D") and (CROUCH[item.Name] or item.Name == "Root") then
-			setJoint(item, current)
-		end
-	end
-end
-
-local function poseEverybody(dt: number)
-	for _, other in ipairs(Players:GetPlayers()) do
-		if other.Character then
-			poseModel(other.Character, dt)
-		end
-	end
-	local remote = workspace:FindFirstChild("BridgeRemotePlayers")
-	if remote then
-		for _, serverFolder in ipairs(remote:GetChildren()) do
-			for _, model in ipairs(serverFolder:GetChildren()) do
-				if model:IsA("Model") then
-					poseModel(model, dt)
-				end
-			end
-		end
-	end
-end
-
-RunService.RenderStepped:Connect(function(dt)
-	updateMovement(dt)
-	poseEverybody(dt)
-end)
--- endregion
 
 -- region health: hearts, fall damage, getting hit
 local hearts = {}
@@ -855,7 +825,8 @@ hurtRemote.OnClientEvent:Connect(function(amount, from)
 		local away = root.Position - from
 		away = Vector3.new(away.X, 0, away.Z)
 		if away.Magnitude > 0.01 then
-			root.AssemblyLinearVelocity += away.Unit * 24 + Vector3.new(0, 18, 0)
+			-- Minecraft's knockback: 0.4 blocks/tick away + up (with Minecraft's gravity about a small hop)
+			root.AssemblyLinearVelocity += away.Unit * 24 + Vector3.new(0, 20, 0)
 		end
 	end
 end)
@@ -896,7 +867,7 @@ local function useAssets(newAssets)
 			end
 		end
 	end
-	buildImages()
+	applyAllTextures()
 	refresh()
 	if first then
 		showItemName()
@@ -904,6 +875,16 @@ local function useAssets(newAssets)
 end
 
 assetsChanged.OnClientEvent:Connect(useAssets)
+-- pictures that could not be made yet (and the GUI with them) get another try every few seconds
+task.spawn(function()
+	while true do
+		task.wait(RETRY)
+		if next(waiting) ~= nil or next(failedAt) ~= nil then
+			retryWaiting()
+			refresh()
+		end
+	end
+end)
 if workspace.CurrentCamera then
 	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 		onViewport()
