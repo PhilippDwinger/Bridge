@@ -6,7 +6,7 @@
 	No Roblox objects in here, so it also runs in the tests (Lune).
 
 	    local big = Images.upscale(texture, 8)              -- 16x16 -> 128x128, every pixel a sharp 8x8 square
-	    local icon = Images.blockIcon(top, side, 128)       -- the block as a little 3D cube, like in the inventory
+	    local icon = Images.blockIcon(top, left, right, 128) -- the block as a little 3D cube, like in the inventory
 ]]
 export type Picture = { w: number, h: number, pixels: buffer }
 
@@ -52,12 +52,13 @@ end
 
 --[[
 	A block as an item icon: the cube seen from above at an angle (like Minecraft draws blocks in the inventory) -
-	top face full bright, left face a bit darker, right face darker still. size x size pixels, transparent around.
+	top face full bright, left face (Minecraft: north) a bit darker, right face (east) darker still. size x size
+	pixels, transparent around. Transparent pixels of a texture (glass, leaves) stay transparent.
 
 	Projection of the unit cube: top corner V0, x axis to the right-down (a, b), z axis to the left-down (-a, b),
 	y axis up (0, -h). For every pixel the face and its texture position are found by solving that backwards.
 ]]
-function Images.blockIcon(top: Picture, side: Picture, size: number): Picture
+function Images.blockIcon(top: Picture, left: Picture, right: Picture, size: number): Picture
 	local out = buffer.create(size * size * 4) -- all 0 = transparent
 	local edge = size * 0.6
 	local a = edge * 0.70710678 -- cos 45
@@ -80,14 +81,14 @@ function Images.blockIcon(top: Picture, side: Picture, size: number): Picture
 				local s = (qx + a) / a
 				local t = (qy - b - s * b) / h
 				if s >= 0 and s <= 1 and t >= 0 and t <= 1 then
-					sample(side, s, t, 0.8, out, offset)
+					sample(left, s, t, 0.8, out, offset)
 				end
 			else
 				-- right face (the x = 1 side): q = (a, b) + s*(-a, b) + t*(0, h)
 				local s = (a - qx) / a
 				local t = (qy - b - s * b) / h
 				if s >= 0 and s <= 1 and t >= 0 and t <= 1 then
-					sample(side, 1 - s, t, 0.6, out, offset)
+					sample(right, 1 - s, t, 0.6, out, offset)
 				end
 			end
 		end

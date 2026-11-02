@@ -197,6 +197,17 @@ local function setupModel(npc, model, server)
 	npc.shown = predict(npc, os.clock())
 	npc.shownYaw = npc.yaw
 	rootPart.CFrame = CFrame.new(npc.shown) * CFrame.Angles(0, npc.yaw, 0)
+	model:SetAttribute("McSneak", npc.crouch)
+	model:SetAttribute("McSprint", npc.sprint)
+	model:SetAttribute("McUserId", npc.userId) -- who it is (a game script can hit it)
+	humanoid.BreakJointsOnDeath = false
+	npc.humanoid = humanoid
+	if npc.health then
+		-- Minecraft players: their health, shown when it is not full
+		humanoid.MaxHealth = npc.maxHealth
+		humanoid.Health = math.max(npc.health, 0.1)
+		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.DisplayWhenDamaged
+	end
 	npc.model = model -- from here on removing the NPC also removes the model
 	npc.rootPart = rootPart
 	model.Parent = server.folder
@@ -223,6 +234,7 @@ local function createNpc(server, player)
 		anim = nil, removed = false, model = nil, rootPart = nil, tracks = {},
 		-- the newest snapshot: position + velocity at the local time sampleAt
 		position = Vector3.zero, velocity = Vector3.zero, air = false, gravity = 0, sampleAt = 0, yaw = 0, speed = 0,
+		crouch = false, sprint = false,
 		-- what is shown: prediction + a correction that fades away
 		shown = nil, correction = Vector3.zero, shownYaw = 0,
 	}
@@ -306,6 +318,20 @@ local function onSnapshot(data, event)
 			npc.gravity = gravity
 			npc.sampleAt = sampleAt
 			npc.yaw = tonumber(player.r) or 0
+			npc.crouch = player.c == true
+			npc.sprint = player.sp == true
+			npc.health = tonumber(player.h)
+			npc.maxHealth = math.max(tonumber(player.mh) or 20, 1)
+			if npc.humanoid and npc.health then
+				npc.humanoid.MaxHealth = npc.maxHealth
+				npc.humanoid.Health = math.max(npc.health, 0.1) -- never 0: the NPC must not "die"
+				npc.humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.DisplayWhenDamaged
+			end
+			if npc.model then
+				-- the client scripts show the pose (crouching) - attributes replicate to every player
+				npc.model:SetAttribute("McSneak", npc.crouch)
+				npc.model:SetAttribute("McSprint", npc.sprint)
+			end
 			npc.speed = if type(player.w) == "table"
 				then Vector3.new(npc.velocity.X, 0, npc.velocity.Z).Magnitude
 				else tonumber(player.s) or 0
@@ -328,7 +354,10 @@ local function onSnapshot(data, event)
 end
 
 local function animate(npc)
-	local want = if npc.air then "fall" elseif npc.speed > 18 then "run" elseif npc.speed > 0.5 then "walk" else "idle"
+	local want = if npc.air then "fall"
+		elseif npc.speed > 18 or (npc.sprint and npc.speed > 0.5) then "run"
+		elseif npc.speed > 0.5 then "walk"
+		else "idle"
 	local track = npc.tracks[want]
 	if want ~= npc.anim then
 		local old = npc.anim and npc.tracks[npc.anim]
@@ -391,12 +420,14 @@ local function snapshot()
 				r = round(math.atan2(-look.X, -look.Z), 0.001), -- yaw: CFrame.Angles(0, r, 0) looks the same way
 				s = round(Vector3.new(velocity.X, 0, velocity.Z).Magnitude, 0.1),
 				a = humanoid.FloorMaterial == Enum.Material.Air,
+				c = character:GetAttribute("McSneak") == true, -- sneaking / sprinting (set by a game script, e.g. MinecraftWorld)
+				sp = character:GetAttribute("McSprint") == true,
 			}
 			table.insert(list, entry)
 			-- what counts as "moved": 5 cm, a few degrees, other velocity / air state
 			table.insert(parts, table.concat({ entry.u, steps(position.X, 0.05), steps(position.Y, 0.05),
 				steps(position.Z, 0.05), steps(entry.r, 0.05), steps(velocity.X, 0.5), steps(velocity.Y, 0.5),
-				steps(velocity.Z, 0.5), tostring(entry.a) }, ":"))
+				steps(velocity.Z, 0.5), tostring(entry.a), tostring(entry.c), tostring(entry.sp) }, ":"))
 		end
 	end
 	return list, table.concat(parts, "|")

@@ -45,7 +45,7 @@ check("solid: one colour everywhere, opaque", buffer.len(solid.pixels) == 48 and
 -- block icon from a plain top (200, 100, 50) and side (100, 200, 50)
 local top = Images.solid(16, 16, 200, 100, 50)
 local side = Images.solid(16, 16, 100, 200, 50)
-local icon = Images.blockIcon(top, side, 64)
+local icon = Images.blockIcon(top, side, side, 64)
 local _, _, _, cornerAlpha = pixel(icon, 0, 0)
 local _, _, _, bottomAlpha = pixel(icon, 0, 63)
 local tr, tg, tb, ta = pixel(icon, 32, 14) -- middle of the top face

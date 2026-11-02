@@ -6,6 +6,10 @@
 	  Studio / game: Game Settings > Security > "Allow Mesh / Image APIs" must be on.
 	- Hotbar (keys 1-9) and inventory (E) with Minecraft's own GUI pictures. Creative mode: items never run out.
 	  Click a slot in the inventory to pick an item up, click another one to put it down (or swap).
+	- Sneaking (hold Shift) and sprinting (Ctrl while walking) with Minecraft's speeds; everybody sees the pose -
+	  also Minecraft players (their NPCs crouch / run) and Minecraft sees ours (mannequins crouch).
+	- Health like Minecraft: 10 hearts over the hotbar, fall damage (more than 3 blocks), left click on a Minecraft
+	  player's NPC hits him, hits from Minecraft players come with a red flash, a tilted camera and knockback.
 	- Building: left click breaks the block under the mouse (hold = repeat), right click places the selected item.
 	  In third person the right mouse button also turns the camera: only a short click without moving places.
 	  The server checks it and sends it to Minecraft over Bridge.
@@ -23,6 +27,10 @@ local remotes = ReplicatedStorage:WaitForChild("MinecraftWorld")
 local getAssets = remotes:WaitForChild("GetAssets") :: RemoteFunction
 local assetsChanged = remotes:WaitForChild("AssetsChanged") :: RemoteEvent
 local editRemote = remotes:WaitForChild("Edit") :: RemoteEvent
+local moveRemote = remotes:WaitForChild("Move") :: RemoteEvent
+local attackRemote = remotes:WaitForChild("Attack") :: RemoteEvent
+local fallRemote = remotes:WaitForChild("Fall") :: RemoteEvent
+local hurtRemote = remotes:WaitForChild("Hurt") :: RemoteEvent
 
 local player = Players.LocalPlayer
 local REACH = 5 -- blocks from the eyes, like Minecraft in creative mode
@@ -114,7 +122,9 @@ local function buildImages()
 	-- world: only the textures blocks use, upscaled
 	local used = {}
 	for _, look in pairs(assets.blocks or {}) do
-		used[look.top], used[look.side], used[look.bottom] = true, true, true
+		for _, key in pairs(look.faces or {}) do
+			used[key] = true
+		end
 	end
 	for key in pairs(used) do
 		if textures[key] then
@@ -128,9 +138,10 @@ local function buildImages()
 	end
 	for _, item in ipairs(assets.items or {}) do
 		local look = item.block and assets.blocks and assets.blocks[item.block]
+		local faces = look and look.faces or {}
 		local picture
-		if look and textures[look.top] and textures[look.side] then
-			picture = Images.blockIcon(textures[look.top], textures[look.side], ICON_SIZE)
+		if textures[faces.up] and textures[faces.north] and textures[faces.east] then
+			picture = Images.blockIcon(textures[faces.up], textures[faces.north], textures[faces.east], ICON_SIZE)
 		else
 			picture = Images.solid(16, 16, 120, 160, 80) -- a plain square when Minecraft sent no pictures
 		end
@@ -149,6 +160,7 @@ end)
 -- region GUI
 pcall(function()
 	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false) -- our hotbar instead of Roblox's
+	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false) -- our hearts instead of Roblox's bar
 end)
 
 local screen = Instance.new("ScreenGui")
@@ -213,7 +225,7 @@ local itemName = Instance.new("TextLabel")
 itemName.Name = "ItemName"
 itemName.BackgroundTransparency = 1
 itemName.AnchorPoint = Vector2.new(0.5, 1)
-itemName.Position = UDim2.new(0.5, 0, 0, -6)
+itemName.Position = UDim2.new(0.5, 0, 0, -26) -- above the hearts
 itemName.Size = UDim2.fromOffset(182, 10)
 itemName.Font = Enum.Font.Arcade
 itemName.TextSize = 9
@@ -449,6 +461,7 @@ local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Include
 
 local target = nil -- {x, y, z, normal = Vector3} of the block under the mouse
+local targetNpc = nil -- or the NPC of a Minecraft player under the mouse (left click hits him)
 
 local function blockOf(position: Vector3): (number, number, number)
 	local scale = assets.scale
@@ -462,6 +475,7 @@ end
 
 local function findTarget()
 	target = nil
+	targetNpc = nil
 	local worldFolder = workspace:FindFirstChild("MinecraftWorld")
 	local character = player.Character
 	local head = character and (character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart"))
@@ -473,9 +487,20 @@ local function findTarget()
 		then camera.ViewportSize / 2
 		else UserInputService:GetMouseLocation()
 	local ray = camera:ViewportPointToRay(location.X, location.Y)
-	rayParams.FilterDescendantsInstances = { worldFolder }
+	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
+	rayParams.FilterDescendantsInstances = if npcFolder then { worldFolder, npcFolder } else { worldFolder }
 	local result = workspace:Raycast(ray.Origin, ray.Direction * 400, rayParams)
 	if not result then
+		return
+	end
+	if npcFolder and result.Instance:IsDescendantOf(npcFolder) then
+		local model = result.Instance:FindFirstAncestorOfClass("Model")
+		while model and model:GetAttribute("McUserId") == nil do
+			model = model:FindFirstAncestorOfClass("Model")
+		end
+		if model and (result.Position - head.Position).Magnitude <= (REACH + 0.5) * assets.scale then
+			targetNpc = model
+		end
 		return
 	end
 	local x, y, z = blockOf(result.Position - result.Normal * 0.05)
@@ -501,6 +526,10 @@ local function inMyCharacter(x: number, y: number, z: number): boolean
 end
 
 local function act(action: string)
+	if action == "break" and targetNpc then
+		attackRemote:FireServer(targetNpc) -- hit the Minecraft player (Minecraft does the damage)
+		return
+	end
 	if not target then
 		return
 	end
@@ -599,6 +628,220 @@ RunService.RenderStepped:Connect(function()
 end)
 -- endregion
 
+-- region sneaking + sprinting (Minecraft: 4.3 / 1.3 / 5.6 blocks per second = x 3 studs)
+local WALK_SPEED, SNEAK_SPEED, SPRINT_SPEED = 13, 3.9, 16.8
+local sneaking, sprinting = false, false
+local sentSneak, sentSprint = nil, nil
+local baseFov = nil
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or inventoryOpen then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		sneaking = true
+	elseif input.KeyCode == Enum.KeyCode.LeftControl then
+		sprinting = true
+	end
+end)
+UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		sneaking = false
+	end
+end)
+
+local function updateMovement(dt: number)
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local camera = workspace.CurrentCamera
+	if not humanoid or not camera then
+		return
+	end
+	if sprinting and (sneaking or inventoryOpen or humanoid.MoveDirection.Magnitude < 0.1) then
+		sprinting = false -- like Minecraft: sprinting ends when you stop or sneak
+	end
+	humanoid.WalkSpeed = if sneaking then SNEAK_SPEED elseif sprinting then SPRINT_SPEED else WALK_SPEED
+	if sneaking ~= sentSneak or sprinting ~= sentSprint then
+		sentSneak, sentSprint = sneaking, sprinting
+		moveRemote:FireServer(sneaking, sprinting)
+	end
+	local blend = math.min(1, dt * 10)
+	-- eyes lower while sneaking, a wider view while sprinting (both like Minecraft)
+	humanoid.CameraOffset = humanoid.CameraOffset:Lerp(Vector3.new(0, if sneaking then -0.9 else 0, 0), blend)
+	baseFov = baseFov or camera.FieldOfView
+	camera.FieldOfView += ((if sprinting then baseFov * 1.15 else baseFov) - camera.FieldOfView) * blend
+end
+
+-- Crouching pose for every character and NPC with the attribute McSneak (R15: body forward, knees bent)
+local CROUCH = {
+	Waist = CFrame.Angles(-0.5, 0, 0),
+	Neck = CFrame.Angles(0.35, 0, 0),
+	LeftHip = CFrame.Angles(0.72, 0, 0),
+	RightHip = CFrame.Angles(0.72, 0, 0),
+	LeftKnee = CFrame.Angles(-1.44, 0, 0),
+	RightKnee = CFrame.Angles(-1.44, 0, 0),
+	LeftAnkle = CFrame.Angles(0.72, 0, 0),
+	RightAnkle = CFrame.Angles(0.72, 0, 0),
+}
+local CROUCH_DROP = 0.6 -- studs the body goes down (what the bent legs lose)
+local originals = setmetatable({}, { __mode = "k" }) -- Motor6D -> its C0 without the pose
+local crouchAmount = setmetatable({}, { __mode = "k" }) -- model -> 0 (standing) .. 1 (crouching)
+
+local function setJoint(motor: Motor6D, amount: number)
+	local original = originals[motor]
+	if not original then
+		original = motor.C0
+		originals[motor] = original
+	end
+	if motor.Name == "Root" then
+		motor.C0 = CFrame.new(0, -CROUCH_DROP * amount, 0) * original
+	else
+		motor.C0 = original * CFrame.new():Lerp(CROUCH[motor.Name], amount)
+	end
+end
+
+local function poseModel(model: Model, dt: number)
+	local wanted = if model:GetAttribute("McSneak") == true then 1 else 0
+	local current = crouchAmount[model] or 0
+	if current == wanted then
+		return
+	end
+	current += (wanted - current) * math.min(1, dt * 12)
+	if math.abs(current - wanted) < 0.02 then
+		current = wanted
+	end
+	crouchAmount[model] = current
+	for _, item in ipairs(model:GetDescendants()) do
+		if item:IsA("Motor6D") and (CROUCH[item.Name] or item.Name == "Root") then
+			setJoint(item, current)
+		end
+	end
+end
+
+local function poseEverybody(dt: number)
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other.Character then
+			poseModel(other.Character, dt)
+		end
+	end
+	local remote = workspace:FindFirstChild("BridgeRemotePlayers")
+	if remote then
+		for _, serverFolder in ipairs(remote:GetChildren()) do
+			for _, model in ipairs(serverFolder:GetChildren()) do
+				if model:IsA("Model") then
+					poseModel(model, dt)
+				end
+			end
+		end
+	end
+end
+
+RunService.RenderStepped:Connect(function(dt)
+	updateMovement(dt)
+	poseEverybody(dt)
+end)
+-- endregion
+
+-- region health: hearts, fall damage, getting hit
+local hearts = {}
+for index = 1, 10 do
+	local x = (index - 1) * 8
+	local container = image(hotbar, "Heart" .. index, x, -17, 9, 9, 4)
+	local fill = image(container, "Fill", 0, 0, 9, 9, 5)
+	hearts[index] = { container = container, fill = fill }
+end
+local hurtAt = -math.huge
+local hurtRoll = 0
+local flash = Instance.new("Frame")
+flash.Name = "Hurt"
+flash.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+flash.BackgroundTransparency = 1
+flash.BorderSizePixel = 0
+flash.Size = UDim2.fromScale(1, 1)
+flash.ZIndex = 0
+flash.Parent = screen
+
+local function updateHearts()
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local health = if humanoid then math.max(humanoid.Health, 0) else 0
+	local blinking = os.clock() - hurtAt < 0.6 and math.floor((os.clock() - hurtAt) * 10) % 2 == 0
+	local container = gui(if blinking then "heart_container_blinking" else "heart_container") or gui("heart_container")
+	local full, half = gui("heart_full"), gui("heart_half")
+	for index, heart in ipairs(hearts) do
+		local points = health - (index - 1) * 2 -- 2 health per heart
+		setPicture(heart.container, container)
+		setPicture(heart.fill, if points >= 1.5 then full elseif points >= 0.5 then half else nil)
+		-- without Minecraft's pictures: small red squares
+		heart.container.BackgroundTransparency = if container then 1 else 0.6
+		heart.container.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		heart.fill.BackgroundTransparency = if full or points < 0.5 then 1 else 0
+		heart.fill.BackgroundColor3 = Color3.fromRGB(220, 30, 30)
+		heart.fill.Size = UDim2.fromOffset(if not full and points < 1.5 then 4 else 9, 9)
+	end
+end
+
+-- Minecraft's fall damage: the server hurts 1 per block over 3
+local fallPeak = nil
+local FALLING = {
+	[Enum.HumanoidStateType.Freefall] = true,
+	[Enum.HumanoidStateType.Jumping] = true,
+	[Enum.HumanoidStateType.FallingDown] = true,
+}
+local function trackFall()
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not root or humanoid.Health <= 0 then
+		fallPeak = nil
+		return
+	end
+	local state = humanoid:GetState()
+	local y = root.Position.Y
+	if FALLING[state] then
+		fallPeak = math.max(fallPeak or y, y)
+	elseif fallPeak then
+		local blocks = (fallPeak - y) / (assets and assets.scale or 3)
+		fallPeak = nil
+		if blocks > 3 and state ~= Enum.HumanoidStateType.Swimming and state ~= Enum.HumanoidStateType.Climbing then
+			fallRemote:FireServer(blocks)
+		end
+	end
+end
+player.CharacterAdded:Connect(function()
+	fallPeak = nil
+end)
+
+-- Hit (by a Minecraft player or the fall): red flash, the camera tilts, knockback away from the attacker
+hurtRemote.OnClientEvent:Connect(function(amount, from)
+	hurtAt = os.clock()
+	hurtRoll = 0.18
+	flash.BackgroundTransparency = 0.7
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root and typeof(from) == "Vector3" then
+		local away = root.Position - from
+		away = Vector3.new(away.X, 0, away.Z)
+		if away.Magnitude > 0.01 then
+			root.AssemblyLinearVelocity += away.Unit * 24 + Vector3.new(0, 18, 0)
+		end
+	end
+end)
+
+RunService:BindToRenderStep("MinecraftHurtCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
+	updateHearts()
+	trackFall()
+	flash.BackgroundTransparency = math.min(1, flash.BackgroundTransparency + dt * 1.5)
+	if hurtRoll > 0.001 then
+		local camera = workspace.CurrentCamera
+		if camera then
+			camera.CFrame *= CFrame.Angles(0, 0, hurtRoll)
+		end
+		hurtRoll *= math.exp(-dt * 8)
+	end
+end)
+-- endregion
+
 -- region start
 local function useAssets(newAssets)
 	if type(newAssets) ~= "table" then
@@ -607,9 +850,9 @@ local function useAssets(newAssets)
 	local first = assets == nil
 	assets = newAssets
 	if first then
-		-- Creative mode: the first item in the hotbar, nothing else yet
+		-- Creative mode: every item once - the first 9 in the hotbar, the others in the inventory above
 		for index, item in ipairs(assets.items or {}) do
-			if index <= 9 then
+			if index <= 36 then
 				slots[index] = item
 			end
 		end

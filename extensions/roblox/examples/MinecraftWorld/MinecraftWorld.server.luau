@@ -13,6 +13,8 @@
 	     pixels into images (EditableImage, they only exist on the client) and shows hotbar + inventory
 	  5. building (RemoteEvent ReplicatedStorage.MinecraftWorld.Edit -> command mcworld.edit): Roblox players place and
 	     break blocks like in creative mode; shown here at once, Minecraft confirms over mcworld.changes
+	  6. health like Minecraft (20 = 10 hearts): fall damage (Fall), hitting a Minecraft player's NPC (Attack ->
+	     command mcworld.hurt), Minecraft players hitting our mannequins (direct message "mc.hurt" from the mod)
 
 	Needs in ServerStorage: Bridge, MinecraftWorldConfig, MinecraftWorldClient (shared Bridge client), PlayerSyncConfig.
 ]]
@@ -29,6 +31,10 @@ local CHUNKS = Config.WorldPrefix .. ".chunks"
 local CHANGES = Config.WorldPrefix .. ".changes"
 local ASSETS = Config.WorldPrefix .. ".assets"
 local EDIT = Config.WorldPrefix .. ".edit"
+local HURT = Config.WorldPrefix .. ".hurt"
+local MAX_HEALTH = 20 -- Minecraft: 10 hearts
+local ATTACK_REACH = 5 -- blocks (Minecraft creative 5, survival 3) + a little slack below
+local ATTACKS_PER_SECOND = 4
 local CHUNKS_PER_CALL = Config.ChunksPerCall or 4
 local WAIT_FOR_WORLD = 15 -- seconds; after that players spawn on a waiting platform until the world is there
 local REACH = 7 -- blocks from the character to a block it changes (Minecraft creative: 5 from the eyes, + slack)
@@ -36,14 +42,16 @@ local EDITS_PER_SECOND = 12 -- per player
 local AIR = { ["minecraft:air"] = true, ["minecraft:cave_air"] = true, ["minecraft:void_air"] = true }
 -- Without pictures from Minecraft (old mod / dedicated server) the items are still there, with a plain icon
 local DEFAULT_ITEMS = { { id = "minecraft:grass_block", name = "Grass Block", block = "minecraft:grass_block" } }
+-- Roblox face -> Minecraft face (same axes: Roblox Front = -Z = Minecraft north, Right = +X = east)
 local FACES = {
-	{ Enum.NormalId.Top, "top" },
-	{ Enum.NormalId.Bottom, "bottom" },
-	{ Enum.NormalId.Front, "side" },
-	{ Enum.NormalId.Back, "side" },
-	{ Enum.NormalId.Left, "side" },
-	{ Enum.NormalId.Right, "side" },
+	{ Enum.NormalId.Top, "up" },
+	{ Enum.NormalId.Bottom, "down" },
+	{ Enum.NormalId.Front, "north" },
+	{ Enum.NormalId.Back, "south" },
+	{ Enum.NormalId.Right, "east" },
+	{ Enum.NormalId.Left, "west" },
 }
+local MAX_ASK = 64 -- unknown blocks per assets call
 
 -- Characters only come when there is ground to stand on
 Players.CharacterAutoLoads = false
@@ -57,7 +65,8 @@ local world = {
 	chunks = {}, -- "x,z" -> {x, z, sections = {[sectionY] = {palette, cells, parts}}, folder}
 	generation = 0, -- counts up with every (re)load; an old load stops when it sees a newer one
 	loaded = false,
-	-- pictures + items from Minecraft: {available, textures = {key -> {w, h, pixels: buffer}}, blocks, items, gui}
+	-- pictures + items from Minecraft: {available, textures = {key -> {w, h, pixels: buffer}}, blocks, items, gui,
+	-- other = {name -> true} for blocks Minecraft has no cube pictures for (they stay grey), asked = {name -> true}}
 	assets = nil,
 }
 
@@ -74,6 +83,10 @@ end
 local getAssets = remote("RemoteFunction", "GetAssets") -- client asks: pictures, items, scale
 local assetsChanged = remote("RemoteEvent", "AssetsChanged") -- server tells: new pictures (after a Minecraft reload)
 local editRemote = remote("RemoteEvent", "Edit") -- client wants: (action "place" | "break", x, y, z, item id)
+local moveRemote = remote("RemoteEvent", "Move") -- client says: (sneaking, sprinting) - shown to everybody + Minecraft
+local attackRemote = remote("RemoteEvent", "Attack") -- client: (NPC model) hits a Minecraft player
+local fallRemote = remote("RemoteEvent", "Fall") -- client: (blocks fallen) - Minecraft's fall damage
+local hurtRemote = remote("RemoteEvent", "Hurt") -- server -> client: (amount, from position or nil) red flash, knockback
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -84,8 +97,8 @@ local function chunkKey(x, z)
 end
 
 -- region blocks -> parts
--- One place that decides how a Minecraft block looks: blocks with pictures from Minecraft (for now the grass block)
--- get their own parts with textures, every other block is the same grey cube.
+-- One place that decides how a Minecraft block looks: every full-cube block with pictures from Minecraft gets its own
+-- parts with textures, all other blocks (slabs, flowers, ...) are the same grey cube.
 local function renderKey(name)
 	if name == nil or AIR[name] then
 		return nil
@@ -198,16 +211,21 @@ local function renderSection(chunk, sectionY, section)
 		)
 		local look = world.assets and world.assets.blocks[box.key]
 		if look then
-			-- Textured block: the colour shows until the client has made the pictures; one tile = one block
+			-- Textured block: the colour shows until the client has made the pictures; one tile = one block.
+			-- Glass / leaves: the part is invisible, only the pictures (with their holes) show.
 			part.Name = box.key
 			part.Color = Color3.fromRGB(look.color[1], look.color[2], look.color[3])
+			if look.transparent then
+				part.Transparency = 1
+				part.CastShadow = false
+			end
 			for _, face in ipairs(FACES) do
 				local texture = Instance.new("Texture")
 				texture.Name = "McTexture"
 				texture.Face = face[1]
 				texture.StudsPerTileU = scale
 				texture.StudsPerTileV = scale
-				texture:SetAttribute("McTexture", look[face[2]])
+				texture:SetAttribute("McTexture", look.faces[face[2]])
 				texture.Parent = part
 			end
 		end
@@ -241,6 +259,57 @@ local function renderAll()
 	end
 end
 
+-- Blocks Minecraft has not sent pictures for yet (they appear in the world): ask for them in one call, then build again
+local askQueue = {}
+local askScheduled = false
+local mergeBlocks -- below (adds an assets answer)
+local afterNewPictures -- below (re-render + tell the clients)
+
+local function noticeBlocks(names)
+	local assets = world.assets
+	if not assets or not assets.available then
+		return
+	end
+	for _, name in ipairs(names) do
+		if type(name) == "string" and not AIR[name] and not assets.blocks[name] and not assets.other[name]
+			and not assets.asked[name] then
+			assets.asked[name] = true
+			table.insert(askQueue, name)
+		end
+	end
+	if #askQueue == 0 or askScheduled then
+		return
+	end
+	askScheduled = true
+	task.delay(0.3, function()
+		askScheduled = false
+		local list = {}
+		while #askQueue > 0 and #list < MAX_ASK do
+			table.insert(list, table.remove(askQueue, 1))
+		end
+		local ok, result = pcall(client.Call, client, ASSETS, { blocks = list }, { Timeout = 20 })
+		if world.assets ~= assets then
+			return -- everything was loaded again meanwhile
+		end
+		if ok and type(result) == "table" then
+			mergeBlocks(assets, result)
+			for _, name in ipairs(list) do
+				if not assets.blocks[name] then
+					assets.other[name] = true
+				end
+			end
+			afterNewPictures()
+		else
+			for _, name in ipairs(list) do
+				assets.asked[name] = nil -- try again when it shows up next time
+			end
+		end
+		if #askQueue > 0 then
+			noticeBlocks({})
+		end
+	end)
+end
+
 local function applyChunk(data)
 	local key = chunkKey(data.x, data.z)
 	local old = world.chunks[key]
@@ -252,6 +321,7 @@ local function applyChunk(data)
 	local chunk = { x = data.x, z = data.z, sections = {}, folder = folder }
 	for _, sectionData in ipairs(data.sections or {}) do
 		local section = decodeSection(sectionData)
+		noticeBlocks(section.palette)
 		chunk.sections[sectionData.y] = section
 		renderSection(chunk, sectionData.y, section)
 	end
@@ -384,6 +454,28 @@ local function decodeTexture(texture)
 	return { w = texture.w, h = texture.h, pixels = buffer.fromstring(raw) }
 end
 
+-- Adds textures + blocks of an assets answer. Blocks whose pictures did not all arrive count as "other" (grey).
+function mergeBlocks(assets, result)
+	for key, texture in pairs(result.textures or {}) do
+		assets.textures[key] = decodeTexture(texture)
+	end
+	for name, look in pairs(result.blocks or {}) do
+		local complete = type(look) == "table" and look.cube == true and type(look.faces) == "table"
+		if complete then
+			for _, face in ipairs(FACES) do
+				if not assets.textures[look.faces[face[2]]] then
+					complete = false
+				end
+			end
+		end
+		if complete then
+			assets.blocks[name] = look
+		else
+			assets.other[name] = true
+		end
+	end
+end
+
 local function count(map)
 	local n = 0
 	for _ in pairs(map) do
@@ -397,17 +489,10 @@ local function loadAssets(generation)
 	if generation ~= world.generation then
 		return
 	end
-	local assets = { available = false, textures = {}, blocks = {}, items = DEFAULT_ITEMS, gui = {}, reason = nil }
+	local assets = { available = false, textures = {}, blocks = {}, items = DEFAULT_ITEMS, gui = {}, reason = nil,
+		other = {}, asked = {} }
 	if ok and type(result) == "table" then
-		for key, texture in pairs(result.textures or {}) do
-			assets.textures[key] = decodeTexture(texture)
-		end
-		for name, look in pairs(result.blocks or {}) do
-			-- only blocks whose pictures all arrived
-			if assets.textures[look.top] and assets.textures[look.side] and assets.textures[look.bottom] then
-				assets.blocks[name] = look
-			end
-		end
+		mergeBlocks(assets, result)
 		for name, key in pairs(result.gui or {}) do
 			if assets.textures[key] then
 				assets.gui[name] = key
@@ -428,6 +513,11 @@ local function loadAssets(generation)
 	else
 		log("no pictures from Minecraft - grey blocks (" .. tostring(assets.reason) .. ")")
 	end
+	renderAll()
+	assetsChanged:FireAllClients(clientAssets())
+end
+
+function afterNewPictures()
 	renderAll()
 	assetsChanged:FireAllClients(clientAssets())
 end
@@ -545,8 +635,10 @@ end
 
 local function applyBlocks(blocks)
 	local dirty = {}
+	local names = {}
 	for _, block in ipairs(blocks) do
 		local x, y, z, name = block[1], block[2], block[3], block[4]
+		table.insert(names, name)
 		if type(x) == "number" and type(y) == "number" and type(z) == "number" and type(name) == "string" then
 			local chunk, sectionY, section = sectionAt(x, y, z, true)
 			if chunk and section then
@@ -563,6 +655,7 @@ local function applyBlocks(blocks)
 	for section, place in pairs(dirty) do
 		renderSection(place[1], place[2], section)
 	end
+	noticeBlocks(names)
 end
 
 local function blockAt(x, y, z)
@@ -678,6 +771,108 @@ local function onEdit(player, action, x, y, z, itemId)
 end
 
 editRemote.OnServerEvent:Connect(onEdit)
+
+-- region health + damage
+local function setupHealth(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 10)
+	if humanoid then
+		humanoid.MaxHealth = MAX_HEALTH
+		humanoid.Health = MAX_HEALTH
+	end
+end
+
+local function watchPlayer(player: any)
+	if typeof(player) ~= "Instance" then
+		return -- (the test runs with fake players)
+	end
+	local real = player :: Player
+	real.CharacterAdded:Connect(setupHealth)
+	if real.Character then
+		task.spawn(setupHealth, real.Character)
+	end
+end
+Players.PlayerAdded:Connect(watchPlayer)
+for _, player in ipairs(Players:GetPlayers()) do
+	watchPlayer(player)
+end
+
+local function hurt(player, amount, from)
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 or amount <= 0 then
+		return
+	end
+	humanoid:TakeDamage(amount)
+	hurtRemote:FireClient(player, amount, from)
+end
+
+-- Minecraft: falling more than 3 blocks hurts 1 per block more
+fallRemote.OnServerEvent:Connect(function(player, blocks)
+	if type(blocks) == "number" and blocks == blocks and blocks > 3 then
+		hurt(player, math.ceil(math.min(blocks, 400) - 3), nil)
+	end
+end)
+
+-- A Roblox player hits a Minecraft player's NPC: Minecraft does the damage (with knockback from our mannequin)
+local attackedAt = {}
+attackRemote.OnServerEvent:Connect(function(player, model)
+	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
+	if typeof(model) ~= "Instance" or not model:IsA("Model") or not npcFolder or not model:IsDescendantOf(npcFolder) then
+		return
+	end
+	local target = model:GetAttribute("McUserId")
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local npcRoot = model:FindFirstChild("HumanoidRootPart")
+	local scale = world.info and world.info.studsPerBlock or 3
+	if type(target) ~= "number" or not root or not npcRoot
+		or (root.Position - npcRoot.Position).Magnitude > (ATTACK_REACH + 1) * scale then
+		return
+	end
+	local now = os.clock()
+	if now - (attackedAt[player] or 0) < 1 / ATTACKS_PER_SECOND then
+		return
+	end
+	attackedAt[player] = now
+	task.spawn(function()
+		local ok, result = pcall(client.Call, client, HURT, { target = target, amount = 1, attacker = player.UserId },
+			{ Timeout = 10 })
+		if not ok and Config.Debug then
+			warn("[MinecraftWorld] hit not sent: " .. tostring(result))
+		end
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	attackedAt[player] = nil
+end)
+
+-- A Minecraft player hit our mannequin: the mod sends a direct message to this game server
+client.MessageReceived:Connect(function(message)
+	local content = message.Content
+	if type(content) ~= "table" or content.type ~= "mc.hurt" then
+		return
+	end
+	local from = nil
+	if type(content.from) == "table" then
+		from = Vector3.new(tonumber(content.from[1]) or 0, tonumber(content.from[2]) or 0, tonumber(content.from[3]) or 0)
+	end
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.UserId == content.u then
+			hurt(player, math.clamp(tonumber(content.amount) or 0, 0, 100), from)
+		end
+	end
+end)
+-- endregion
+
+-- Sneaking / sprinting: attributes on the character - the client scripts show the pose, PlayerSync sends it to Minecraft
+moveRemote.OnServerEvent:Connect(function(player, sneak, sprint)
+	local character = player.Character
+	if character then
+		character:SetAttribute("McSneak", sneak == true)
+		character:SetAttribute("McSprint", sprint == true and sneak ~= true)
+	end
+end)
 -- endregion
 
 client:Subscribe(nil, CHANGES, function(data)

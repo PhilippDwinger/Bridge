@@ -165,12 +165,25 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
 - Die Spieler spawnen erst, wenn die Welt da ist, und zwar auf dem Minecraft-Spawn. Antwortet Minecraft 15 Sekunden
   lang nicht, warten sie auf einer Plattform hoch oben.
 - **Texturen:** Die Bilder kommen aus dem Minecraft-Spiel selbst (Command `mcworld.assets`, das Spiel enthält keine).
-  Fürs Erste hat der **Grasblock** Texturen (oben mit der Grasfarbe des Bioms, Seite, Erde unten), alle anderen Blöcke
-  bleiben grau. Grasblöcke bekommen eigene Parts mit einer `Texture` pro Seite (1 Kachel = 1 Block). Die Bilder macht
-  das Client-Script `MinecraftClient` (EditableImage gibt es nur auf dem Client).
+  **Jeder Würfel-Block** sieht aus wie in Minecraft: die Mod liest Blockstate → Modell → Textur jeder der 6 Seiten
+  (mit Overlay und Biom-Farbe für Gras und Laub; Glas und Laub durchsichtig). Taucht in der Welt ein Block auf, für den
+  Roblox noch keine Bilder hat, fragt der Server ihn nach. Andere Formen (Stufen, Treppen, Blumen, Fackeln …)
+  bleiben graue Würfel. Jeder Block bekommt eigene Parts mit einer `Texture` pro Seite (1 Kachel = 1 Block). Die
+  Bilder macht das Client-Script `MinecraftClient` (EditableImage gibt es nur auf dem Client).
 - **Hotbar + Inventar** mit Minecrafts eigener GUI-Grafik: Hotbar unten (Tasten **1–9**), Inventar mit **E**
   (Item anklicken = aufnehmen, anderes Feld anklicken = ablegen oder tauschen). Kreativmodus: Items gehen nie aus.
-  Fürs Erste gibt es den **Grasblock** (in Feld 1).
+  22 Blöcke: Gras, Erde, Stein, Bruchstein, Eichenstamm, -bretter, -laub, Glas, Sand, Kies, Sandstein, Ziegel,
+  Steinziegel, Werkbank, Bücherregal, weiße Wolle, Schnee, Kohle-, Eisen-, Gold-, Diamanterz, Obsidian (die ersten 9
+  in der Hotbar). Icons als kleine 3D-Würfel.
+- **Leben + Schaden wie Minecraft:** 20 HP = 10 Herzen über der Hotbar (Roblox' eigene Leiste ist aus).
+  Fallschaden ab 4 Blöcken (1 pro Block über 3). **Linksklick auf einen Minecraft-Spieler** schlägt ihn (Minecraft
+  macht den Schaden, mit Rückstoß von deinem Mannequin). Schlägt ein Minecraft-Spieler dein Mannequin, verlierst du
+  Leben (Schaden wie in Minecraft, auch mit Schwert): roter Blitz, Kamera kippt, Rückstoß. Die Lebensleiste eines
+  Minecraft-Spielers zeigt sich über seinem NPC, wenn er nicht voll ist.
+- **Schleichen + Sprinten:** **Shift halten** = schleichen (langsam, Augen tiefer, geduckte Haltung), **Strg** beim
+  Laufen = sprinten (schneller, weiteres Sichtfeld) – Minecrafts Tempo. Alle sehen die Haltung; Minecraft-Spieler
+  schleichen und sprinten in Roblox genauso (NPC duckt sich / rennt), Roblox-Spieler ducken sich in Minecraft.
+  Shift-Lock ist dafür im Spiel aus.
 - **Bauen:** **Linksklick** baut den Block unter der Maus ab (halten = weiter), **Rechtsklick** setzt das gewählte
   Item (in der Third-Person-Ansicht nur ein kurzer Klick ohne Kamera-Drehen). Reichweite 5 Blöcke, ein schwarzer
   Rahmen zeigt den Block. Der Server prüft es, zeigt es sofort und schickt es über Bridge an Minecraft
@@ -204,12 +217,14 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
   (Fehler, Timeout, späte Antwort, Async), Session-Erneuerung, `SESSION_INVALID`, feste Identität, Server-Reset
   (Neu-Registrierung + Wiederherstellen), Aufräumen, HTTP aus, Server weg, HTTP-Budget, Herunterfahren
 - PlayerSync-Simulation: das **echte** Script als Spiel A und B in zwei Prozessen (Lunes Roblox-Instanzen,
-  simulierte Spieler) – NPCs erscheinen, laufen mit, verschwinden beim Verlassen und beim „bye“. Dazu eine Messung:
+  simulierte Spieler) – NPCs erscheinen, laufen mit, schleichen mit, verschwinden beim Verlassen und beim „bye“.
+  Dazu eine Messung:
   Spiel A läuft Kreise, Spiel B verfolgt die NPCs jedes Frame, Bridge 60 ms entfernt (`BRIDGE_SIM_LATENCY`) – wie weit
   hinter dem echten Spieler und wie gleichmäßig
 - `sim_game.luau` – Lasttest: Anfragen pro Minute und Verzögerung zweier Spielserver
 - `sim_minecraftworld.luau` – die **echten** Scripts MinecraftWorld und PlayerSync gegen einen echten Bridge-Server
   **und einen echten Minecraft-Server mit der Mod** (braucht beide laufend; so in der Cloud getestet): 25 Chunks =
-  50 Parts (grau + Gras mit 6 Texturen), Bilder für den Client (`GetAssets`), Spawn, Spieler spawnen erst mit Welt,
-  `setblock` → Neuaufbau des Chunks, `/fill` → Chunk neu geladen, Roblox-Spieler als Mannequin in Minecraft,
-  Grasblock setzen und abbauen (kommt in Minecraft an, zu weit weg wird ignoriert)
+  75 texturierte Parts (Grundgestein, Erde, Gras mit Texturen aus den Modellen), Bilder für den Client (`GetAssets`),
+  Spawn, Spieler spawnen erst mit Welt, `setblock` → Neuaufbau des Chunks, `/fill` → Chunk neu geladen, ein neuer
+  Block (Smaragd) wird nachgefragt und texturiert, Roblox-Spieler als Mannequin in Minecraft (duckt sich beim
+  Schleichen), Grasblock setzen und abbauen (kommt in Minecraft an, zu weit weg wird ignoriert)

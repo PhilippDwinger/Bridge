@@ -118,7 +118,16 @@ local fakeRemotes = {
 		return { Disconnect = function() end }
 	end } },
 }
+local handlers = {} -- remote name -> OnServerEvent handler
 local remoteFolder = { Name = "MinecraftWorld", FindFirstChild = function(_, name)
+	if not fakeRemotes[name] then
+		-- any other remote (Move, Attack, Fall, Hurt): remembers its handler, firing to clients does nothing
+		fakeRemotes[name] = { Name = name, FireClient = function() end, FireAllClients = function() end,
+			OnServerEvent = { Connect = function(_, callback)
+				handlers[name] = callback
+				return { Disconnect = function() end }
+			end } }
+	end
 	return fakeRemotes[name]
 end }
 shim.services.ReplicatedStorage = { FindFirstChild = function(_, name)
@@ -151,7 +160,8 @@ end
 local function observe()
 	local worldFolder = find(workspaceRoot, "MinecraftWorld")
 	local result = { chunks = 0, parts = 0, sample = {}, perChunk = {}, spawn = nil, autoLoads = Players.CharacterAutoLoads,
-		paddyLoads = paddy.loads, npcs = {}, grassParts = 0, textures = {}, assetsFired = fired.assetsChanged }
+		paddyLoads = paddy.loads, npcs = {}, grassParts = 0, textures = {}, assetsFired = fired.assetsChanged,
+		partNames = {} }
 	if worldFolder then
 		for _, chunk in ipairs(worldFolder:GetChildren()) do
 			result.chunks += 1
@@ -159,6 +169,7 @@ local function observe()
 			for _, part in ipairs(chunk:GetChildren()) do
 				result.parts += 1
 				info.parts += 1
+				result.partNames[part.Name] = (result.partNames[part.Name] or 0) + 1
 				if part.Name == "minecraft:grass_block" then
 					result.grassParts += 1
 					if result.grassParts == 1 then
@@ -222,6 +233,8 @@ while os.clock() - started < scenario.seconds do
 			observations[event.name] = { available = payload and payload.available, scale = payload and payload.scale,
 				minY = payload and payload.minY, sizes = sizes, items = payload and payload.items, gui = payload and payload.gui,
 				blocks = payload and payload.blocks }
+		elseif event.action == "sneak" then
+			paddy.Character:SetAttribute("McSneak", event.value == true)
 		elseif event.action == "edit" then
 			-- a click of our player: the RemoteEvent from the client script
 			editHandler(paddy, event.what, event.x, event.y, event.z, event.item)

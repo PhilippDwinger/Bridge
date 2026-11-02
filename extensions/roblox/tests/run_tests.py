@@ -35,6 +35,7 @@ def wait_ready(url, seconds=30):
 def playersync(url):
     scenarios = {
         "A": {"players": [-101, -102, -103], "seconds": 17, "events": [
+            {"at": 4, "action": "sneak"},
             {"at": 8, "action": "observe", "name": "t8"},
             {"at": 10, "action": "leave", "userId": -103},
             {"at": 16, "action": "shutdown"}]},
@@ -72,6 +73,9 @@ def playersync(url):
           npcs and all(n["display"].endswith((" · A", " · B")) and n["anchored"] and n["scripts"] == 0 for n in npcs), npcs)
     check("NPCs stand where the players walk (on their circle, radius 20)",
           npcs and all(abs((n["x"] ** 2 + n["z"] ** 2) ** 0.5 - 20) < 4 for n in npcs), [(n["x"], n["z"]) for n in npcs])
+    sneaking = {n["userId"]: n.get("sneak") for n in b8.get("Server A", [])}
+    check("player -101 of game A sneaks -> game B's NPC has McSneak (the client scripts crouch it), the others not",
+          sneaking == {-101: True, -102: False, -103: False}, sneaking)
     b13 = (b.get("t13") or {}).get("servers", {})
     check("a player leaves game A -> its NPC is gone in game B", len(b13.get("Server A", [])) == 2
           and not any("Player-103" in n["name"] for n in b13.get("Server A", [])), b13)

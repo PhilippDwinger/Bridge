@@ -153,6 +153,8 @@ local function observe()
 					end)(),
 					x = rootPart and rootPart.CFrame.Position.X,
 					z = rootPart and rootPart.CFrame.Position.Z,
+					sneak = model:GetAttribute("McSneak"),
+					userId = model:GetAttribute("McUserId"),
 				})
 			end
 			result.servers[serverFolder.Name] = npcs
@@ -212,6 +214,8 @@ while os.clock() - started < scenario.seconds do
 			tracking = event.at + event.seconds
 		elseif event.action == "observe" then
 			observations[event.name] = observe()
+		elseif event.action == "sneak" then
+			testPlayers[1].Character:SetAttribute("McSneak", true)
 		elseif event.action == "leave" then
 			for index, player in ipairs(testPlayers) do
 				if player.UserId == event.userId then

@@ -19,7 +19,8 @@
       "$properties": {
         "CharacterWalkSpeed": 13,
         "CharacterUseJumpPower": false,
-        "CharacterJumpHeight": 4.5
+        "CharacterJumpHeight": 4.5,
+        "EnableMouseLockOption": false
       },
       "StarterPlayerScripts": {
         "$className": "StarterPlayerScripts",
