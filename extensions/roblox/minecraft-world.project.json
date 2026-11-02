@@ -20,6 +20,18 @@
         "CharacterWalkSpeed": 13,
         "CharacterUseJumpPower": false,
         "CharacterJumpHeight": 4.5
+      },
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "MinecraftClient": {
+          "$path": "examples/MinecraftWorld/MinecraftClient.client.luau"
+        }
+      }
+    },
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "MinecraftImages": {
+        "$path": "examples/MinecraftWorld/MinecraftImages.luau"
       }
     },
     "ServerStorage": {

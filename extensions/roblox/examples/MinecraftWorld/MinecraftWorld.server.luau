@@ -8,21 +8,42 @@
 	     reload after a Minecraft restart or a lost connection
 	  3. players: the script PlayerSync (same game) shows the Minecraft players with a Roblox avatar and sends ours to
 	     Minecraft (shown there as mannequins). Same coordinates: 1 block = 3 studs, the lowest Minecraft layer at y 0.
+	  4. textures + items (command mcworld.assets): pictures from the Minecraft game itself - textured blocks (for now
+	     the grass block) get their own parts with a Texture per side; the client script MinecraftClient turns the
+	     pixels into images (EditableImage, they only exist on the client) and shows hotbar + inventory
+	  5. building (RemoteEvent ReplicatedStorage.MinecraftWorld.Edit -> command mcworld.edit): Roblox players place and
+	     break blocks like in creative mode; shown here at once, Minecraft confirms over mcworld.changes
 
 	Needs in ServerStorage: Bridge, MinecraftWorldConfig, MinecraftWorldClient (shared Bridge client), PlayerSyncConfig.
 ]]
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
+local Bridge = require(ServerStorage:WaitForChild("Bridge"))
 local Config = require(ServerStorage:WaitForChild("MinecraftWorldConfig"))
 local client = require(ServerStorage:WaitForChild("MinecraftWorldClient"))
 
 local INFO = Config.WorldPrefix .. ".info"
 local CHUNKS = Config.WorldPrefix .. ".chunks"
 local CHANGES = Config.WorldPrefix .. ".changes"
+local ASSETS = Config.WorldPrefix .. ".assets"
+local EDIT = Config.WorldPrefix .. ".edit"
 local CHUNKS_PER_CALL = Config.ChunksPerCall or 4
 local WAIT_FOR_WORLD = 15 -- seconds; after that players spawn on a waiting platform until the world is there
+local REACH = 7 -- blocks from the character to a block it changes (Minecraft creative: 5 from the eyes, + slack)
+local EDITS_PER_SECOND = 12 -- per player
 local AIR = { ["minecraft:air"] = true, ["minecraft:cave_air"] = true, ["minecraft:void_air"] = true }
+-- Without pictures from Minecraft (old mod / dedicated server) the items are still there, with a plain icon
+local DEFAULT_ITEMS = { { id = "minecraft:grass_block", name = "Grass Block", block = "minecraft:grass_block" } }
+local FACES = {
+	{ Enum.NormalId.Top, "top" },
+	{ Enum.NormalId.Bottom, "bottom" },
+	{ Enum.NormalId.Front, "side" },
+	{ Enum.NormalId.Back, "side" },
+	{ Enum.NormalId.Left, "side" },
+	{ Enum.NormalId.Right, "side" },
+}
 
 -- Characters only come when there is ground to stand on
 Players.CharacterAutoLoads = false
@@ -36,7 +57,23 @@ local world = {
 	chunks = {}, -- "x,z" -> {x, z, sections = {[sectionY] = {palette, cells, parts}}, folder}
 	generation = 0, -- counts up with every (re)load; an old load stops when it sees a newer one
 	loaded = false,
+	-- pictures + items from Minecraft: {available, textures = {key -> {w, h, pixels: buffer}}, blocks, items, gui}
+	assets = nil,
 }
+
+-- Remotes for the client script (pictures, building)
+local remotes = ReplicatedStorage:FindFirstChild("MinecraftWorld") or Instance.new("Folder")
+remotes.Name = "MinecraftWorld"
+remotes.Parent = ReplicatedStorage
+local function remote(className, name)
+	local item = remotes:FindFirstChild(name) or Instance.new(className)
+	item.Name = name
+	item.Parent = remotes
+	return item
+end
+local getAssets = remote("RemoteFunction", "GetAssets") -- client asks: pictures, items, scale
+local assetsChanged = remote("RemoteEvent", "AssetsChanged") -- server tells: new pictures (after a Minecraft reload)
+local editRemote = remote("RemoteEvent", "Edit") -- client wants: (action "place" | "break", x, y, z, item id)
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -47,10 +84,15 @@ local function chunkKey(x, z)
 end
 
 -- region blocks -> parts
--- One place that decides how a Minecraft block looks. For now every block is the same grey cube.
+-- One place that decides how a Minecraft block looks: blocks with pictures from Minecraft (for now the grass block)
+-- get their own parts with textures, every other block is the same grey cube.
 local function renderKey(name)
 	if name == nil or AIR[name] then
 		return nil
+	end
+	local assets = world.assets
+	if assets and assets.blocks[name] then
+		return name
 	end
 	return "placeholder"
 end
@@ -154,6 +196,21 @@ local function renderSection(chunk, sectionY, section)
 			(blockY - minY + box.h / 2) * scale,
 			(blockZ + box.d / 2) * scale
 		)
+		local look = world.assets and world.assets.blocks[box.key]
+		if look then
+			-- Textured block: the colour shows until the client has made the pictures; one tile = one block
+			part.Name = box.key
+			part.Color = Color3.fromRGB(look.color[1], look.color[2], look.color[3])
+			for _, face in ipairs(FACES) do
+				local texture = Instance.new("Texture")
+				texture.Name = "McTexture"
+				texture.Face = face[1]
+				texture.StudsPerTileU = scale
+				texture.StudsPerTileV = scale
+				texture:SetAttribute("McTexture", look[face[2]])
+				texture.Parent = part
+			end
+		end
 		part.Parent = chunk.folder
 		table.insert(section.parts, part)
 	end
@@ -174,6 +231,14 @@ local function decodeSection(data)
 		error("section y=" .. tostring(data.y) .. " has " .. count .. " blocks instead of 4096")
 	end
 	return { palette = data.palette or { "minecraft:air" }, cells = cells, parts = {} }
+end
+
+local function renderAll()
+	for _, chunk in pairs(world.chunks) do
+		for sectionY, section in pairs(chunk.sections) do
+			renderSection(chunk, sectionY, section)
+		end
+	end
 end
 
 local function applyChunk(data)
@@ -282,6 +347,92 @@ local function onWorldReady()
 end
 -- endregion
 
+-- region pictures + items from Minecraft
+local function clientAssets()
+	local assets, info = world.assets, world.info
+	if not assets or not info then
+		return nil
+	end
+	return {
+		available = assets.available,
+		reason = assets.reason,
+		scale = info.studsPerBlock,
+		minY = info.minY,
+		maxY = info.maxY,
+		textures = assets.textures,
+		blocks = assets.blocks,
+		items = assets.items,
+		gui = assets.gui,
+	}
+end
+
+getAssets.OnServerInvoke = function()
+	return clientAssets()
+end
+
+local function decodeTexture(texture)
+	if type(texture) ~= "table" or type(texture.rgba) ~= "string" or type(texture.w) ~= "number"
+		or type(texture.h) ~= "number" then
+		return nil
+	end
+	local ok, raw = pcall(function()
+		return Bridge.Inflate(Bridge.Base64Decode(texture.rgba))
+	end)
+	if not ok or #raw ~= texture.w * texture.h * 4 then
+		return nil
+	end
+	return { w = texture.w, h = texture.h, pixels = buffer.fromstring(raw) }
+end
+
+local function count(map)
+	local n = 0
+	for _ in pairs(map) do
+		n += 1
+	end
+	return n
+end
+
+local function loadAssets(generation)
+	local ok, result = pcall(client.Call, client, ASSETS, nil, { Timeout = 30 })
+	if generation ~= world.generation then
+		return
+	end
+	local assets = { available = false, textures = {}, blocks = {}, items = DEFAULT_ITEMS, gui = {}, reason = nil }
+	if ok and type(result) == "table" then
+		for key, texture in pairs(result.textures or {}) do
+			assets.textures[key] = decodeTexture(texture)
+		end
+		for name, look in pairs(result.blocks or {}) do
+			-- only blocks whose pictures all arrived
+			if assets.textures[look.top] and assets.textures[look.side] and assets.textures[look.bottom] then
+				assets.blocks[name] = look
+			end
+		end
+		for name, key in pairs(result.gui or {}) do
+			if assets.textures[key] then
+				assets.gui[name] = key
+			end
+		end
+		if type(result.items) == "table" and #result.items > 0 then
+			assets.items = result.items
+		end
+		assets.available = result.available == true and next(assets.blocks) ~= nil
+		assets.reason = result.reason
+	else
+		assets.reason = "Minecraft has no pictures for us (" .. tostring(result) .. ")"
+	end
+	world.assets = assets
+	if assets.available then
+		log(string.format("pictures from Minecraft: %d textured block(s), %d pictures", count(assets.blocks),
+			count(assets.textures)))
+	else
+		log("no pictures from Minecraft - grey blocks (" .. tostring(assets.reason) .. ")")
+	end
+	renderAll()
+	assetsChanged:FireAllClients(clientAssets())
+end
+-- endregion
+
 -- region loading
 local function areaChunks(info)
 	local list = {}
@@ -352,6 +503,11 @@ local function loadWorld()
 	table.clear(world.chunks)
 	local started = os.clock()
 	local list = areaChunks(info)
+	-- The pictures first (small): the chunks are then built with textures right away
+	loadAssets(generation)
+	if generation ~= world.generation then
+		return
+	end
 	if loadChunks(list, generation) then
 		world.loaded = true
 		local parts = 0
@@ -408,6 +564,121 @@ local function applyBlocks(blocks)
 		renderSection(place[1], place[2], section)
 	end
 end
+
+local function blockAt(x, y, z)
+	local chunk, sectionY, section = sectionAt(x, y, z, false)
+	if not chunk or not section then
+		return "minecraft:air"
+	end
+	local index = section.cells[cellIndex(x - chunk.x * 16, y - sectionY * 16, z - chunk.z * 16)]
+	return section.palette[(index or 0) + 1] or "minecraft:air"
+end
+
+-- region building (Roblox players, creative mode)
+local editTokens = {} -- player -> {tokens, at}
+
+local function allowEdit(player)
+	local now = os.clock()
+	local bucket = editTokens[player] or { tokens = EDITS_PER_SECOND, at = now }
+	bucket.tokens = math.min(EDITS_PER_SECOND, bucket.tokens + (now - bucket.at) * EDITS_PER_SECOND)
+	bucket.at = now
+	editTokens[player] = bucket
+	if bucket.tokens < 1 then
+		return false
+	end
+	bucket.tokens -= 1
+	return true
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	editTokens[player] = nil
+end)
+
+local function itemById(id)
+	for _, item in ipairs(world.assets and world.assets.items or DEFAULT_ITEMS) do
+		if item.id == id then
+			return item
+		end
+	end
+	return nil
+end
+
+-- Somebody's character stands in the block (feet 3 studs under the root part, head 2 above)
+local function characterInBlock(center, scale)
+	for _, other in ipairs(Players:GetPlayers()) do
+		local character = other.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root then
+			local p = root.Position
+			local half = scale / 2
+			if math.abs(p.X - center.X) < half + 1 and math.abs(p.Z - center.Z) < half + 1
+				and p.Y - 3 < center.Y + half and p.Y + 2 > center.Y - half then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function isWhole(value)
+	return type(value) == "number" and value == value and math.floor(value) == value and math.abs(value) < 1e7
+end
+
+local function onEdit(player, action, x, y, z, itemId)
+	if (action ~= "place" and action ~= "break") or not isWhole(x) or not isWhole(y) or not isWhole(z) then
+		return
+	end
+	local info = world.info
+	if not world.loaded or not info or y < info.minY or y >= info.maxY or not allowEdit(player) then
+		return
+	end
+	local scale = info.studsPerBlock
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local center = Vector3.new((x + 0.5) * scale, (y - info.minY + 0.5) * scale, (z + 0.5) * scale)
+	if not root or (center - root.Position).Magnitude > REACH * scale then
+		return
+	end
+	local chunk = sectionAt(x, y, z, false)
+	if not chunk then
+		return -- outside the area Roblox shows
+	end
+	local current = blockAt(x, y, z)
+	local name
+	if action == "break" then
+		if AIR[current] then
+			return
+		end
+		name = "minecraft:air"
+	else
+		local item = itemById(itemId)
+		if not item or type(item.block) ~= "string" or not AIR[current] or characterInBlock(center, scale) then
+			return
+		end
+		name = item.block
+	end
+	-- Shown at once; Minecraft confirms it over mcworld.changes (the same block again)
+	applyBlocks({ { x, y, z, name } })
+	task.spawn(function()
+		local ok, result = pcall(client.Call, client, EDIT, {
+			action = action,
+			x = x,
+			y = y,
+			z = z,
+			block = if action == "place" then name else nil,
+			player = player.Name,
+		}, { Timeout = 10 })
+		if not ok or type(result) ~= "table" or result.ok ~= true then
+			-- Minecraft said no (somebody stands there, ...) or is not there: show what really is there
+			log(string.format("%s: %s at %d %d %d not possible (%s)", player.Name, action, x, y, z,
+				tostring(if ok and type(result) == "table" then result.reason else result)))
+			loadChunks({ { chunk.x, chunk.z } }, world.generation)
+		end
+	end)
+end
+
+editRemote.OnServerEvent:Connect(onEdit)
+-- endregion
 
 client:Subscribe(nil, CHANGES, function(data)
 	if type(data) ~= "table" then

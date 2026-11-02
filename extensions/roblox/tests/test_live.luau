@@ -155,7 +155,7 @@ while os.clock() - started < 1.5 do
 	B:PublishLatest(nil, "pos", { n = n })
 	task.wait(1 / 30)
 end
-task.wait(1)
+waitFor(function() return newestB[#newestB] == n end, 5)
 check("older server: values still arrive (separately), the newest last", A._noPiggyback and newestB[#newestB] == n
 	and increasing(newestB), tostring(newestB[#newestB]) .. " / " .. n)
 A._request = nil

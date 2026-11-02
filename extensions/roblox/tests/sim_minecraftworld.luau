@@ -53,6 +53,7 @@ local testPlayers = {}
 local Players = {
 	CharacterAutoLoads = true,
 	PlayerAdded = { Connect = function(_, callback) table.insert(playerAdded, callback) return { Disconnect = function() end } end },
+	PlayerRemoving = { Connect = function() return { Disconnect = function() end } end },
 	GetPlayers = function()
 		return table.clone(testPlayers)
 	end,
@@ -103,9 +104,29 @@ shim.services.ServerStorage = {
 		return "module:" .. name
 	end,
 }
+
+-- Remotes (Lune has no networking): plain tables that remember what the script connects and fires
+local fired = { assetsChanged = 0 }
+local editHandler = nil
+local fakeRemotes = {
+	GetAssets = { Name = "GetAssets" },
+	AssetsChanged = { Name = "AssetsChanged", FireAllClients = function()
+		fired.assetsChanged += 1
+	end },
+	Edit = { Name = "Edit", OnServerEvent = { Connect = function(_, callback)
+		editHandler = callback
+		return { Disconnect = function() end }
+	end } },
+}
+local remoteFolder = { Name = "MinecraftWorld", FindFirstChild = function(_, name)
+	return fakeRemotes[name]
+end }
+shim.services.ReplicatedStorage = { FindFirstChild = function(_, name)
+	return if name == "MinecraftWorld" then remoteFolder else nil
+end }
 env = setmetatable({
 	game = game, workspace = workspaceRoot, Instance = Instance, Vector3 = Vector3, CFrame = CFrame, Enum = Enum,
-	Color3 = Color3, task = task, warn = warn,
+	Color3 = Color3, task = task, warn = warn, buffer = buffer,
 	require = function(target)
 		return requireModule(string.sub(target, 8))
 	end,
@@ -130,7 +151,7 @@ end
 local function observe()
 	local worldFolder = find(workspaceRoot, "MinecraftWorld")
 	local result = { chunks = 0, parts = 0, sample = {}, perChunk = {}, spawn = nil, autoLoads = Players.CharacterAutoLoads,
-		paddyLoads = paddy.loads, npcs = {} }
+		paddyLoads = paddy.loads, npcs = {}, grassParts = 0, textures = {}, assetsFired = fired.assetsChanged }
 	if worldFolder then
 		for _, chunk in ipairs(worldFolder:GetChildren()) do
 			result.chunks += 1
@@ -138,6 +159,15 @@ local function observe()
 			for _, part in ipairs(chunk:GetChildren()) do
 				result.parts += 1
 				info.parts += 1
+				if part.Name == "minecraft:grass_block" then
+					result.grassParts += 1
+					if result.grassParts == 1 then
+						for _, texture in ipairs(part:GetChildren()) do
+							table.insert(result.textures, { texture.Face.Name, texture:GetAttribute("McTexture"),
+								texture.StudsPerTileU, texture.StudsPerTileV })
+						end
+					end
+				end
 				local p, s = part.CFrame.Position, part.Size
 				info.blocks += math.floor(s.X * s.Y * s.Z / 27 + 0.5)
 				if chunk.Name == "Chunk 0,0" then
@@ -181,6 +211,20 @@ while os.clock() - started < scenario.seconds do
 	if event and t >= event.at then
 		nextEvent += 1
 		if event.action == "observe" then
+			observations[event.name] = observe()
+		elseif event.action == "assets" then
+			-- what a client gets from GetAssets
+			local payload = fakeRemotes.GetAssets.OnServerInvoke and fakeRemotes.GetAssets.OnServerInvoke(paddy)
+			local sizes = {}
+			for key, texture in pairs(payload and payload.textures or {}) do
+				sizes[key] = { texture.w, texture.h, buffer.len(texture.pixels) }
+			end
+			observations[event.name] = { available = payload and payload.available, scale = payload and payload.scale,
+				minY = payload and payload.minY, sizes = sizes, items = payload and payload.items, gui = payload and payload.gui,
+				blocks = payload and payload.blocks }
+		elseif event.action == "edit" then
+			-- a click of our player: the RemoteEvent from the client script
+			editHandler(paddy, event.what, event.x, event.y, event.z, event.item)
 			observations[event.name] = observe()
 		end
 	end

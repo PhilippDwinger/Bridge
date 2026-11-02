@@ -164,13 +164,29 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   460 der 500 HTTP-Anfragen pro Minute nutzen – im Spiel nutzt sonst nichts HttpService.
 - Die Spieler spawnen erst, wenn die Welt da ist, und zwar auf dem Minecraft-Spawn. Antwortet Minecraft 15 Sekunden
   lang nicht, warten sie auf einer Plattform hoch oben.
+- **Texturen:** Die Bilder kommen aus dem Minecraft-Spiel selbst (Command `mcworld.assets`, das Spiel enthält keine).
+  Fürs Erste hat der **Grasblock** Texturen (oben mit der Grasfarbe des Bioms, Seite, Erde unten), alle anderen Blöcke
+  bleiben grau. Grasblöcke bekommen eigene Parts mit einer `Texture` pro Seite (1 Kachel = 1 Block). Die Bilder macht
+  das Client-Script `MinecraftClient` (EditableImage gibt es nur auf dem Client).
+- **Hotbar + Inventar** mit Minecrafts eigener GUI-Grafik: Hotbar unten (Tasten **1–9**), Inventar mit **E**
+  (Item anklicken = aufnehmen, anderes Feld anklicken = ablegen oder tauschen). Kreativmodus: Items gehen nie aus.
+  Fürs Erste gibt es den **Grasblock** (in Feld 1).
+- **Bauen:** **Linksklick** baut den Block unter der Maus ab (halten = weiter), **Rechtsklick** setzt das gewählte
+  Item (in der Third-Person-Ansicht nur ein kurzer Klick ohne Kamera-Drehen). Reichweite 5 Blöcke, ein schwarzer
+  Rahmen zeigt den Block. Der Server prüft es, zeigt es sofort und schickt es über Bridge an Minecraft
+  (`mcworld.edit`); sagt Minecraft nein, lädt er den Chunk neu.
 
 So startest du es:
 
 1. Minecraft mit der Mod starten (Einzelspieler geht auch, der hat einen eigenen Server drin). Im Log steht
    `Bridge connected as ...`, und `/bridge` im Spiel zeigt den Status.
 2. Roblox Studio → neue Baseplate. In einer CMD im Ordner `extensions\roblox`:
-   `rojo serve minecraft-world.project.json --port 34874` → im Rojo-Plugin Port 34874 → Connect → **Play**.
+   `rojo serve minecraft-world.project.json --port 34874` → im Rojo-Plugin Port 34874 → Connect.
+3. Einmalig für die Texturen: **Game Settings → Security → „Allow Mesh / Image APIs“** einschalten (sonst bleiben
+   die Blöcke einfarbig und Hotbar/Inventar grau – das Output sagt es dann). → **Play**.
+
+Die Texturen kommen nur, wenn Minecraft selbst läuft (Einzelspieler oder IntelliJ „Minecraft Client“). Ein
+Dedicated Server hat keine Bilder – dann bleibt alles grau, Bauen geht trotzdem.
 
 ## Tests (ohne Roblox)
 
@@ -182,6 +198,7 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
 ```
 
 - `test_units.luau` – SHA-256, Base64 und zlib gegen Python (40 Testvektoren, alle zlib-Stufen)
+- `test_images.luau` – `MinecraftImages`: Hochskalieren (scharfe Pixel), einfarbige Bilder, Block-Icon (3D-Würfel)
 - `test_live.luau` – zwei Clients: Topics, Batch-Poll, `PublishLatest` / `Subscribe` mit `Latest` (auch mit einem
   älteren Bridge-Server), direkte Nachrichten (fast/safe/compressed/auto), Commands
   (Fehler, Timeout, späte Antwort, Async), Session-Erneuerung, `SESSION_INVALID`, feste Identität, Server-Reset
@@ -192,6 +209,7 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
   hinter dem echten Spieler und wie gleichmäßig
 - `sim_game.luau` – Lasttest: Anfragen pro Minute und Verzögerung zweier Spielserver
 - `sim_minecraftworld.luau` – die **echten** Scripts MinecraftWorld und PlayerSync gegen einen echten Bridge-Server
-  **und einen echten Minecraft-Server mit der Mod** (braucht beide laufend; so in der Cloud getestet): 25 Chunks = 25
-  Parts, Spawn, Spieler spawnen erst mit Welt, `setblock` → Neuaufbau des Chunks, `/fill` → Chunk neu geladen,
-  Roblox-Spieler als Mannequin in Minecraft
+  **und einen echten Minecraft-Server mit der Mod** (braucht beide laufend; so in der Cloud getestet): 25 Chunks =
+  50 Parts (grau + Gras mit 6 Texturen), Bilder für den Client (`GetAssets`), Spawn, Spieler spawnen erst mit Welt,
+  `setblock` → Neuaufbau des Chunks, `/fill` → Chunk neu geladen, Roblox-Spieler als Mannequin in Minecraft,
+  Grasblock setzen und abbauen (kommt in Minecraft an, zu weit weg wird ignoriert)

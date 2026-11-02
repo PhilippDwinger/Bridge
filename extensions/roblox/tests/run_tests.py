@@ -164,6 +164,8 @@ def main():
     subprocess.run([sys.executable, os.path.join(HERE, "make_vectors.py"), os.path.join(HERE, "vectors.json")], check=True)
     print("== unit tests")
     failed |= subprocess.run([LUNE, "run", "test_units.luau"], cwd=HERE).returncode != 0
+    print("== MinecraftImages (textures, item icons)")
+    failed |= subprocess.run([LUNE, "run", "test_images.luau"], cwd=HERE).returncode != 0
 
     print("== live test against a real Bridge server")
     url = f"http://127.0.0.1:{PORT}"
