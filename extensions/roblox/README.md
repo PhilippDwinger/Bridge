@@ -184,6 +184,8 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Laufen = sprinten (schneller, weiteres Sichtfeld) – Minecrafts Tempo. Alle sehen die Haltung; Minecraft-Spieler
   schleichen und sprinten in Roblox genauso (NPC duckt sich / rennt), Roblox-Spieler ducken sich in Minecraft.
   Shift-Lock ist dafür im Spiel aus.
+- **Arm schwingen:** Schlägt oder baut jemand, schwingt der Arm – in Roblox (eigener Charakter und NPCs der
+  Minecraft-Spieler) und in Minecraft (Mannequins der Roblox-Spieler).
 - **Bauen:** **Linksklick** baut den Block unter der Maus ab (halten = weiter), **Rechtsklick** setzt das gewählte
   Item (in der Third-Person-Ansicht nur ein kurzer Klick ohne Kamera-Drehen). Reichweite 5 Blöcke, ein schwarzer
   Rahmen zeigt den Block. Der Server prüft es, zeigt es sofort und schickt es über Bridge an Minecraft

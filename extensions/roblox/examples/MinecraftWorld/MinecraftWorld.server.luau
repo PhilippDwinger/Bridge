@@ -717,6 +717,19 @@ local function isWhole(value)
 	return type(value) == "number" and value == value and math.floor(value) == value and math.abs(value) < 1e7
 end
 
+-- The arm swings (PlayerSync sends it to Minecraft: the mannequin swings too)
+local function swingArm(player)
+	local character = player.Character
+	if character then
+		character:SetAttribute("McSwing", true)
+		task.delay(0.3, function()
+			if character.Parent then
+				character:SetAttribute("McSwing", false)
+			end
+		end)
+	end
+end
+
 local function onEdit(player, action, x, y, z, itemId)
 	if (action ~= "place" and action ~= "break") or not isWhole(x) or not isWhole(y) or not isWhole(z) then
 		return
@@ -752,6 +765,7 @@ local function onEdit(player, action, x, y, z, itemId)
 	end
 	-- Shown at once; Minecraft confirms it over mcworld.changes (the same block again)
 	applyBlocks({ { x, y, z, name } })
+	swingArm(player)
 	task.spawn(function()
 		local ok, result = pcall(client.Call, client, EDIT, {
 			action = action,
@@ -834,6 +848,7 @@ attackRemote.OnServerEvent:Connect(function(player, model)
 		return
 	end
 	attackedAt[player] = now
+	swingArm(player)
 	task.spawn(function()
 		local ok, result = pcall(client.Call, client, HURT, { target = target, amount = 1, attacker = player.UserId },
 			{ Timeout = 10 })

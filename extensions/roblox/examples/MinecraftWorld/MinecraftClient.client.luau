@@ -525,7 +525,39 @@ local function inMyCharacter(x: number, y: number, z: number): boolean
 		and math.abs(delta.Z) < half + size.Z / 2 - 0.1
 end
 
+-- My own arm swings when I hit / build (the animation replicates to the others; Minecraft gets it as "sw")
+local SLASH = { R15 = "rbxassetid://522635514", R6 = "rbxassetid://129967390" }
+local slashTrack, slashCharacter = nil, nil
+local function swingArm()
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		return
+	end
+	if slashCharacter ~= character then
+		slashCharacter = character
+		slashTrack = nil
+		local animation = Instance.new("Animation")
+		animation.AnimationId = SLASH[humanoid.RigType.Name] or SLASH.R15
+		local ok, track = pcall(function()
+			return animator:LoadAnimation(animation)
+		end)
+		if ok and track then
+			track.Priority = Enum.AnimationPriority.Action
+			track.Looped = false
+			slashTrack = track
+		end
+	end
+	if slashTrack then
+		slashTrack:Play(0.05)
+	end
+end
+
 local function act(action: string)
+	if (action == "break" and (targetNpc or target)) or (action == "place" and target and slots[selected]) then
+		swingArm()
+	end
 	if action == "break" and targetNpc then
 		attackRemote:FireServer(targetNpc) -- hit the Minecraft player (Minecraft does the damage)
 		return

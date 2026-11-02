@@ -42,12 +42,14 @@ local ANIMATIONS = { -- by rig type name
 		walk = "rbxassetid://507777826",
 		run = "rbxassetid://507767714",
 		fall = "rbxassetid://507767968",
+		slash = "rbxassetid://522635514", -- swinging the arm (hit / build)
 	},
 	R6 = {
 		idle = "rbxassetid://180435571",
 		walk = "rbxassetid://180426354",
 		run = "rbxassetid://180426354",
 		fall = "rbxassetid://180436148",
+		slash = "rbxassetid://129967390",
 	},
 }
 
@@ -222,7 +224,10 @@ local function setupModel(npc, model, server)
 			return animator:LoadAnimation(animation)
 		end)
 		if ok and track then
-			track.Looped = true
+			track.Looped = name ~= "slash"
+			if name == "slash" then
+				track.Priority = Enum.AnimationPriority.Action
+			end
 			npc.tracks[name] = track
 		end
 	end
@@ -320,6 +325,12 @@ local function onSnapshot(data, event)
 			npc.yaw = tonumber(player.r) or 0
 			npc.crouch = player.c == true
 			npc.sprint = player.sp == true
+			-- the player swings his arm (hits / builds): once per swing
+			local swing = player.sw == true
+			if swing and not npc.swung and npc.tracks.slash then
+				npc.tracks.slash:Play(0.05)
+			end
+			npc.swung = swing
 			npc.health = tonumber(player.h)
 			npc.maxHealth = math.max(tonumber(player.mh) or 20, 1)
 			if npc.humanoid and npc.health then
@@ -422,12 +433,13 @@ local function snapshot()
 				a = humanoid.FloorMaterial == Enum.Material.Air,
 				c = character:GetAttribute("McSneak") == true, -- sneaking / sprinting (set by a game script, e.g. MinecraftWorld)
 				sp = character:GetAttribute("McSprint") == true,
+				sw = character:GetAttribute("McSwing") == true,
 			}
 			table.insert(list, entry)
 			-- what counts as "moved": 5 cm, a few degrees, other velocity / air state
 			table.insert(parts, table.concat({ entry.u, steps(position.X, 0.05), steps(position.Y, 0.05),
 				steps(position.Z, 0.05), steps(entry.r, 0.05), steps(velocity.X, 0.5), steps(velocity.Y, 0.5),
-				steps(velocity.Z, 0.5), tostring(entry.a), tostring(entry.c), tostring(entry.sp) }, ":"))
+				steps(velocity.Z, 0.5), tostring(entry.a), tostring(entry.c), tostring(entry.sp), tostring(entry.sw) }, ":"))
 		end
 	end
 	return list, table.concat(parts, "|")
