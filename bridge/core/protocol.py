@@ -107,6 +107,9 @@ max_wait_seconds = 25
 # One poll can take several one-piece messages at once ("max_messages"), so clients with a request budget
 # (e.g. Roblox game servers: 500 HTTP requests per minute) still keep up with many small events.
 max_poll_messages = 100
+# A poll can carry topic publishes ("publish"), done before it looks into the mailbox: a client with a request budget
+# sends its newest state and gets the others' in ONE request (e.g. a Roblox game syncing players many times a second)
+max_poll_publishes = 10
 
 # Commands: hosts without any request for this long are only used if no active host exists
 host_inactive_seconds = 120

@@ -45,6 +45,7 @@ import java.util.zip.Inflater;
  * BridgeClient client = BridgeClient.builder("https://my-pc.tailnet.ts.net").name("My program").build();
  * client.subscribe(null, "chat", (data, event) -> System.out.println(event.senderIp() + ": " + data));
  * client.publish(null, "chat", Json.obj("text", "Hello"));
+ * client.publishLatest(null, "position", Json.obj("x", 1));   // only the newest counts, does not wait
  * client.hostCommand(null, "add", (args, task) -> Json.asLong(Json.asMap(args).get("a"), 0) + Json.asLong(Json.asMap(args).get("b"), 0));
  * Object three = client.call("add", Json.obj("a", 1, "b", 2));
  * }</pre>
@@ -307,6 +308,11 @@ public final class BridgeClient implements AutoCloseable {
     private final Map<String, CompletableFuture<Response>> waiters = new ConcurrentHashMap<>();
     private final Map<String, Response> unclaimed = new ConcurrentHashMap<>();
     private final List<Runnable> closeHandlers = new CopyOnWriteArrayList<>();
+    // publishLatest: "realmRef|topic" -> the newest value that did not go out yet (an older one is simply replaced)
+    private final Map<String, LatestValue> latest = new LinkedHashMap<>();
+    private boolean latestSending; // guarded by latest
+    // "sender|realm|topic" -> created_at of the newest event the latest subscriptions got
+    private final Map<String, String> newestEvent = new ConcurrentHashMap<>();
 
     private final List<Consumer<String>> connectedListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<String>> disconnectedListeners = new CopyOnWriteArrayList<>();
@@ -322,6 +328,7 @@ public final class BridgeClient implements AutoCloseable {
         final String realmRef;
         final String topic;
         final List<TopicHandler> handlers = new CopyOnWriteArrayList<>();
+        final Set<TopicHandler> latest = ConcurrentHashMap.newKeySet(); // handlers that only want the newest event
 
         TopicEntry(String realmRef, String topic) {
             this.realmRef = realmRef;
@@ -330,6 +337,9 @@ public final class BridgeClient implements AutoCloseable {
     }
 
     private record CommandEntry(String realmRef, String name, CommandHandler handler, Map<String, Object> extra) {
+    }
+
+    private record LatestValue(String realmRef, String topic, Object data, SendOptions options) {
     }
     // endregion
 
@@ -865,9 +875,19 @@ public final class BridgeClient implements AutoCloseable {
                         failures = 0;
                         setOnline(true, null);
                     }
-                    for (Map<String, Object> item : itemsOf(data)) {
+                    List<Map<String, Object>> items = itemsOf(data);
+                    // latest subscriptions only get the newest event per sender and topic of this batch
+                    Map<String, Integer> newest = new java.util.HashMap<>();
+                    for (int index = 0; index < items.size(); index++) {
+                        String key = eventKey(items.get(index));
+                        if (key != null) {
+                            newest.put(key, index);
+                        }
+                    }
+                    for (int index = 0; index < items.size(); index++) {
+                        String key = eventKey(items.get(index));
                         try {
-                            handleItem(item);
+                            handleItem(items.get(index), key != null && newest.get(key) != index);
                         } catch (RuntimeException error) {
                             report(error);
                         }
@@ -947,7 +967,18 @@ public final class BridgeClient implements AutoCloseable {
         }
     }
 
-    private void handleItem(Map<String, Object> item) {
+    /** "sender|realm|topic" of a one-piece event, null for everything else. */
+    private static String eventKey(Map<String, Object> item) {
+        Map<String, Object> meta = Json.asMap(item.get("message"));
+        Map<String, Object> content = Json.asMap(item.get("content"));
+        if (meta == null || content == null || !"event".equals(meta.get("content_type"))) {
+            return null;
+        }
+        return meta.get("sender_ip") + "|" + content.get("realm_address") + "|" + content.get("topic");
+    }
+
+    /** superseded: a newer event of the same sender and topic came in the same batch (latest subscriptions skip it). */
+    private void handleItem(Map<String, Object> item, boolean superseded) {
         Map<String, Object> meta = Json.asMap(item.get("message"));
         if (meta == null) {
             meta = Map.of();
@@ -964,9 +995,20 @@ public final class BridgeClient implements AutoCloseable {
                 body = Map.of();
             }
             Event event = new Event(Json.asString(body.get("realm_address")), Json.asString(body.get("topic")), body.get("data"), sender, meta);
+            // latest subscriptions: nothing older than what they already got (two requests can overtake each other)
+            String key = sender + "|" + event.realm() + "|" + event.topic();
+            String createdAt = Json.asString(meta.get("created_at"));
+            String newestSoFar = newestEvent.get(key);
+            boolean stale = superseded || (createdAt != null && newestSoFar != null && createdAt.compareTo(newestSoFar) < 0);
             for (TopicEntry entry : topics) {
                 if (entry.topic.equals(event.topic()) && Objects.equals(resolveRealm(entry.realmRef), event.realm())) {
+                    if (!entry.latest.isEmpty() && !stale && createdAt != null) {
+                        newestEvent.put(key, createdAt);
+                    }
                     for (TopicHandler handler : entry.handlers) {
+                        if (stale && entry.latest.contains(handler)) {
+                            continue;
+                        }
                         callbacks.execute(() -> {
                             try {
                                 handler.handle(event.data(), event);
@@ -1221,6 +1263,14 @@ public final class BridgeClient implements AutoCloseable {
 
     /** Subscribes a topic of a realm (null = public realm of the server). The handler gets every event. */
     public Subscription subscribe(String realm, String topic, TopicHandler handler) {
+        return subscribe(realm, topic, handler, false);
+    }
+
+    /**
+     * Like {@link #subscribe(String, String, TopicHandler)}; latest = true: only the newest event per sender - older ones
+     * that are still waiting are skipped (for states like positions: never work through old ones, show the current one).
+     */
+    public Subscription subscribe(String realm, String topic, TopicHandler handler, boolean latestOnly) {
         Objects.requireNonNull(topic, "topic");
         Objects.requireNonNull(handler, "handler");
         String realmRef = realmRefOf(realm);
@@ -1238,6 +1288,9 @@ public final class BridgeClient implements AutoCloseable {
                 added = true;
             }
             entry.handlers.add(handler);
+            if (latestOnly) {
+                entry.latest.add(handler);
+            }
         }
         if (added) {
             try {
@@ -1254,6 +1307,9 @@ public final class BridgeClient implements AutoCloseable {
         TopicEntry finalEntry = entry;
         return () -> {
             finalEntry.handlers.remove(handler);
+            if (!finalEntry.handlers.contains(handler)) {
+                finalEntry.latest.remove(handler);
+            }
             if (finalEntry.handlers.isEmpty() && topics.remove(finalEntry)) {
                 try {
                     request("/realm/topic/unsubscribe", Json.obj("topic", topic), realmOption(realmRef));
@@ -1286,6 +1342,67 @@ public final class BridgeClient implements AutoCloseable {
                 report(error.getCause() != null ? error.getCause() : error);
             }
         });
+    }
+
+    /** Publishes only the NEWEST value (see {@link #publishLatest(String, String, Object, SendOptions)}). */
+    public void publishLatest(String realm, String topic, Object data) {
+        publishLatest(realm, topic, data, null);
+    }
+
+    /**
+     * Publishes only the NEWEST value - for states that change all the time (positions, ...). Does not wait: the value
+     * replaces an older one of the same topic that has not gone out yet, a sender thread publishes the newest one as
+     * soon as the last request is done. Errors go to onError listeners.
+     */
+    public void publishLatest(String realm, String topic, Object data, SendOptions sendOptions) {
+        Objects.requireNonNull(topic, "topic");
+        Objects.requireNonNull(data, "data");
+        if (closing || state == State.CLOSED) {
+            return;
+        }
+        String realmRef = realmRefOf(realm);
+        synchronized (latest) {
+            latest.remove(realmRef + "|" + topic); // re-insert: the oldest waiting topic goes first
+            latest.put(realmRef + "|" + topic, new LatestValue(realmRef, topic, data, sendOptions));
+            if (!latestSending) {
+                latestSending = true;
+                Thread.ofVirtual().name("bridge-latest-" + options.name).start(this::latestLoop);
+            }
+        }
+    }
+
+    private void latestLoop() {
+        while (true) {
+            LatestValue value;
+            synchronized (latest) {
+                if (latest.isEmpty() || closing || state == State.CLOSED) {
+                    latest.clear();
+                    latestSending = false;
+                    return;
+                }
+                var iterator = latest.entrySet().iterator();
+                value = iterator.next().getValue();
+                iterator.remove();
+            }
+            try {
+                publish(value.realmRef(), value.topic(), value.data(), value.options());
+            } catch (RuntimeException error) {
+                if (closing || state == State.CLOSED) {
+                    continue;
+                }
+                report(error);
+                if (error instanceof BridgeException bridgeError && isConnectionProblem(bridgeError)) {
+                    synchronized (latest) {
+                        latest.putIfAbsent(value.realmRef() + "|" + value.topic(), value); // unless a newer one waits
+                    }
+                    try {
+                        sleep(1000);
+                    } catch (BridgeException interrupted) {
+                        // closing
+                    }
+                }
+            }
+        }
     }
 
     /** Hosts a command in a realm (null = public realm). The handler's return value is the answer. */
@@ -1466,6 +1583,9 @@ public final class BridgeClient implements AutoCloseable {
     public void close() {
         if (state == State.CLOSED || closing) {
             return;
+        }
+        synchronized (latest) {
+            latest.clear(); // values that did not go out are not sent any more
         }
         for (Runnable handler : closeHandlers) {
             try {

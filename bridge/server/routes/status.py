@@ -67,6 +67,8 @@ async def get_server_status_dict() -> dict:
             "max_safe_message_kib": protocol.current_protocol.max_safe_message_kib,
             "max_wait_seconds": protocol.max_wait_seconds,
             "max_poll_messages": protocol.max_poll_messages,
+            # > 0: /message/poll takes "publish" (older servers do not have this key)
+            "max_poll_publishes": protocol.max_poll_publishes,
             "session_lifetime_minutes": protocol.session_lifetime_minutes,
         },
     }

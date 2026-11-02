@@ -1,8 +1,10 @@
 from fastapi import APIRouter
 
+from bridge.core import protocol
 from bridge.messenger import outbox, service as messenger_service
 from bridge.messenger.message import ContentType, MessageMode
-from bridge.errors.exceptions import Exceptions
+from bridge.errors.exceptions import Exceptions, get_exception_id, is_exception
+from bridge.realm import topics
 from bridge.server.routes._helpers import authenticate, check, fail, get_field
 
 Router = APIRouter(prefix="/message")
@@ -76,18 +78,53 @@ async def cancel_scheduled(payload: dict):
     return check(outbox.cancel(client_key, get_field(payload, "message_id", str)))
 
 
+def _poll_publishes(payload):
+    """The optional "publish" list of a poll: [{realm_address, topic, content, mode?, include_self?}, ...]."""
+    publishes = get_field(payload, "publish", list, required=False)
+    if publishes is None:
+        return None
+    if len(publishes) > protocol.max_poll_publishes:
+        fail(Exceptions.ARGUMENT_ERROR, f"'publish' takes at most {protocol.max_poll_publishes} entries")
+    checked = []
+    for entry in publishes:
+        if not isinstance(entry, dict) or "content" not in entry:
+            fail(Exceptions.CLIENT_PAYLOAD_ERROR, "Every 'publish' entry needs realm_address, topic and content")
+        checked.append((
+            get_field(entry, "realm_address", str),
+            get_field(entry, "topic", str),
+            entry.get("content"),
+            get_field(entry, "mode", str, required=False, default="fast"),
+            get_field(entry, "include_self", bool, required=False, default=True),
+        ))
+    return checked
+
+
 @Router.post("/poll")
 async def poll(payload: dict):
     # Optional "content_types": ["direct"] or ["task", "response"] ... to poll only some pools.
     # Optional "wait_seconds" (max 25): keep the request open until a message arrives (long polling).
     # Optional "max_messages" (1-100): take up to that many messages at once -> {"messages": [...], "count"}.
+    # Optional "publish" (max 10 topic publishes, like /realm/topic/publish): done first, the answer gets
+    # "published" with one result per entry ({"error": id} if one failed - the poll itself still runs).
     client_key = authenticate(payload)
-    return check(await messenger_service.poll_wait(
-        client_key,
-        get_field(payload, "content_types", list, required=False),
-        get_field(payload, "wait_seconds", (int, float), required=False, default=0),
-        get_field(payload, "max_messages", int, required=False),
-    ))
+    publishes = _poll_publishes(payload)
+    content_types = get_field(payload, "content_types", list, required=False)
+    wait_seconds = get_field(payload, "wait_seconds", (int, float), required=False, default=0)
+    max_messages = get_field(payload, "max_messages", int, required=False)
+    published = None
+    if publishes is not None:
+        # Check the poll fields first - a bad poll must not publish anything
+        check(messenger_service.check_wait_seconds(wait_seconds))
+        check(messenger_service.check_max_messages(max_messages))
+        check(messenger_service.parse_content_types(content_types))
+        published = []
+        for realm_address, topic, content, mode, include_self in publishes:
+            result = await topics.publish(client_key, realm_address, topic, content, mode, include_self=include_self)
+            published.append({"topic": topic, "error": get_exception_id(result)} if is_exception(result) else result)
+    result = check(await messenger_service.poll_wait(client_key, content_types, wait_seconds, max_messages))
+    if published is not None:
+        result = dict(result, published=published)
+    return result
 
 
 @Router.post("/status")

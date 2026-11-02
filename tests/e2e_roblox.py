@@ -1,5 +1,6 @@
 """End-to-end test of what the Roblox extension needs from Bridge, with two real Bridge servers A <-> B:
-batch poll (max_messages), client self delete (/client/delete), limits in /server/status, topics over two servers.
+batch poll (max_messages), client self delete (/client/delete), limits in /server/status, topics over two servers,
+publish inside a poll ("publish").
 
 Run from the project folder:  python tests/e2e_roblox.py
 """
@@ -86,7 +87,7 @@ def scenarios():
     limits = status.get("limits", {})
     check("status: limits for clients (max_poll_messages, max_wait_seconds, session_lifetime_minutes)",
           limits.get("max_poll_messages") == 100 and limits.get("max_wait_seconds") == 25
-          and limits.get("session_lifetime_minutes") == 60, limits)
+          and limits.get("session_lifetime_minutes") == 60 and limits.get("max_poll_publishes") == 10, limits)
 
     a1, ta1 = register("A", "a1")
     b1, tb1 = register("B", "b1")
@@ -160,6 +161,45 @@ def scenarios():
     code, other = post("B", "/message/poll", {"session_token": tb1, "max_messages": 100})
     check("include_self=false: A gets nothing back, B gets the event",
           own.get("count") == 0 and [i["content"]["data"]["tick"] for i in other.get("messages", [])] == [50], (own, other))
+    # endregion
+
+    # region publish inside a poll (one request: send the own state, get the others')
+    entry = {"realm_address": realm, "topic": "players", "content": {"tick": 60}, "include_self": False}
+    post("A", "/realm/topic/publish", {"session_token": ta1, "realm_address": realm, "topic": "players",
+                                       "content": {"tick": 61}, "include_self": False})
+    time.sleep(0.5)
+    code, data = post("B", "/message/poll", {"session_token": tb1, "max_messages": 50, "publish": [entry]})
+    published = (data or {}).get("published") or [{}]
+    check("poll with publish: published result (1 subscriber, delivered)",
+          code == 200 and published[0].get("subscribers") == 1 and published[0].get("delivered") == 1, data)
+    check("poll with publish: the same answer has B's messages",
+          [i["content"]["data"]["tick"] for i in data.get("messages", [])] == [61], data)
+    time.sleep(0.5)
+    code, data = post("A", "/message/poll", {"session_token": ta1, "max_messages": 50})
+    check("poll with publish: A got the event of B",
+          [i["content"]["data"]["tick"] for i in data.get("messages", [])] == [60]
+          and data["messages"][0]["message"]["sender_ip"] == b1, data)
+    code, data = post("B", "/message/poll", {"session_token": tb1, "publish": [entry]})
+    check("poll with publish without max_messages: single answer + published",
+          code == 200 and data.get("message") is None and data.get("published", [{}])[0].get("delivered") == 1, data)
+    code, data = post("B", "/message/poll", {"session_token": tb1, "max_messages": 5, "wait_seconds": 0, "publish": [
+        dict(entry, realm_address="nowhere"), dict(entry, content={"tick": 62})]})
+    results_ = (data or {}).get("published") or []
+    check("poll with publish: a failing entry gets an error, the others and the poll still work",
+          code == 200 and len(results_) == 2 and results_[0].get("error") and results_[1].get("delivered") == 1
+          and data.get("count") == 0, data)
+    code, data = post("B", "/message/poll", {"session_token": tb1, "max_messages": 0, "publish": [dict(entry, content={"tick": 63})]})
+    check("poll with publish: bad poll field -> 400", code == 400, data)
+    code, data = post("B", "/message/poll", {"session_token": tb1, "publish": [{"topic": "players"}]})
+    check("poll with publish: entry without content -> 400", code == 400, data)
+    code, data = post("B", "/message/poll", {"session_token": tb1, "publish": [entry] * 11})
+    check("poll with publish: more than 10 entries -> 400", code == 400, data)
+    code, data = post("B", "/message/poll", {"session_token": tb1, "publish": "x"})
+    check("poll with publish: publish must be a list -> 400", code == 400, data)
+    time.sleep(0.5)
+    code, data = post("A", "/message/poll", {"session_token": ta1, "max_messages": 50})
+    check("poll with publish: rejected requests published nothing (A only has 60, 62)",
+          [i["content"]["data"]["tick"] for i in data.get("messages", [])] == [60, 62], data)
     # endregion
 
     # region delete

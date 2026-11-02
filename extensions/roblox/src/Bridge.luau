@@ -16,6 +16,7 @@
 	        print(event.SenderIp, data.text)
 	    end)
 	    client:Publish(nil, "chat", { text = "Hello" })
+	    client:PublishLatest(nil, "position", { x = 1 })               -- only the newest counts, does not wait
 
 	    client.MessageReceived:Connect(function(message)              -- direct messages
 	        message:Reply({ got = message.Content })
@@ -744,6 +745,15 @@ function Client.new(options)
 	self._everConnected = false
 	self._fatal = nil
 	self._requests = 0
+	-- PublishLatest: "realmRef|topic" -> the newest value that did not go out yet (an older one is simply replaced)
+	self._latest = {}
+	self._latestLast = 0 -- os.clock() of the last PublishLatest
+	self._streamUntil = 0 -- until then the polls do not wait: each one carries the newest values (stream mode)
+	self._latestSending = false
+	self._longPolling = false -- a poll that waits for messages is running
+	self._pollBackoff = false -- the poll loop waits after a failure
+	self._noPiggyback = false -- the server ignored "publish" in a poll (older Bridge)
+	self._newestEvent = {} -- "sender|realm|topic" -> created_at of the newest event Latest subscriptions got
 
 	table.insert(clients, self)
 	bindClose()
@@ -1153,7 +1163,18 @@ function Client:_handleTask(meta, content)
 	end)
 end
 
-function Client:_handleItem(item)
+-- "sender|realm|topic" of a one-piece event (nil for everything else)
+local function eventKey(item)
+	local meta = type(item) == "table" and item.message
+	local content = type(item) == "table" and item.content
+	if type(meta) ~= "table" or meta.content_type ~= "event" or type(content) ~= "table" then
+		return nil
+	end
+	return tostring(meta.sender_ip) .. "|" .. tostring(content.realm_address) .. "|" .. tostring(content.topic)
+end
+
+-- superseded: a newer event of the same sender and topic came in the same batch (Latest subscriptions skip it)
+function Client:_handleItem(item, superseded)
 	local meta = item.message or {}
 	local content = item.content
 	if item.pending_id then
@@ -1173,9 +1194,19 @@ function Client:_handleItem(item)
 			Meta = meta,
 			Client = self,
 		}
+		-- Latest subscriptions: nothing older than what they already got (two requests can overtake each other)
+		local key = tostring(event.SenderIp) .. "|" .. tostring(event.Realm) .. "|" .. tostring(event.Topic)
+		local createdAt = if type(meta.created_at) == "string" then meta.created_at else nil
+		local stale = superseded == true or (createdAt ~= nil and self._newestEvent[key] ~= nil and createdAt < self._newestEvent[key])
 		for _, entry in ipairs(self._topics) do
 			if entry.topic == event.Topic and self:_resolveRealm(entry.realmRef) == event.Realm then
+				if entry.latest and next(entry.latest) ~= nil and not stale and createdAt then
+					self._newestEvent[key] = createdAt
+				end
 				for _, handler in ipairs(table.clone(entry.handlers)) do
+					if stale and entry.latest and entry.latest[handler] then
+						continue
+					end
 					task.spawn(function()
 						local ok, err = pcall(handler, event.Data, event)
 						if not ok then
@@ -1243,8 +1274,24 @@ function Client:_pollLoop()
 	local failures = 0
 	while self.State ~= "destroyed" and self.Receive and not self._fatal do
 		local started = os.clock()
-		local ok, data = pcall(self._request, self, "/message/poll",
-			{ wait_seconds = self.PollWait, max_messages = self.MaxMessages }, { timeout = math.huge })
+		-- PublishLatest values go out WITH this poll (one request for sending and receiving). While values stream in,
+		-- a poll waits at most PollInterval (what arrives meanwhile comes at once), so every PollInterval one carries
+		-- the newest values.
+		local publishes, taken = nil, nil
+		if self:_canPiggyback() and next(self._latest) ~= nil then
+			publishes, taken = self:_takeLatest()
+		end
+		local streaming = publishes ~= nil or (started < self._streamUntil and self:_canPiggyback())
+		self._longPolling = not streaming
+		local ok, data = pcall(self._request, self, "/message/poll", {
+			wait_seconds = if streaming then math.min(self.PollInterval, self.PollWait) else self.PollWait,
+			max_messages = self.MaxMessages,
+			publish = publishes,
+		}, { timeout = math.huge })
+		self._longPolling = false
+		if taken then
+			self:_afterPiggyback(ok, data, taken)
+		end
 		if self.State == "destroyed" then
 			break
 		end
@@ -1259,8 +1306,17 @@ function Client:_pollLoop()
 				elseif type(data.messages) == "table" then data.messages
 				elseif data.message ~= nil then { data }
 				else {}
-			for _, item in ipairs(items) do
-				local handled, err = pcall(self._handleItem, self, item)
+			-- Latest subscriptions only get the newest event per sender and topic of this batch
+			local newest = {}
+			for index, item in ipairs(items) do
+				local key = eventKey(item)
+				if key then
+					newest[key] = index
+				end
+			end
+			for index, item in ipairs(items) do
+				local key = eventKey(item)
+				local handled, err = pcall(self._handleItem, self, item, key ~= nil and newest[key] ~= index)
 				if not handled then
 					self:_report(err)
 				end
@@ -1273,7 +1329,9 @@ function Client:_pollLoop()
 			if not (isError(data) and data.Id == "DESTROYED") then
 				self:_report(data)
 			end
+			self._pollBackoff = true
 			task.wait(math.min(2 ^ math.min(failures, 4), 15))
+			self._pollBackoff = false
 		end
 		local rest = self.PollInterval - (os.clock() - started)
 		if rest > 0 then
@@ -1341,6 +1399,110 @@ end
 local function isConnectionProblem(err)
 	return isError(err) and (err.Id == "NOT_CONNECTED" or err.Id == "UNREACHABLE")
 end
+
+-- region PublishLatest (only the newest value of a topic goes out)
+local STREAM_GAP = 1 -- two PublishLatest calls closer than this = a stream: polls stop waiting, each carries the newest
+
+-- Can PublishLatest values go out with the polls? (the server knows "publish" in a poll and the poll loop runs)
+function Client:_canPiggyback()
+	return self.Receive and self._polling and not self._noPiggyback and not self._pollBackoff
+		and (tonumber(self.Limits.max_poll_publishes) or 0) > 0
+end
+
+function Client:_publishBody(entry)
+	return {
+		realm_address = self:_resolveRealm(entry.realmRef),
+		topic = entry.topic,
+		content = entry.data,
+		mode = self:_pickMode(entry.data, entry.mode),
+		include_self = entry.includeSelf,
+	}
+end
+
+-- Takes the waiting values for a poll: returns the "publish" list and the taken entries (key -> entry)
+function Client:_takeLatest()
+	local publishes, taken = {}, {}
+	local max = math.max(1, tonumber(self.Limits.max_poll_publishes) or 1)
+	for key, entry in pairs(self._latest) do
+		if #publishes >= max then
+			break
+		end
+		self._latest[key] = nil
+		taken[key] = entry
+		table.insert(publishes, self:_publishBody(entry))
+	end
+	return publishes, taken
+end
+
+-- A value that did not go out comes back - unless a newer one is waiting already
+function Client:_putBack(taken)
+	for key, entry in pairs(taken) do
+		if self._latest[key] == nil then
+			self._latest[key] = entry
+		end
+	end
+	self:_startLatestSender()
+end
+
+function Client:_afterPiggyback(ok, data, taken)
+	if ok and type(data) == "table" and type(data.published) == "table" then
+		for _, result in ipairs(data.published) do
+			if type(result) == "table" and result.error ~= nil then
+				self:_report(newError(tostring(result.error), "PublishLatest '" .. tostring(result.topic) .. "' failed", 0))
+			end
+		end
+		return
+	end
+	if ok then
+		-- An older Bridge server ignored "publish": from now on separate requests
+		self._noPiggyback = true
+	elseif isError(data) and type(data.Status) == "number" and data.Status >= 400 and data.Status < 500
+		and data.Id ~= "SESSION_INVALID" then
+		return -- the server refused the request itself: sending the same values again would fail again
+	end
+	if self.State ~= "destroyed" and not self._destroying then
+		self:_putBack(taken)
+	end
+end
+
+function Client:_startLatestSender()
+	if not self._latestSending and next(self._latest) ~= nil then
+		self._latestSending = true
+		task.spawn(self._latestLoop, self)
+	end
+end
+
+-- Sends the values the polls cannot take: while a poll waits for messages (long polling), when the server does not
+-- know "publish" in a poll, or without background polling. At most one request per PollInterval.
+function Client:_latestLoop()
+	while next(self._latest) ~= nil and self.State ~= "destroyed" and not self._destroying do
+		if self:_canPiggyback() and not self._longPolling then
+			task.wait(self.PollInterval) -- the next poll takes it
+		else
+			local key, entry = next(self._latest)
+			self._latest[key] = nil
+			local ok, err = pcall(function()
+				return self:_request("/realm/topic/publish", self:_publishBody(entry), { nullField = "content" })
+			end)
+			if not ok then
+				if self.State == "destroyed" or self._destroying then
+					break
+				end
+				self:_report(err)
+				if isConnectionProblem(err) then
+					self:_putBack({ [key] = entry })
+					task.wait(1)
+				end
+			end
+			task.wait(self.PollInterval)
+		end
+	end
+	self._latestSending = false
+	if self.State ~= "destroyed" and not self._destroying then
+		self:_startLatestSender() -- something came in while the loop was ending
+	end
+end
+-- endregion
 -- endregion
 
 -- region public API
@@ -1373,10 +1535,13 @@ Client.Broadcast = public(function(self, recipients, content, options)
 end)
 
 --- Subscribes a topic of a realm (nil = public realm of the server). handler(data, event) gets every event.
+--- options.Latest = true: only the newest event per sender - older ones that are still waiting are skipped (for
+--- states like positions: never work through old ones, always show the current one).
 --- Returns a subscription with :Disconnect() (unsubscribes on the server when the last handler is gone).
-Client.Subscribe = public(function(self, realm, topic, handler)
+Client.Subscribe = public(function(self, realm, topic, handler, options)
 	assert(type(topic) == "string", "topic must be a text")
 	assert(type(handler) == "function", "handler must be a function(data, event)")
+	options = options or {}
 	local realmRef = realmRefOf(realm)
 	local entry = nil
 	for _, existing in ipairs(self._topics) do
@@ -1387,8 +1552,14 @@ Client.Subscribe = public(function(self, realm, topic, handler)
 	local subscription = { Topic = topic, Realm = realmRef }
 	if entry then
 		table.insert(entry.handlers, handler)
+		if options.Latest then
+			entry.latest[handler] = true
+		end
 	else
-		entry = { realmRef = realmRef, topic = topic, handlers = { handler } }
+		entry = { realmRef = realmRef, topic = topic, handlers = { handler }, latest = {} }
+		if options.Latest then
+			entry.latest[handler] = true
+		end
 		table.insert(self._topics, entry)
 		local ok, err = pcall(self._request, self, "/realm/topic/subscribe", { topic = topic }, { realmRef = realmRef })
 		if not ok then
@@ -1406,6 +1577,9 @@ Client.Subscribe = public(function(self, realm, topic, handler)
 			return
 		end
 		table.remove(entry.handlers, index)
+		if not table.find(entry.handlers, handler) then
+			entry.latest[handler] = nil
+		end
 		if #entry.handlers == 0 then
 			table.remove(self._topics, table.find(self._topics, entry) or 0)
 			pcall(self._request, self, "/realm/topic/unsubscribe", { topic = topic }, { realmRef = realmRef })
@@ -1425,6 +1599,34 @@ Client.Publish = public(function(self, realm, topic, data, options)
 		mode = self:_pickMode(data, options.Mode),
 		include_self = options.IncludeSelf == true,
 	}, { nullField = "content", realmRef = realmRefOf(realm) })
+end)
+
+--- Publishes only the NEWEST value - for states that change all the time (positions, ...). Does not wait: the value
+--- replaces an older one of the same topic that has not gone out yet. With Bridge servers that allow it, it goes out
+--- together with the next poll (one request for sending and receiving); while values keep coming, the client polls
+--- every PollInterval without waiting. Otherwise it goes out in its own request. options: Mode, IncludeSelf.
+Client.PublishLatest = public(function(self, realm, topic, data, options)
+	assert(type(topic) == "string", "topic must be a text")
+	assert(data ~= nil, "data must not be nil")
+	options = options or {}
+	if self.State == "destroyed" or self._destroying then
+		return
+	end
+	encodeJson(data, "/realm/topic/publish") -- not JSON (Vector3, Instance, ...)? The error comes here, not in a poll
+	local realmRef = realmRefOf(realm)
+	self._latest[realmRef .. "|" .. topic] = {
+		realmRef = realmRef,
+		topic = topic,
+		data = data,
+		mode = options.Mode,
+		includeSelf = options.IncludeSelf == true,
+	}
+	local now = os.clock()
+	if now - self._latestLast < STREAM_GAP then
+		self._streamUntil = now + STREAM_GAP
+	end
+	self._latestLast = now
+	self:_startLatestSender()
 end)
 
 --- Hosts a command in a realm (nil = public realm). handler(args, task) returns the answer (or errors -> the caller
@@ -1611,6 +1813,7 @@ function Client:Destroy()
 		return
 	end
 	self._destroying = true
+	self._latest = {} -- values that did not go out are not sent any more
 	for _, callback in ipairs(self._closeHandlers) do
 		local ok, err = pcall(callback)
 		if not ok then

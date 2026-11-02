@@ -13,6 +13,8 @@ Was die Bibliothek automatisch macht (wie das Roblox-Modul):
 - **Empfangen** im Hintergrund per Long Polling, bis zu 50 Nachrichten pro Anfrage
 - **safe**-Nachrichten: Chunks holen + SHA-256 prüfen, **compressed**: entpacken (java.util.zip)
 - **Senden**: `auto` = `fast` wenn klein, sonst `safe`
+- **Nur der neueste Stand** (`publishLatest` / `subscribe(..., true)`): für Zustände, die sich dauernd ändern
+  (Positionen …). Ein noch nicht gesendeter älterer Wert wird ersetzt, ältere wartende Events werden übersprungen.
 - **close()**: kurzlebige Clients werden auf dem Server gelöscht, die anderen melden Topics/Commands ab und loggen aus
 - Eigener JSON-Leser/-Schreiber (`Json`), Fehler als `BridgeException` mit Bridge-Fehler-ID
 
@@ -52,8 +54,9 @@ Object drei = client.call("add", Json.obj("a", 1, "b", 2));   // 3
 client.close();
 ```
 
-Alle Methoden warten, bis Bridge geantwortet hat. Für Spiel-Schleifen gibt es `publishAsync`, `sendAsync` und
-`callAsync`. Listener und Topic-Handler laufen nacheinander auf dem Callback-Thread des Clients, in der Reihenfolge,
+Alle Methoden warten, bis Bridge geantwortet hat. Für Spiel-Schleifen gibt es `publishAsync`, `sendAsync`,
+`callAsync` und `publishLatest` (wartet nie: der Wert ersetzt einen älteren, noch nicht gesendeten desselben Topics; ein
+Sende-Thread schickt immer den neuesten, sobald der letzte Request durch ist). Listener und Topic-Handler laufen nacheinander auf dem Callback-Thread des Clients, in der Reihenfolge,
 in der die Nachrichten kamen. Command-Handler laufen auf eigenen virtuellen Threads.
 
 ## Builder
@@ -74,7 +77,8 @@ in der die Nachrichten kamen. Command-Handler laufen auf eigenen virtuellen Thre
 Handler – mit `task.respond(...)` antworten), `onResponse`, `onProgress`, `onError`, `onClose` (läuft am Anfang von
 `close()`, noch verbunden).
 
-**Methoden:** `send`, `broadcast`, `subscribe` (gibt eine `Subscription` mit `close()`), `publish`, `hostCommand`
+**Methoden:** `send`, `broadcast`, `subscribe` (gibt eine `Subscription` mit `close()`; mit `true` als viertem
+Argument nur das neueste Event pro Absender), `publish`, `publishLatest`, `hostCommand`
 (gibt ein `HostedCommand` mit `close()`), `call` / `callAsync` / `callNoWait`, `getCommands`, `createRealm`,
 `joinRealm`, `leaveRealm`, `getRealmInfo`, `getMe`, `raw(pfad, body)` für jeden anderen Endpunkt, `connect`,
 `waitForConnection`, `close`.
@@ -85,7 +89,7 @@ Handler – mit `task.respond(...)` antworten), `onResponse`, `onProgress`, `onE
 python extensions/java/run_tests.py
 ```
 
-Kompiliert die Bibliothek und startet einen echten Bridge-Server. Dagegen laufen 39 Checks: JSON, Topics und
-Batch-Poll, alle Nachrichten-Modi, Commands (Fehler, Timeout, späte Antwort, 10 parallele Aufrufe),
+Kompiliert die Bibliothek und startet einen echten Bridge-Server. Dagegen laufen 46 Checks: JSON, Topics und
+Batch-Poll, `publishLatest` und `subscribe` mit nur dem neuesten Event, alle Nachrichten-Modi, Commands (Fehler, Timeout, späte Antwort, 10 parallele Aufrufe),
 Session-Erneuerung, feste Identität, Abo vor der Verbindung, Server-Reset (neu registrieren und wiederherstellen),
 Aufräumen.

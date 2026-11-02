@@ -6,8 +6,9 @@ return {
 	Label = "A",
 	-- Both games must use the same topic
 	Topic = "playersync",
-	-- Snapshots per second. 3 + the polling stays far below Roblox's 500 HTTP requests per minute.
-	SendRate = 3,
+	-- Seconds between two polls. Every poll sends the newest own state and fetches the others' (0.15 = 400 HTTP
+	-- requests per minute, Roblox allows 500 per game server)
+	PollInterval = 0.15,
 	-- Moves the NPCs of the other game (e.g. Vector3.new(0, 0, 60) to put them next to your own map)
 	Offset = Vector3.new(0, 0, 0),
 	-- Studio only: always the same Bridge client instead of a new one per play test (32+ characters)

@@ -89,6 +89,92 @@ local used = B:GetStats().Requests - before
 check("30 events reach B with only a few poll requests (batch poll)", #gotB == 30 and used <= 12, string.format("%d events, %d requests", #gotB, used))
 -- endregion
 
+-- region PublishLatest + Subscribe Latest (only the newest state counts)
+check("server allows publishes inside a poll (limits.max_poll_publishes)", A.Limits.max_poll_publishes == 10, A.Limits.max_poll_publishes)
+local function increasing(list)
+	for index = 2, #list do
+		if list[index] <= list[index - 1] then
+			return false
+		end
+	end
+	return true
+end
+local allB, newestB = {}, {}
+local subAll = B:Subscribe(nil, "pos", function(data) table.insert(allB, data.n) end)
+local subNewest = B:Subscribe(nil, "pos", function(data) table.insert(newestB, data.n) end, { Latest = true })
+task.wait(0.3)
+for n = 1, 20 do
+	A:Publish(nil, "pos", { n = n })
+end
+waitFor(function() return #allB >= 20 end, 5)
+task.wait(0.3)
+check("Subscribe: a normal handler gets all 20 events", #allB == 20 and increasing(allB), #allB)
+check("Subscribe Latest: only the newest of each poll (fewer, in order, ends with 20)",
+	#newestB < 20 and #newestB >= 1 and newestB[#newestB] == 20 and increasing(newestB), table.concat(newestB, ","))
+subAll:Disconnect()
+
+-- both stream their state 30 times per second for 2 s: values go out with the polls, old ones are replaced
+local newestA = {}
+local subA = A:Subscribe(nil, "pos", function(data) table.insert(newestA, data.n) end, { Latest = true })
+table.clear(newestB)
+task.wait(0.5)
+local requestsA, requestsB = A:GetStats().Requests, B:GetStats().Requests
+local started = os.clock()
+local n = 0
+while os.clock() - started < 2 do
+	n += 1
+	A:PublishLatest(nil, "pos", { n = n })
+	B:PublishLatest(nil, "pos", { n = n })
+	task.wait(1 / 30)
+end
+local streamed = n
+task.wait(0.8)
+requestsA, requestsB = A:GetStats().Requests - requestsA, B:GetStats().Requests - requestsB
+check("PublishLatest: the newest value arrives on both sides", newestA[#newestA] == streamed and newestB[#newestB] == streamed,
+	tostring(newestA[#newestA]) .. "/" .. tostring(newestB[#newestB]) .. " of " .. streamed)
+check("PublishLatest: never an older value after a newer one", increasing(newestA) and increasing(newestB))
+check("PublishLatest: only the newest went out (fewer values than published)", #newestB < streamed * 0.6, #newestB .. " of " .. streamed)
+check("PublishLatest: sending + receiving in about one request per PollInterval (publish inside the poll)",
+	requestsA <= 2.8 / A.PollInterval + 3 and requestsB <= 2.8 / B.PollInterval + 3 and not A._noPiggyback,
+	string.format("A %d, B %d requests in 2.8 s", requestsA, requestsB))
+check("PublishLatest: about 4 values per second arrive (PollInterval 0.25)", #newestB >= 6, #newestB)
+
+-- an older Bridge server ignores "publish" in a poll: the client notices it and sends separately
+local original = Bridge.Client._request
+A._request = function(self, path, body, options)
+	if type(body) == "table" then
+		body.publish = nil
+	end
+	return original(self, path, body, options)
+end
+table.clear(newestB)
+started = os.clock()
+while os.clock() - started < 1.5 do
+	n += 1
+	A:PublishLatest(nil, "pos", { n = n })
+	B:PublishLatest(nil, "pos", { n = n })
+	task.wait(1 / 30)
+end
+task.wait(1)
+check("older server: values still arrive (separately), the newest last", A._noPiggyback and newestB[#newestB] == n
+	and increasing(newestB), tostring(newestB[#newestB]) .. " / " .. n)
+A._request = nil
+A._noPiggyback = false
+A.Limits.max_poll_publishes = nil
+table.clear(newestB)
+A:PublishLatest(nil, "pos", { n = n + 1 })
+check("without poll publishes (Limits) PublishLatest sends on its own", waitFor(function() return newestB[#newestB] == n + 1 end, 3),
+	newestB[#newestB])
+A.Limits.max_poll_publishes = 10
+local ok, err = pcall(A.PublishLatest, A, nil, "pos", nil)
+check("PublishLatest without data -> error", not ok and string.find(tostring(err), "nil", 1, true) ~= nil, err)
+ok, err = pcall(A.PublishLatest, A, nil, "pos", { f = function() end })
+check("PublishLatest with data that is no JSON -> error at once (never inside a poll)", not ok
+	and string.find(tostring(err), "ARGUMENT_ERROR", 1, true) ~= nil and next(A._latest) == nil, err)
+subA:Disconnect()
+subNewest:Disconnect()
+-- endregion
+
 -- region direct messages
 local inbox = {}
 B.MessageReceived:Connect(function(message) table.insert(inbox, message) end)

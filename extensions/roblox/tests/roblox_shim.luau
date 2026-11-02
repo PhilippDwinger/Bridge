@@ -8,12 +8,16 @@
 local net = require("@lune/net")
 local serde = require("@lune/serde")
 local luneTask = require("@lune/task")
+local process = require("@lune/process")
 
 local shim = {
 	requests = 0,
 	httpDisabled = false,
 	closeHandlers = {},
 	log = {},
+	-- BRIDGE_SIM_LATENCY (seconds): one way through the internet, added before and after every request - like a
+	-- Bridge server behind Tailscale Funnel instead of one on the same computer
+	latency = tonumber(process.env.BRIDGE_SIM_LATENCY) or 0,
 }
 
 -- Roblox globals
@@ -62,12 +66,18 @@ function HttpService:RequestAsync(request)
 	if shim.onRequest then
 		shim.onRequest(request)
 	end
+	if shim.latency > 0 then
+		luneTask.wait(shim.latency)
+	end
 	local ok, response = pcall(net.request, {
 		url = request.Url,
 		method = request.Method,
 		headers = request.Headers,
 		body = request.Body,
 	})
+	if shim.latency > 0 then
+		luneTask.wait(shim.latency)
+	end
 	if not ok then
 		error("HttpError: ConnectFail (" .. tostring(response) .. ")", 2)
 	end

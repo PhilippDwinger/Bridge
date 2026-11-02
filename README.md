@@ -215,6 +215,15 @@ message ends the batch (fetch its chunks first). With `wait_seconds` it waits fo
 clients with a request budget, e.g. Roblox game servers (500 HTTP requests per minute) that get many small events.
 Without `max_messages` the answer is the same as always.
 
+### Publish inside a poll
+
+`/message/poll` can also take `"publish": [...]` – up to 10 topic publishes, each like `/realm/topic/publish`
+(`realm_address`, `topic`, `content`, optional `mode`, `include_self`). They are done first, then the poll runs as
+usual. The answer gets `"published"` with one result per entry; a failed entry has `{"topic", "error"}` and does not
+stop the others or the poll. So a client with a request budget sends its newest state and gets the others' in ONE
+request (Roblox: 7 player updates per second in both directions instead of 3–4). The Roblox extension does this by
+itself with `PublishLatest`; an older Bridge server answers without `published`, then it publishes separately.
+
 ## Conversations
 
 Like a stream in Wireshark: all messages with the same `conversation_id` in order – who, when, how big, which way,
@@ -579,8 +588,8 @@ conversations across servers. `e2e_routing.py` starts three servers and breaks o
 broken unicode, huge bodies), limits, planned messages over a restart and a backup that is too big.
 `e2e_bugfixes.py` checks the fixes of the bug hunt of 01.11.2026 (nesting, number overflow, budgets, login and admin
 locks, codes, roles, BridgeExpress budget, BridgeFriends during a restore, fake hello, big backup).
-`e2e_roblox.py` checks what the Roblox extension needs: batch poll (`max_messages`), `include_self`, `/client/delete`
-and the limits in `/server/status`.
+`e2e_roblox.py` checks what the Roblox extension needs: batch poll (`max_messages`), `include_self`, `/client/delete`,
+publish inside a poll (`publish`) and the limits in `/server/status`.
 `e2e_friends.py` starts A ↔ B (trusted) and C (neutral) and checks friendships with name / code + password, wrong
 passwords and guessing, manual accept, friend messages in all modes, faked tokens and connections, status (presence,
 idle, slow line, waiting messages), the block list, `friends_mode`, removing and a restart with backup.

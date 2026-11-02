@@ -10,7 +10,6 @@ return {
 	StudioSecret = Config.StudioSecret,
 	Label = Config.Label,
 	Topic = Config.PlayerTopic,
-	SendRate = 3,
 	Offset = Vector3.zero,
 	Debug = Config.Debug,
 }

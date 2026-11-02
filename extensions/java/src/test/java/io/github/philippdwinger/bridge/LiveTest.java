@@ -125,6 +125,38 @@ public final class LiveTest {
                 gotB.size() + " events, " + (b.requestCount() - before) + " requests");
         // endregion
 
+        // region publishLatest + subscribe latest (only the newest state counts)
+        BridgeClient lazy = BridgeClient.builder(url).name("Slow poller").pollIntervalMillis(700).build();
+        check("slow poller connects", lazy.waitForConnection(Duration.ofSeconds(10)), lazy.state());
+        List<Long> all = new CopyOnWriteArrayList<>();
+        List<Long> newest = new CopyOnWriteArrayList<>();
+        BridgeClient.Subscription subAll = lazy.subscribe(null, "pos", (data, event) -> all.add(Json.asLong(Json.asMap(data).get("n"), -1)));
+        BridgeClient.Subscription subNewest = lazy.subscribe(null, "pos", (data, event) -> newest.add(Json.asLong(Json.asMap(data).get("n"), -1)), true);
+        Thread.sleep(800);
+        for (int n = 1; n <= 20; n++) {
+            a.publish(null, "pos", Json.obj("n", n));
+        }
+        waitFor(() -> all.size() >= 20, 5);
+        Thread.sleep(300);
+        check("subscribe: a normal handler gets all 20 events", all.size() == 20 && increasing(all), all);
+        check("subscribe latest: only the newest of each poll (fewer, in order, ends with 20)", newest.size() < 20 && !newest.isEmpty()
+                && newest.get(newest.size() - 1) == 20 && increasing(newest), newest);
+        subAll.close();
+        newest.clear();
+        long requestsA = a.requestCount();
+        for (int n = 1; n <= 300; n++) {
+            a.publishLatest(null, "pos", Json.obj("n", n));
+        }
+        check("publishLatest: the newest value arrives", waitFor(() -> !newest.isEmpty() && newest.get(newest.size() - 1) == 300, 5), newest);
+        Thread.sleep(300);
+        check("publishLatest: never an older value after a newer one", increasing(newest), newest);
+        check("publishLatest: only the newest went out (far fewer requests than values)", a.requestCount() - requestsA < 100,
+                (a.requestCount() - requestsA) + " requests for 300 values");
+        check("publishLatest without data -> NullPointerException", throwsOn(() -> a.publishLatest(null, "pos", null)), "");
+        subNewest.close();
+        lazy.close();
+        // endregion
+
         // region direct messages
         List<BridgeClient.Message> inbox = new CopyOnWriteArrayList<>();
         List<BridgeClient.Message> replies = new CopyOnWriteArrayList<>();
@@ -284,6 +316,15 @@ public final class LiveTest {
         }
         check("no unexpected background errors", unexpected.isEmpty(), unexpected);
         // endregion
+    }
+
+    private static boolean increasing(List<Long> values) {
+        for (int index = 1; index < values.size(); index++) {
+            if (values.get(index) <= values.get(index - 1)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean throwsOn(Runnable action) {

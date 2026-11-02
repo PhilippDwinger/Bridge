@@ -11,10 +11,16 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local serde = require("@lune/serde")
 local roblox = require("@lune/roblox")
-local Bridge = require("../src/Bridge")
+local DateTime = require("@lune/datetime")
+-- BRIDGE_SIM_MODULE / BRIDGE_SIM_SCRIPT: other versions of Bridge.luau / PlayerSync (to compare old and new)
+local Bridge = if process.env.BRIDGE_SIM_MODULE then (require)(process.env.BRIDGE_SIM_MODULE) else require("../src/Bridge")
 
 local URL, LABEL = process.args[1], process.args[2]
 local scenario = serde.decode("json", process.args[3])
+
+local function wall() -- seconds, the same clock for both game processes
+	return DateTime.now().unixTimestampMillis / 1000
+end
 local Instance, Vector3, CFrame, Enum = roblox.Instance, roblox.Vector3, roblox.CFrame, roblox.Enum
 
 -- region fake Roblox around the script
@@ -77,7 +83,8 @@ local Players = {
 }
 shim.services.Players = Players
 local configs = {
-	PlayerSyncConfig = { Server = URL, Label = LABEL, Topic = "playersync-sim", SendRate = 3, Offset = Vector3.zero,
+	PlayerSyncConfig = { Server = URL, Label = LABEL, Topic = "playersync-sim", SendRate = 3, PollInterval = 0.15,
+		Offset = Vector3.zero,
 		StudioSecret = "simulated-studio-secret-0123456789abcdef", Debug = false },
 }
 shim.services.ServerStorage = {
@@ -114,7 +121,7 @@ for _, userId in ipairs(scenario.players) do
 	addPlayer(userId)
 end
 
-local source = fs.readFile("../examples/PlayerSync/PlayerSync.server.luau")
+local source = fs.readFile(process.env.BRIDGE_SIM_SCRIPT or "../examples/PlayerSync/PlayerSync.server.luau")
 local script = luau.load(source, { debugName = "PlayerSync", environment = env })
 task.spawn(script)
 
@@ -155,26 +162,55 @@ local function observe()
 	return result
 end
 
--- region simulation: players walk in circles; heartbeat at 30 fps; scenario events at their times
+-- region simulation: players walk in circles (16 studs/s); heartbeat at 30 fps; scenario events at their times
 local started = os.clock()
+local startedWall = wall()
 local observations = {}
+local track = {} -- {wall time, NPC name, x, z} every frame while tracking (to measure how smooth / current it is)
+local tracking = nil
 local nextEvent = 1
 local radius = 20
+local lastFrame = os.clock()
 while os.clock() - started < scenario.seconds do
-	local t = os.clock() - started
+	local t = wall() - startedWall
 	for index, player in ipairs(testPlayers) do
-		local angle = t * 0.8 + index
-		player.rootPart.CFrame = CFrame.new(Vector3.new(math.cos(angle) * radius, 3, math.sin(angle) * radius))
-			* CFrame.Angles(0, -angle, 0)
+		if process.env.BRIDGE_SIM_PATTERN == "zigzag" then
+			-- back and forth on a line at 16 studs/s, turning round every 1.5 s (the hardest case for prediction)
+			local phase = (t + index * 0.4) % 3
+			local x = if phase < 1.5 then -12 + phase * 16 else 12 - (phase - 1.5) * 16
+			player.rootPart.CFrame = CFrame.new(Vector3.new(x, 3, index * 6))
+			player.rootPart.AssemblyLinearVelocity = Vector3.new(if phase < 1.5 then 16 else -16, 0, 0)
+		else
+			local angle = t * 0.8 + index
+			player.rootPart.CFrame = CFrame.new(Vector3.new(math.cos(angle) * radius, 3, math.sin(angle) * radius))
+				* CFrame.Angles(0, -angle, 0)
+			player.rootPart.AssemblyLinearVelocity = Vector3.new(-math.sin(angle) * radius * 0.8, 0, math.cos(angle) * radius * 0.8)
+		end
 		player.rootPart.Position = player.rootPart.CFrame.Position -- Roblox derives it, Lune does not
 	end
+	local frame = os.clock()
+	local frameWall = wall() -- the NPCs are placed for this moment
 	for _, callback in ipairs(heartbeat) do
-		callback(1 / 30)
+		callback(frame - lastFrame)
+	end
+	lastFrame = frame
+	if tracking and t <= tracking then
+		local folder = remoteFolder()
+		for _, serverFolder in ipairs(folder and folder:GetChildren() or {}) do
+			for _, model in ipairs(serverFolder:GetChildren()) do
+				local rootPart = model:FindFirstChild("HumanoidRootPart")
+				if rootPart then
+					table.insert(track, { frameWall, model.Name, rootPart.CFrame.Position.X, rootPart.CFrame.Position.Z })
+				end
+			end
+		end
 	end
 	local event = scenario.events[nextEvent]
 	if event and t >= event.at then
 		nextEvent += 1
-		if event.action == "observe" then
+		if event.action == "track" then
+			tracking = event.at + event.seconds
+		elseif event.action == "observe" then
 			observations[event.name] = observe()
 		elseif event.action == "leave" then
 			for index, player in ipairs(testPlayers) do
@@ -193,5 +229,6 @@ end
 -- endregion
 
 print("OBSERVATIONS " .. serde.encode("json", { label = LABEL, observations = observations, avatars = avatarsBuilt,
-	requests = shim.requests, minutes = (os.clock() - started) / 60 }))
+	requests = shim.requests, minutes = (os.clock() - started) / 60, startedWall = startedWall, track = track,
+	players = scenario.players }))
 process.exit(0)

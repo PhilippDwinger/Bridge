@@ -13,6 +13,9 @@ Was das Modul automatisch macht:
 - **Empfangen** im Hintergrund per Long Polling, bis zu 50 Nachrichten pro Anfrage
 - **safe**-Nachrichten: Chunks holen, SHA-256 prüfen, bestätigen – **compressed**: Base64 + zlib in Luau entpacken
 - **Senden**: `auto` = `fast` wenn klein, sonst `safe` (große Inhalte gehen von selbst)
+- **Nur der neueste Stand** (`PublishLatest` / `Subscribe` mit `Latest`): für Zustände, die sich dauernd ändern
+  (Positionen …). Der neueste Wert fährt im selben Request wie die nächste Abfrage mit, Ältere werden ersetzt bzw.
+  übersprungen – nie wird ein Rückstand abgearbeitet.
 - **HTTP-Limit**: Roblox erlaubt 500 Anfragen pro Minute pro Spielserver – alle Bridge-Clients zusammen nutzen höchstens
   400 (einstellbar mit `Bridge.SetRequestBudget`)
 - **Herunterfahren** (`game:BindToClose`): kurzlebige Clients werden auf dem Bridge-Server gelöscht, die anderen melden
@@ -60,7 +63,7 @@ end)
 print(client:Call("add", { a = 1, b = 2 })) --> 3
 ```
 
-Alle Methoden warten (yielden) bis zur Antwort und werfen bei Fehlern – mit `pcall` abfangen, wenn nötig.
+Alle Methoden außer `PublishLatest` warten (yielden) bis zur Antwort und werfen bei Fehlern – mit `pcall` abfangen, wenn nötig.
 
 ## Bridge.new(options)
 
@@ -85,8 +88,9 @@ Alle Methoden warten (yielden) bis zur Antwort und werfen bei Fehlern – mit `p
 |---|---|
 | `client:Send(ip, content, options?)` | direkte Nachricht. `options.Mode`: `auto` (Standard), `fast`, `safe`, `compressed`, `temporary`; `ConversationId`, `ExpiresInSeconds`, `SendInSeconds`, … |
 | `client:Broadcast({ip, ...}, content, options?)` | dieselbe Nachricht an viele |
-| `client:Subscribe(realm, topic, handler)` | `handler(data, event)`; gibt ein Objekt mit `:Disconnect()` zurück |
+| `client:Subscribe(realm, topic, handler, options?)` | `handler(data, event)`; gibt ein Objekt mit `:Disconnect()` zurück. `options.Latest = true`: pro Absender nur das **neueste** Event – ältere, die noch warten, werden übersprungen |
 | `client:Publish(realm, topic, data, options?)` | an alle Abonnenten (nicht an sich selbst, außer `IncludeSelf = true`) |
+| `client:PublishLatest(realm, topic, data, options?)` | nur der **neueste** Wert zählt: wartet nicht, ersetzt einen noch nicht gesendeten älteren Wert desselben Topics. Fährt mit der nächsten Abfrage mit (ein Request für Senden + Empfangen); solange Werte kommen, fragt der Client alle `PollInterval` Sekunden. Ältere Bridge-Server: eigener Request |
 | `client:HostCommand(realm, name, handler, options?)` | `handler(args, task)` gibt die Antwort zurück; Fehler → Aufrufer bekommt `COMMAND_FAILED`. `options`: `Description`, `Signature`, `AllowedRoles`. Gibt `{Remove = function}` |
 | `client:Call(name, args, options?)` | wartet auf die Antwort. `options`: `Realm`, `Timeout` (20), `Strategy`, `Progress`, `Async` (gibt nur die Task-ID, Antwort kommt als `ResponseReceived`) |
 | `client:CreateRealm(typ, name, options?)` / `client:JoinRealm(spec)` / `client:LeaveRealm(realm)` | Realms (`spec`: Adresse oder `{Realm, AccessKey}` oder `{Code, ServerUrl}`) |
@@ -110,11 +114,23 @@ Alle Methoden warten (yielden) bis zur Antwort und werfen bei Fehlern – mit `p
 
 ## Test: PlayerSync (Spieler von Spiel A als NPCs in Spiel B und umgekehrt)
 
-`examples/PlayerSync/PlayerSync.server.luau`: jeder Spielserver ist **ein** Bridge-Client, schickt 3× pro Sekunde
-seine Spieler (Position, Richtung, Tempo) an das Topic `playersync` im öffentlichen Realm und zeigt die Spieler aller
-**anderen** Spielserver als NPCs (echter Avatar, Name „DisplayName · A“, Lauf-Animation, weich zwischen den Updates).
-Verlässt ein Spieler das Spiel, verschwindet sein NPC; fährt ein Server herunter, sagt er „bye“ und alle seine NPCs
-verschwinden sofort (sonst nach 6 Sekunden ohne Update). Verbrauch: ~350 HTTP-Anfragen pro Minute (Limit 500).
+`examples/PlayerSync/PlayerSync.server.luau`: jeder Spielserver ist **ein** Bridge-Client, schickt seine Spieler
+(Position, Geschwindigkeit, Richtung) an das Topic `playersync` im öffentlichen Realm und zeigt die Spieler aller
+**anderen** Spielserver als NPCs (echter Avatar, Name „DisplayName · A“, Lauf-Animation). Verlässt ein Spieler das
+Spiel, verschwindet sein NPC; fährt ein Server herunter, sagt er „bye“ und alle seine NPCs verschwinden sofort (sonst
+nach 6 Sekunden ohne Update).
+
+**Flüssig und immer aktuell:**
+
+- Die eigenen Spieler werden 20× pro Sekunde gemessen, raus geht nur der **neueste** Stand (`PublishLatest`) – mit
+  jeder Abfrage, also etwa 7× pro Sekunde, im selben Request, der die anderen holt. Verbrauch ~400 HTTP-Anfragen pro
+  Minute (Limit 500).
+- Gezeigt wird nur der **neueste** Stand (`Subscribe` mit `Latest` + Zeitstempel): ältere Snapshots werden
+  übersprungen, nie nachgespielt.
+- Zwischen zwei Snapshots läuft der NPC mit der gesendeten Geschwindigkeit weiter (Vorhersage, höchstens 0,35 s),
+  Abweichungen werden in 0,1 s weich ausgeglichen – kein Stop-and-go.
+- Gemessen (Bridge 60 ms entfernt): NPCs ~0,13 s hinter dem echten Spieler, Tempo gleichmäßig (vorher ~0,45 s und
+  Stop-and-go). Bei einer Vollbremsung mit Umdrehen läuft der NPC kurz bis zu ~3 Studs weiter und gleitet zurück.
 
 1. **Bridge-Server:** in BridgeControll läuft der Server **Roblox-Game-Sync** (Tailscale, Port 443) →
    `https://muttchen.tail91b057.ts.net`. Steht in `examples/PlayerSync/config/A.luau` und `B.luau` als `Server`.
@@ -144,6 +160,8 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
 - **Spieler:** Das Script `PlayerSync` (dasselbe wie im Testspiel) teilt sich den Bridge-Client mit der Welt
   (`MinecraftWorldClient`). Minecraft-Spieler erscheinen mit einem Roblox-Avatar, Roblox-Spieler in Minecraft als
   Mannequins mit Minecraft-Aussehen. Lauftempo 13 und Sprunghöhe 4,5 passen zu Minecraft (1 Block hoch springen).
+  Der gemeinsame Client fragt alle 0,15 s (eigene Spieler raus, Minecraft-Spieler und Blöcke rein, ein Request) und darf
+  460 der 500 HTTP-Anfragen pro Minute nutzen – im Spiel nutzt sonst nichts HttpService.
 - Die Spieler spawnen erst, wenn die Welt da ist, und zwar auf dem Minecraft-Spawn. Antwortet Minecraft 15 Sekunden
   lang nicht, warten sie auf einer Plattform hoch oben.
 
@@ -164,11 +182,14 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
 ```
 
 - `test_units.luau` – SHA-256, Base64 und zlib gegen Python (40 Testvektoren, alle zlib-Stufen)
-- `test_live.luau` – zwei Clients: Topics, Batch-Poll, direkte Nachrichten (fast/safe/compressed/auto), Commands
+- `test_live.luau` – zwei Clients: Topics, Batch-Poll, `PublishLatest` / `Subscribe` mit `Latest` (auch mit einem
+  älteren Bridge-Server), direkte Nachrichten (fast/safe/compressed/auto), Commands
   (Fehler, Timeout, späte Antwort, Async), Session-Erneuerung, `SESSION_INVALID`, feste Identität, Server-Reset
   (Neu-Registrierung + Wiederherstellen), Aufräumen, HTTP aus, Server weg, HTTP-Budget, Herunterfahren
 - PlayerSync-Simulation: das **echte** Script als Spiel A und B in zwei Prozessen (Lunes Roblox-Instanzen,
-  simulierte Spieler) – NPCs erscheinen, laufen mit, verschwinden beim Verlassen und beim „bye“
+  simulierte Spieler) – NPCs erscheinen, laufen mit, verschwinden beim Verlassen und beim „bye“. Dazu eine Messung:
+  Spiel A läuft Kreise, Spiel B verfolgt die NPCs jedes Frame, Bridge 60 ms entfernt (`BRIDGE_SIM_LATENCY`) – wie weit
+  hinter dem echten Spieler und wie gleichmäßig
 - `sim_game.luau` – Lasttest: Anfragen pro Minute und Verzögerung zweier Spielserver
 - `sim_minecraftworld.luau` – die **echten** Scripts MinecraftWorld und PlayerSync gegen einen echten Bridge-Server
   **und einen echten Minecraft-Server mit der Mod** (braucht beide laufend; so in der Cloud getestet): 25 Chunks = 25
