@@ -97,6 +97,7 @@ Some errors add `"details"` for you, e.g. `{"problems": ["args.a: expected numbe
 | `/client/register` | `name`, `password`, optional `identity_secret` (32+ characters) | `client_ip`, `stable_identity` |
 | `/client/login` | `client_ip`, `password` | `session_token`, `expires_at`, `remaining_minutes` |
 | `/client/logout` | `session_token` | |
+| `/client/delete` | `session_token`, `password` | `deleted` – the client removes itself for good (realms, topics, commands, mailbox) |
 | `/client/me` | `session_token` | `client_ip`, `name`, `realms`, `direct_policy` |
 | `/client/direct` | `session_token`, optional `mode` (`everyone`/`allowlist`/`nobody`), `allow`, `block` | the direct message settings |
 
@@ -205,6 +206,14 @@ or `expired` (for 60 minutes, also across servers; relayed messages show `unknow
 5. `/message/cancel` with `pending_id` puts the message back into the mailbox. Without complete or cancel, it goes back by itself after 15 minutes.
 
 Messages expire after 10 minutes if nobody polls them (or after their own lifetime).
+
+### Many messages per poll
+
+`/message/poll` with `"max_messages": 1..100` answers `{"messages": [...], "count"}` – every item looks like the
+answer of a normal poll. It takes one-piece messages (fast / temporary) one after the other; a safe or compressed
+message ends the batch (fetch its chunks first). With `wait_seconds` it waits for the first one as usual. Made for
+clients with a request budget, e.g. Roblox game servers (500 HTTP requests per minute) that get many small events.
+Without `max_messages` the answer is the same as always.
 
 ## Conversations
 
@@ -431,6 +440,9 @@ content `{"realm_address", "topic", "data"}` – on any trusted server. Subscrib
 | protected | members | members (only the owner if `restricted_to_owner`) |
 | private | members | owner + roles with `can_publish` |
 
+`/realm/topic/publish` takes `realm_address`, `topic`, `content`, optional `mode` (default `fast`) and
+`include_self` (default `true`): with `false` a publisher that subscribed the topic itself does not get its own event.
+
 ## Connecting Bridge servers
 
 Two servers only talk to each other when **both** admins added the other URL:
@@ -539,6 +551,8 @@ python tests/e2e_routing.py
 python tests/e2e_hardening.py
 python tests/e2e_friends.py
 python tests/e2e_bugfixes.py
+python tests/e2e_roblox.py
+python extensions/roblox/tests/run_tests.py   # needs Lune 0.8.9, see extensions/roblox/README.md
 ```
 
 The first test starts two real servers and checks messages, realms, commands, trust, restart and brute force.
@@ -564,6 +578,8 @@ conversations across servers. `e2e_routing.py` starts three servers and breaks o
 broken unicode, huge bodies), limits, planned messages over a restart and a backup that is too big.
 `e2e_bugfixes.py` checks the fixes of the bug hunt of 01.11.2026 (nesting, number overflow, budgets, login and admin
 locks, codes, roles, BridgeExpress budget, BridgeFriends during a restore, fake hello, big backup).
+`e2e_roblox.py` checks what the Roblox extension needs: batch poll (`max_messages`), `include_self`, `/client/delete`
+and the limits in `/server/status`.
 `e2e_friends.py` starts A ↔ B (trusted) and C (neutral) and checks friendships with name / code + password, wrong
 passwords and guessing, manual accept, friend messages in all modes, faked tokens and connections, status (presence,
 idle, slow line, waiting messages), the block list, `friends_mode`, removing and a restart with backup.

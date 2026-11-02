@@ -78,6 +78,19 @@ async def logout(payload: dict):
     return {"logged_out": True}
 
 
+@Router.post("/delete")
+async def delete(payload: dict):
+    # A client removes itself for good (e.g. a Roblox game server that shuts down): leaves its realms, topics and
+    # commands, its mailbox and IP are gone. The password is asked again, a stolen session alone is not enough.
+    client_key = authenticate(payload)
+    password = get_field(payload, "password", str)
+    _, hashed_password = clients.get_login_data(clients.get_client_ip(client_key))
+    if hashed_password is None or not await run_in_threadpool(verify_password, password, hashed_password):
+        fail(Exceptions.INVALID_CREDENTIALS, "Wrong password")
+    check(clients.delete_client(client_key))
+    return {"deleted": True}
+
+
 @Router.post("/me")
 async def me(payload: dict):
     client_key = authenticate(payload)

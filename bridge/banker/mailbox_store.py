@@ -15,7 +15,10 @@ def set_mailbox(client_key, mailbox):
 
 def remove_mailbox(client_key):
     mailbox_storage.pop(client_key, None)
-    _signals.pop(client_key, None)
+    # A poll that waits right now returns at once (with an error) instead of hanging until its wait is over
+    signal = _signals.pop(client_key, None)
+    if signal is not None:
+        signal.set()
 
 def get_signal(client_key):
     signal = _signals.get(client_key)
@@ -39,6 +42,8 @@ def wake_all_for_shutdown():
 
 def reset():
     mailbox_storage.clear()
+    for signal in _signals.values():
+        signal.set()   # waiting polls notice the reset at once
     _signals.clear()
 
 

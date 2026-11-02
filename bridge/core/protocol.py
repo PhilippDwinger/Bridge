@@ -104,6 +104,9 @@ login_host_attempt_multiplier = 12
 # Pull only: Bridge never sends anything to a client by itself. A client can ask and wait up to
 # this long for something to arrive (long polling) - it is still the client's request.
 max_wait_seconds = 25
+# One poll can take several one-piece messages at once ("max_messages"), so clients with a request budget
+# (e.g. Roblox game servers: 500 HTTP requests per minute) still keep up with many small events.
+max_poll_messages = 100
 
 # Commands: hosts without any request for this long are only used if no active host exists
 host_inactive_seconds = 120

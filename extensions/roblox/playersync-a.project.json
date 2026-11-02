@@ -1,0 +1,19 @@
+{
+  "name": "Bridge PlayerSync A",
+  "tree": {
+    "$className": "DataModel",
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": { "HttpEnabled": true }
+    },
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "Bridge": { "$path": "src/Bridge.luau" },
+      "PlayerSyncConfig": { "$path": "examples/PlayerSync/config/A.luau" }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "PlayerSync": { "$path": "examples/PlayerSync/PlayerSync.server.luau" }
+    }
+  }
+}

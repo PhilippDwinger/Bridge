@@ -16,7 +16,7 @@ from bridge.realm import service as realm_service
 # Event content: {"realm_address", "topic", "data"}
 
 
-async def publish(client_key, realm_address, topic, data, mode=MessageMode.FAST):
+async def publish(client_key, realm_address, topic, data, mode=MessageMode.FAST, include_self=True):
     publisher_ip = clients.get_client_ip(client_key)
     if publisher_ip is None:
         errors.handle_error(Exceptions.CLIENT_NOT_FOUND)
@@ -42,7 +42,10 @@ async def publish(client_key, realm_address, topic, data, mode=MessageMode.FAST)
             return subscriber_ip, message
         return subscriber_ip, await router.deliver(message)
 
-    results = await asyncio.gather(*(deliver_to(ip) for ip in subscribers if isinstance(ip, str)))
+    # include_self=False: the publisher does not get its own event back (it is subscribed itself, e.g. every game
+    # server of a Roblox game publishes its players and listens to the others)
+    targets = [ip for ip in subscribers if isinstance(ip, str) and (include_self or ip != publisher_ip)]
+    results = await asyncio.gather(*(deliver_to(ip) for ip in targets))
     failed = [{"client_ip": ip, "error": get_exception_id(result)} for ip, result in results if is_exception(result)]
     return {
         "topic": topic,

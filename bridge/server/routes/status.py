@@ -65,5 +65,8 @@ async def get_server_status_dict() -> dict:
             "chunk_size_kib": protocol.current_protocol.chunk_size_kib,
             "max_fast_message_kib": protocol.current_protocol.max_fast_message_kib,
             "max_safe_message_kib": protocol.current_protocol.max_safe_message_kib,
+            "max_wait_seconds": protocol.max_wait_seconds,
+            "max_poll_messages": protocol.max_poll_messages,
+            "session_lifetime_minutes": protocol.session_lifetime_minutes,
         },
     }

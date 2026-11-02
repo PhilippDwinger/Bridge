@@ -197,5 +197,6 @@ async def publish(payload: dict):
         get_field(payload, "topic", str),
         payload.get("content"),
         get_field(payload, "mode", str, required=False, default="fast"),
+        include_self=get_field(payload, "include_self", bool, required=False, default=True),
     ))
 # endregion topics

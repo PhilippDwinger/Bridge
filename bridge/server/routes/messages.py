@@ -80,11 +80,13 @@ async def cancel_scheduled(payload: dict):
 async def poll(payload: dict):
     # Optional "content_types": ["direct"] or ["task", "response"] ... to poll only some pools.
     # Optional "wait_seconds" (max 25): keep the request open until a message arrives (long polling).
+    # Optional "max_messages" (1-100): take up to that many messages at once -> {"messages": [...], "count"}.
     client_key = authenticate(payload)
     return check(await messenger_service.poll_wait(
         client_key,
         get_field(payload, "content_types", list, required=False),
         get_field(payload, "wait_seconds", (int, float), required=False, default=0),
+        get_field(payload, "max_messages", int, required=False),
     ))
 
 

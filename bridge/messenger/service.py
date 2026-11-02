@@ -170,22 +170,49 @@ def poll(client_key, content_types=None):
         }
 
 
-async def poll_wait(client_key, content_types=None, wait_seconds=0):
-    """Poll that can wait for a message (long polling). Still only an answer to the client's own request."""
+def check_max_messages(max_messages):
+    if max_messages is None:
+        return None
+    if isinstance(max_messages, bool) or not isinstance(max_messages, int) or not 1 <= max_messages <= protocol.max_poll_messages:
+        errors.handle_error(Exceptions.ARGUMENT_ERROR, f"'max_messages' must be a whole number between 1 and {protocol.max_poll_messages}")
+        return Exceptions.ARGUMENT_ERROR
+    return max_messages
+
+
+def _poll_more(client_key, content_types, first, max_messages):
+    """Batch poll: after the first message, take more without waiting - one-piece messages only, a chunked one
+    (safe / compressed) ends the batch, because the client has to fetch its chunks first."""
+    items = [first]
+    while len(items) < max_messages and "pending_id" not in items[-1]:
+        result = poll(client_key, content_types)
+        if is_exception(result) or result.get("message") is None:
+            break
+        items.append(result)
+    return {"messages": items, "count": len(items)}
+
+
+async def poll_wait(client_key, content_types=None, wait_seconds=0, max_messages=None):
+    """Poll that can wait for a message (long polling). Still only an answer to the client's own request.
+    With max_messages: answer {"messages": [...], "count"} - each item looks like a single poll answer."""
     wait_seconds = check_wait_seconds(wait_seconds)
     if is_exception(wait_seconds):
         return wait_seconds
+    max_messages = check_max_messages(max_messages)
+    if is_exception(max_messages):
+        return max_messages
     loop = asyncio.get_running_loop()
     deadline = loop.time() + wait_seconds
     while True:
         # Reset the signal before looking, so nothing that arrives in between is missed
         mailbox_store.get_signal(client_key).clear()
         result = poll(client_key, content_types)
-        if is_exception(result) or result.get("message") is not None:
+        if is_exception(result):
             return result
+        if result.get("message") is not None:
+            return result if max_messages is None else _poll_more(client_key, content_types, result, max_messages)
         remaining = deadline - loop.time()
         if remaining <= 0 or mailbox_store.closing:
-            return result
+            return result if max_messages is None else {"messages": [], "count": 0}
         await wait_for_signal(client_key, remaining)
 
 
