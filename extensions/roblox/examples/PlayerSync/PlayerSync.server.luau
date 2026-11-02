@@ -158,7 +158,7 @@ local function setupModel(npc, model, server)
 	pcall(function()
 		humanoid.EvaluateStateMachine = false -- it is a puppet, no physics states
 	end)
-	rootPart.CFrame = npc.target
+	rootPart.CFrame = npc.target or rootPart.CFrame
 	npc.model = model -- from here on removing the NPC also removes the model
 	npc.rootPart = rootPart
 	model.Parent = server.folder
@@ -180,10 +180,15 @@ local function setupModel(npc, model, server)
 end
 
 local function createNpc(server, player)
-	local npc = {
+	return {
 		userId = player.u, name = tostring(player.n), display = tostring(player.d or player.n),
 		anim = nil, removed = false, model = nil, rootPart = nil, tracks = {}, target = nil, speed = 0, air = false,
 	}
+end
+
+-- Builds the avatar. Call it only when npc.target is set: for players without a Roblox avatar (e.g. from
+-- Minecraft) the model can be there at once, without any yield.
+local function buildNpc(server, npc, player)
 	server.npcs[player.u] = npc
 	task.spawn(function()
 		local model = buildModel(player.u) -- yields (loads the avatar)
@@ -196,7 +201,6 @@ local function createNpc(server, player)
 		end
 		setupModel(npc, model, server)
 	end)
-	return npc
 end
 
 local function onSnapshot(data, event)
@@ -221,11 +225,18 @@ local function onSnapshot(data, event)
 	for _, player in ipairs(data.players or {}) do
 		if type(player) == "table" and type(player.u) == "number" and type(player.p) == "table" then
 			seen[player.u] = true
-			local npc = server.npcs[player.u] or createNpc(server, player)
+			local npc = server.npcs[player.u]
+			local isNew = npc == nil
+			if isNew then
+				npc = createNpc(server, player)
+			end
 			local position = Vector3.new(player.p[1] or 0, player.p[2] or 0, player.p[3] or 0) + OFFSET
 			npc.target = CFrame.new(position) * CFrame.Angles(0, player.r or 0, 0)
 			npc.speed = player.s or 0
 			npc.air = player.a == true
+			if isNew then
+				buildNpc(server, npc, player)
+			end
 		end
 	end
 	for userId, npc in pairs(server.npcs) do

@@ -33,9 +33,9 @@ def wait_ready(url, seconds=30):
 
 def playersync(url):
     scenarios = {
-        "A": {"players": [101, 102, 103], "seconds": 17, "events": [
+        "A": {"players": [-101, -102, -103], "seconds": 17, "events": [
             {"at": 8, "action": "observe", "name": "t8"},
-            {"at": 10, "action": "leave", "userId": 103},
+            {"at": 10, "action": "leave", "userId": -103},
             {"at": 16, "action": "shutdown"}]},
         "B": {"players": [201, 202], "seconds": 19.5, "events": [
             {"at": 8, "action": "observe", "name": "t8"},
@@ -52,6 +52,7 @@ def playersync(url):
         if line is None:
             print(out)
         seen[label] = json.loads(line[len("OBSERVATIONS "):]) if line else {"observations": {}}
+        seen[label]["output"] = [l for l in out.splitlines() if not l.startswith("OBSERVATIONS ")]
     results = {"ok": 0, "fail": 0}
 
     def check(name, condition, info=""):
@@ -62,6 +63,8 @@ def playersync(url):
     a8 = (a.get("t8") or {}).get("servers", {})
     b8 = (b.get("t8") or {}).get("servers", {})
     check("game A shows the 2 players of game B as NPCs", len(a8.get("Server B", [])) == 2, a8)
+    check("players without a Roblox avatar (negative ids, like Minecraft) get one without errors",
+          not any("rror" in line or "Stack Begin" in line for line in seen["B"].get("output", [])), seen["B"].get("output"))
     check("game B shows the 3 players of game A as NPCs", len(b8.get("Server A", [])) == 3, b8)
     npcs = a8.get("Server B", []) + b8.get("Server A", [])
     check("NPCs are named 'DisplayName · Label', anchored, without scripts",
@@ -70,7 +73,7 @@ def playersync(url):
           npcs and all(abs((n["x"] ** 2 + n["z"] ** 2) ** 0.5 - 20) < 4 for n in npcs), [(n["x"], n["z"]) for n in npcs])
     b13 = (b.get("t13") or {}).get("servers", {})
     check("a player leaves game A -> its NPC is gone in game B", len(b13.get("Server A", [])) == 2
-          and not any("Player103" in n["name"] for n in b13.get("Server A", [])), b13)
+          and not any("Player-103" in n["name"] for n in b13.get("Server A", [])), b13)
     b18 = (b.get("t18") or {}).get("servers", {})
     check("game A shuts down -> 'bye', game B removes its NPCs at once (before the 6 s timeout)", "Server A" not in b18, b18)
     for label in ("A", "B"):
