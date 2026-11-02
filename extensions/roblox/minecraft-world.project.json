@@ -1,0 +1,50 @@
+{
+  "name": "Bridge MinecraftWorld",
+  "tree": {
+    "$className": "DataModel",
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": {
+        "HttpEnabled": true
+      }
+    },
+    "Players": {
+      "$className": "Players",
+      "$properties": {
+        "CharacterAutoLoads": false
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$properties": {
+        "CharacterWalkSpeed": 13,
+        "CharacterUseJumpPower": false,
+        "CharacterJumpHeight": 4.5
+      }
+    },
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "Bridge": {
+        "$path": "src/Bridge.luau"
+      },
+      "MinecraftWorldConfig": {
+        "$path": "examples/MinecraftWorld/Config.luau"
+      },
+      "MinecraftWorldClient": {
+        "$path": "examples/MinecraftWorld/Client.luau"
+      },
+      "PlayerSyncConfig": {
+        "$path": "examples/MinecraftWorld/PlayerSyncConfig.luau"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "MinecraftWorld": {
+        "$path": "examples/MinecraftWorld/MinecraftWorld.server.luau"
+      },
+      "PlayerSync": {
+        "$path": "examples/PlayerSync/PlayerSync.server.luau"
+      }
+    }
+  }
+}

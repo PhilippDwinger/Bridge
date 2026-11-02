@@ -128,6 +128,32 @@ verschwinden sofort (sonst nach 6 Sekunden ohne Update). Verbrauch: ~350 HTTP-An
 In Studio nutzt jedes Spiel immer denselben Bridge-Client (`StudioSecret` in der Config) – auf echten Servern bekommt
 jeder Server einen eigenen, der beim Herunterfahren gelöscht wird.
 
+## MinecraftWorld: die Minecraft-Welt in Roblox
+
+`examples/MinecraftWorld/` gehört zur Minecraft-Mod **BridgeGameSync**
+(`C:\Users\phili\Documents\Programmieren\Projekte\BridgeMinecraft`). Der Minecraft-Server ist ein Bridge-Client,
+und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben Bridge-Server.
+
+- **Welt:** Das Spiel holt sich die Blöcke um den Minecraft-Spawn mit den Commands `mcworld.info` und
+  `mcworld.chunks`. Jeder Block wird ein grauer Platzhalter-Würfel, 1 Block = 3 Studs, die unterste Minecraft-Schicht
+  liegt bei Höhe 0. Gleiche Nachbarblöcke werden zu großen Parts zusammengefasst, ein flacher Chunk ist dadurch
+  **ein** Part.
+- **Änderungen:** Was in Minecraft gesetzt oder abgebaut wird, kommt über das Topic `mcworld.changes`. Bei sehr vielen
+  Änderungen (`/fill`, Explosion) lädt das Spiel die betroffenen Chunks neu. Startet Minecraft neu oder war die
+  Verbindung weg, lädt es alles neu.
+- **Spieler:** Das Script `PlayerSync` (dasselbe wie im Testspiel) teilt sich den Bridge-Client mit der Welt
+  (`MinecraftWorldClient`). Minecraft-Spieler erscheinen mit einem Roblox-Avatar, Roblox-Spieler in Minecraft als
+  Mannequins mit Minecraft-Aussehen. Lauftempo 13 und Sprunghöhe 4,5 passen zu Minecraft (1 Block hoch springen).
+- Die Spieler spawnen erst, wenn die Welt da ist, und zwar auf dem Minecraft-Spawn. Antwortet Minecraft 15 Sekunden
+  lang nicht, warten sie auf einer Plattform hoch oben.
+
+So startest du es:
+
+1. Minecraft mit der Mod starten (Einzelspieler geht auch, der hat einen eigenen Server drin). Im Log steht
+   `Bridge connected as ...`, und `/bridge` im Spiel zeigt den Status.
+2. Roblox Studio → neue Baseplate. In einer CMD im Ordner `extensions\roblox`:
+   `rojo serve minecraft-world.project.json --port 34874` → im Rojo-Plugin Port 34874 → Connect → **Play**.
+
 ## Tests (ohne Roblox)
 
 `tests/` läuft mit [Lune](https://github.com/lune-org/lune) **0.8.9** (0.9/0.10 schicken die URL in einer Form, die
@@ -144,3 +170,7 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
 - PlayerSync-Simulation: das **echte** Script als Spiel A und B in zwei Prozessen (Lunes Roblox-Instanzen,
   simulierte Spieler) – NPCs erscheinen, laufen mit, verschwinden beim Verlassen und beim „bye“
 - `sim_game.luau` – Lasttest: Anfragen pro Minute und Verzögerung zweier Spielserver
+- `sim_minecraftworld.luau` – die **echten** Scripts MinecraftWorld und PlayerSync gegen einen echten Bridge-Server
+  **und einen echten Minecraft-Server mit der Mod** (braucht beide laufend; so in der Cloud getestet): 25 Chunks = 25
+  Parts, Spawn, Spieler spawnen erst mit Welt, `setblock` → Neuaufbau des Chunks, `/fill` → Chunk neu geladen,
+  Roblox-Spieler als Mannequin in Minecraft

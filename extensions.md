@@ -1,9 +1,9 @@
 # Bridge Extensions
 
 ## Roblox
-- Folder: [extensions/roblox](extensions/roblox/README.md) – ModuleScript `Bridge` (Luau, server only) + test game PlayerSync
-- Status: Ready to test
+- Folder: [extensions/roblox](extensions/roblox/README.md) – ModuleScript `Bridge` (Luau, server only) + games PlayerSync and MinecraftWorld
+- Status: Works (PlayerSync tested in Roblox Studio)
 
 ## Java
-- Repository: [BridgeExtension-Java](https://github.com/PhilippDwinger/BridgeExtension-Java)
-- Status: Planned
+- Folder: [extensions/java](extensions/java/README.md) – `BridgeClient` (Java 21+, no dependencies), used by the Minecraft mod BridgeGameSync
+- Status: Ready to test

@@ -553,6 +553,7 @@ python tests/e2e_friends.py
 python tests/e2e_bugfixes.py
 python tests/e2e_roblox.py
 python extensions/roblox/tests/run_tests.py   # needs Lune 0.8.9, see extensions/roblox/README.md
+python extensions/java/run_tests.py           # needs a JDK 21+ (javac)
 ```
 
 The first test starts two real servers and checks messages, realms, commands, trust, restart and brute force.

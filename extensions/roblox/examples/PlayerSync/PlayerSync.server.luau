@@ -7,6 +7,7 @@
 	and the other way round.
 
 	Needs in ServerStorage: the module "Bridge" and a ModuleScript "PlayerSyncConfig" (see config/A.luau).
+	Also used by the MinecraftWorld game: there the players of Minecraft come in the same format (topic "playersync").
 ]]
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -39,7 +40,8 @@ local ANIMATIONS = { -- by rig type name
 }
 
 -- region Bridge client (everything about the connection is done by the module)
-local client = Bridge.new({
+-- Config.Client: a client another script of this game already made (one Bridge client per game server), else our own
+local client = Config.Client or Bridge.new({
 	Server = Config.Server,
 	Name = "PlayerSync " .. LABEL .. (if IN_STUDIO then " (Studio)" else " " .. string.sub(game.JobId, 1, 8)),
 	-- Studio: always the same Bridge client (no new one per play test). Live servers: a new one per server that is

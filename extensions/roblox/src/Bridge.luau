@@ -739,6 +739,7 @@ function Client.new(options)
 	self._token = nil
 	self._tokenExpires = 0
 	self._connecting = false
+	self._restoring = false
 	self._polling = false
 	self._everConnected = false
 	self._fatal = nil
@@ -896,11 +897,16 @@ function Client:_doConnect()
 		self:_login()
 	end
 
-	self.State = "connected"
 	-- Realms / topics / commands this client should have (after a re-registration, or wished for before the first
-	-- connection was there): set them up (again). Doing it twice does no harm.
-	if next(self._realms) or #self._topics > 0 or #self._commands > 0 then
-		self:_restore()
+	-- connection was there): set them up (again) before anybody else uses the connection. Twice does no harm.
+	self._restoring = next(self._realms) ~= nil or #self._topics > 0 or #self._commands > 0
+	self.State = "connected"
+	if self._restoring then
+		local ok, err = pcall(self._restore, self)
+		self._restoring = false
+		if not ok then
+			self:_report(err)
+		end
 	end
 	self._everConnected = true
 	if oldIp and oldIp ~= self.ClientIp then
@@ -940,8 +946,14 @@ function Client:_connectLoop()
 	self._connecting = false
 end
 
-function Client:_ensureConnected(timeout)
-	if self.State == "connected" then
+-- After a (re)connect the client first sets up its realms / topics / commands again - only then it is ready.
+-- internal = the client's own restore requests, which run before that.
+function Client:_ready(internal)
+	return self.State == "connected" and (internal or not self._restoring)
+end
+
+function Client:_ensureConnected(timeout, internal)
+	if self:_ready(internal) then
 		return
 	end
 	if self.State == "destroyed" or self._destroying then
@@ -954,7 +966,7 @@ function Client:_ensureConnected(timeout)
 		task.spawn(self._connectLoop, self)
 	end
 	local deadline = os.clock() + (timeout or self.ConnectTimeout)
-	while self.State ~= "connected" do
+	while not self:_ready(internal) do
 		if self.State == "destroyed" then
 			raise("DESTROYED", "The client was destroyed", 0)
 		end
@@ -1007,7 +1019,7 @@ function Client:_request(path, body, options)
 	while true do
 		local token = nil
 		if auth then
-			self:_ensureConnected(options.timeout or self.ConnectTimeout)
+			self:_ensureConnected(options.timeout or self.ConnectTimeout, options.internal)
 			if os.time() >= self._tokenExpires - self.SessionMargin then
 				self:_renewSession()
 			end
@@ -1041,19 +1053,20 @@ end
 -- commands again. Already existing ones are fine.
 function Client:_restore()
 	for address, joinBody in pairs(self._realms) do
-		local ok, err = pcall(self._request, self, "/realm/join", table.clone(joinBody))
+		local ok, err = pcall(self._request, self, "/realm/join", table.clone(joinBody), { internal = true })
 		if not ok and not (isError(err) and err.Id == "ALREADY_EXISTS") then
 			self:_report(err)
 		end
 	end
 	for _, entry in ipairs(self._topics) do
-		local ok, err = pcall(self._request, self, "/realm/topic/subscribe", { topic = entry.topic }, { realmRef = entry.realmRef })
+		local ok, err = pcall(self._request, self, "/realm/topic/subscribe", { topic = entry.topic },
+			{ realmRef = entry.realmRef, internal = true })
 		if not ok then
 			self:_report(err)
 		end
 	end
 	for _, entry in ipairs(self._commands) do
-		local ok, err = pcall(self._createCommand, self, entry)
+		local ok, err = pcall(self._createCommand, self, entry, true)
 		if not ok and not (isError(err) and err.Id == "ALREADY_EXISTS") then
 			self:_report(err)
 		end
@@ -1316,13 +1329,13 @@ function Client:_send(recipientIp, content, options)
 	}, options), { nullField = "content" })
 end
 
-function Client:_createCommand(entry)
+function Client:_createCommand(entry, internal)
 	return self:_request("/realm/command/create", {
 		command_name = entry.name,
 		description = entry.options.Description,
 		signature = entry.options.Signature,
 		allowed_roles = entry.options.AllowedRoles,
-	}, { realmRef = entry.realmRef })
+	}, { realmRef = entry.realmRef, internal = internal })
 end
 
 local function isConnectionProblem(err)
