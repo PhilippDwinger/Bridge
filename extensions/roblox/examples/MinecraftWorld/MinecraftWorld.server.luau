@@ -33,7 +33,13 @@ local StarterPlayer = game:GetService("StarterPlayer")
 local Bridge = require(ServerStorage:WaitForChild("Bridge"))
 local Config = require(ServerStorage:WaitForChild("MinecraftWorldConfig"))
 local client = require(ServerStorage:WaitForChild("MinecraftWorldClient"))
-local Character = require(ReplicatedStorage:WaitForChild("MinecraftCharacter"))
+-- (missing = Rojo still serves an older project: restart "rojo serve" and connect the plugin again)
+local characterModule = ReplicatedStorage:WaitForChild("MinecraftCharacter", 15)
+if not characterModule then
+	error("[MinecraftWorld] ReplicatedStorage.MinecraftCharacter fehlt - Rojo neu starten: "
+		.. "rojo serve minecraft-world.project.json --port 34874, dann im Rojo-Plugin neu verbinden")
+end
+local Character = require(characterModule :: any)
 
 local INFO = Config.WorldPrefix .. ".info"
 local CHUNKS = Config.WorldPrefix .. ".chunks"

@@ -20,7 +20,13 @@ local RunService = game:GetService("RunService")
 local TextChatService = game:GetService("TextChatService")
 local UserInputService = game:GetService("UserInputService")
 
-local Character = require(ReplicatedStorage:WaitForChild("MinecraftCharacter"))
+-- (missing = Rojo still serves an older project: restart "rojo serve" and connect the plugin again)
+local characterModule = ReplicatedStorage:WaitForChild("MinecraftCharacter", 15)
+if not characterModule then
+	error("[MinecraftWorld] ReplicatedStorage.MinecraftCharacter fehlt - Rojo neu starten: "
+		.. "rojo serve minecraft-world.project.json --port 34874, dann im Rojo-Plugin neu verbinden")
+end
+local Character = require(characterModule :: any)
 local remotes = ReplicatedStorage:WaitForChild("MinecraftWorld")
 local moveRemote = remotes:WaitForChild("Move") :: RemoteEvent
 local chatRemote = remotes:WaitForChild("Chat") :: RemoteEvent
