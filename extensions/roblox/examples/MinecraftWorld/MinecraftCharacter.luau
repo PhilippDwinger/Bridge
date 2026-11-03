@@ -29,13 +29,16 @@ Character.PIXEL = PIXEL
 Character.STUDS_PER_BLOCK = 3
 Character.HITBOX = Vector3.new(1.8, 5.4, 1.8) -- Minecraft: 0.6 x 1.8 x 0.6 blocks
 --[[
-	The root part IS Minecraft's hitbox, from the feet up (hip height 0): it stands on a block as long as any part of it
-	is over the block - like Minecraft. (With Roblox's usual hip height only the middle under the player counts: at an
-	edge the legs sank into the block.)
+	The root part IS Minecraft's hitbox (almost from the feet up): at an edge it lies on the block as long as any part
+	of it is over the block - like Minecraft. (With Roblox's usual hip height of the legs only the middle under the
+	player counts: at an edge the legs sank into the block.)
+	A tiny hip height stays (0.1 studs = 1/30 block): the Humanoid holds the box just above the ground and walks and
+	stops it itself. With 0 the box lay on the ground, the Humanoid lost the ground now and then and the player slid.
 ]]
-Character.HIP_HEIGHT = 0
-Character.ROOT_SIZE = Character.HITBOX
-Character.ROOT_HEIGHT = 5.4 / 2 -- middle of the root part above the feet
+Character.FOOT_GAP = 0.1
+Character.HIP_HEIGHT = Character.FOOT_GAP
+Character.ROOT_SIZE = Vector3.new(1.8, 5.4 - Character.FOOT_GAP, 1.8) -- the top stays at 1.8 blocks
+Character.ROOT_HEIGHT = Character.FOOT_GAP + (5.4 - Character.FOOT_GAP) / 2 -- middle of the root part above the feet
 Character.EYE_HEIGHT = 1.62 * 3 -- Minecraft's eyes: 1.62 blocks, sneaking 1.27
 Character.SNEAK_EYE_HEIGHT = 1.27 * 3
 -- Minecraft's movement in studs (blocks x 3): walk 4.317, sprint 5.612, sneak 1.295 blocks/s, jump 1.2522 blocks
@@ -164,8 +167,6 @@ function Character.build(options: { slim: boolean?, name: string? }?): Model
 	root.TopSurface = Enum.SurfaceType.Smooth
 	root.BottomSurface = Enum.SurfaceType.Smooth
 	root.CFrame = CFrame.new(0, Character.ROOT_HEIGHT, 0)
-	-- the hitbox slides on the blocks without friction (the Humanoid does the walking and the stopping)
-	root.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0, 0, 100, 1)
 	root.Parent = model
 	model.PrimaryPart = root
 

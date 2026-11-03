@@ -184,9 +184,10 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Minecraft-Spielers zeigt sich über seinem NPC, wenn er nicht voll ist.
 - **Alle sind Minecraft-Spieler** (`MinecraftCharacter`, ReplicatedStorage): kein Roblox-Rig mehr, sondern
   Minecrafts Spielermodell (Kopf 8×8×8 Pixel, Körper 8×12×4, Arme 4 bzw. 3 „slim“, Beine, zweite Skin-Schicht),
-  Maßstab wie Minecraft (1 Skin-Pixel = 0,176 Studs). Der Root-Part **ist** Minecrafts Hitbox (0,6 × 1,8 Blöcke) von
-  den Füßen an (Hüfthöhe 0, ohne Reibung): man steht auf einem Block, solange irgendein Teil der Hitbox darüber ist –
-  an Kanten sinken die Beine nicht mehr in den Block. Gelenke wie in Minecraft: jedes Teil
+  Maßstab wie Minecraft (1 Skin-Pixel = 0,176 Studs). Der Root-Part **ist** Minecrafts Hitbox (0,6 × 1,8 Blöcke), nur
+  0,1 Studs über dem Boden (so hält der Humanoid ihn selbst und bremst): man steht auf einem Block, solange irgendein
+  Teil der Hitbox darüber ist – an Kanten sinken die Beine nicht mehr in den Block. Ohne Taste bremst Minecrafts
+  Boden-Reibung (× 0,546 pro Tick), niemand rutscht. Gelenke wie in Minecraft: jedes Teil
   hängt einzeln am `ModelRoot` (den Füßen). Der Server legt den `StarterCharacter` an und schaltet Roblox' `Animate` ab.
 - **Skins** (Command `mcworld.skin`): Minecraft-Spieler tragen ihren eigenen Skin, Roblox-Spieler einen der 18
   Minecraft-Standardskins (fest nach UserId, wie Minecraft es mit UUIDs macht) – in Roblox und an ihrem Mannequin.

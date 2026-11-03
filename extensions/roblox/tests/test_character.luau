@@ -41,9 +41,9 @@ local model = Character.build({ name = "Steve" })
 local root = model:FindFirstChild("HumanoidRootPart")
 local humanoid = model:FindFirstChildOfClass("Humanoid")
 check("Minecraft's scale: 1 skin pixel = 3/16 * 0.9375 studs", near(P, 0.17578125))
-check("hitbox 0.6 x 1.8 blocks: the root part IS the hitbox from the feet up (hip height 0, stands on edges like MC)",
-	near(root.Size.X, 1.8) and near(root.Size.Y, 5.4) and humanoid.HipHeight == 0 and near(root.CFrame.Position.Y, 2.7),
-	tostring(root.Size))
+check("hitbox 0.6 x 1.8 blocks: the root part IS the hitbox (0.1 hip height to the ground, top at 5.4 studs)",
+	near(root.Size.X, 1.8) and near(humanoid.HipHeight + root.Size.Y, 5.4) and near(humanoid.HipHeight, 0.1)
+	and near(root.CFrame.Position.Y, 2.75), tostring(root.Size))
 check("Humanoid like Minecraft: 20 HP, jump 1.25 blocks, walk 4.317 blocks/s, joints stay on death",
 	humanoid.MaxHealth == 20 and near(humanoid.JumpHeight, 3.7566) and near(humanoid.WalkSpeed, 12.951)
 	and humanoid.BreakJointsOnDeath == false)

@@ -231,6 +231,12 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 		move = stayOnEdge(root, move, speed)
 	end
 	humanoid:Move(move, false)
+	if move.Magnitude == 0 and onGround(root) then
+		-- no key pressed, feet on a block: Minecraft's ground friction (x 0.546 per tick) - nobody slides
+		local velocity = root.AssemblyLinearVelocity
+		local keep = if Vector3.new(velocity.X, 0, velocity.Z).Magnitude < 0.3 then 0 else 0.546 ^ (20 * dt)
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X * keep, velocity.Y, velocity.Z * keep)
+	end
 	-- Jumping like Minecraft: only with the feet on a block, held = again after landing, at most every 10 ticks
 	local space = not free and keyDown(Enum.KeyCode.Space)
 	if not space then
