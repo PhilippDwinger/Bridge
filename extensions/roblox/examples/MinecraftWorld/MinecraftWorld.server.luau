@@ -37,6 +37,7 @@
 ]]
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
@@ -148,6 +149,9 @@ local swingRemote = remote("RemoteEvent", "Swing") -- client: hit into the air (
 local inventoryRemote = remote("RemoteEvent", "Inventory")
 local miningSpeed = remote("RemoteFunction", "MiningSpeed") -- client asks: (x, y, z, slot, ground) -> progress per tick
 local drownRemote = remote("RemoteEvent", "Drown") -- client: the air under water is out (Minecraft: 2 damage)
+-- server -> clients: (kind, position, extra) Minecraft's particles: "crit", "magic", "effect" (colour), "smoke" ...
+local particlesRemote = remote("RemoteEvent", "Particles")
+local lastSwing = {} -- player -> os.clock() of his last swing (Minecraft: every swing starts the attack charge again)
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -962,6 +966,7 @@ end
 -- Blocks (states) Minecraft has not sent the look of yet (they appear in the world) and items it has not described yet
 -- (they come into an inventory): ask for them in one call, then build again
 local askQueue = { blocks = {}, items = {} }
+local newLooks = {} -- block name -> true: its look came / changed since the last afterNewPictures
 local askScheduled = false
 local mergeBlocks -- below (adds an assets answer)
 local afterNewPictures -- below (re-render + tell the clients)
@@ -1203,6 +1208,7 @@ local function clientAssets()
 		textures = assets.textures,
 		blocks = assets.blocks,
 		items = assets.items,
+		tabs = assets.tabs,
 		itemsById = assets.itemsById,
 		gui = assets.gui,
 	}
@@ -1276,6 +1282,7 @@ function mergeBlocks(assets, result, itemPictures: boolean?)
 		if lookComplete(assets, look) then
 			assets.blocks[name] = look
 			assets.other[name] = nil
+			newLooks[name] = true -- (afterNewPictures: only sections with these blocks are built again)
 		else
 			assets.other[name] = true
 		end
@@ -1313,6 +1320,9 @@ local function loadAssets(generation)
 		if type(result.items) == "table" and #result.items > 0 then
 			assets.items = result.items -- the creative inventory (in this order)
 		end
+		if type(result.tabs) == "table" then
+			assets.tabs = result.tabs -- Minecraft's creative tabs: [{id, name, icon, items = [ids]}]
+		end
 		assets.available = result.available == true and next(assets.blocks) ~= nil
 		assets.reason = result.reason
 	else
@@ -1335,11 +1345,30 @@ function loadItemIcons(generation)
 	if not assets or not assets.available then
 		return
 	end
+	-- Minecraft's creative tabs (all its items, in its order) - on their own (~35 KB)
+	local tabsOk, tabsResult = pcall(client.Call, client, ASSETS, { tabs = true }, { Timeout = 30 })
+	if generation ~= world.generation or world.assets ~= assets then
+		return
+	end
+	if tabsOk and type(tabsResult) == "table" and type(tabsResult.tabs) == "table" and #tabsResult.tabs > 0 then
+		assets.tabs = tabsResult.tabs
+		assetsChanged:FireAllClients(clientAssets())
+	end
 	local ids = {}
+	local seen = {}
+	local function want(id)
+		if type(id) == "string" and not seen[id] and not assets.itemsById[id] then
+			seen[id] = true
+			assets.asked["item " .. id] = true
+			table.insert(ids, id)
+		end
+	end
 	for _, item in ipairs(assets.items) do
-		if not assets.itemsById[item.id] then
-			assets.asked["item " .. item.id] = true
-			table.insert(ids, item.id)
+		want(item.id)
+	end
+	for _, tab in ipairs(assets.tabs or {}) do
+		for _, id in ipairs(type(tab.items) == "table" and tab.items or {}) do
+			want(id)
 		end
 	end
 	-- Minecraft answers about 40 KiB at a time (one piece over Bridge - bigger answers came in 4 KiB chunks, one HTTP
@@ -1390,6 +1419,37 @@ function loadItemIcons(generation)
 end
 
 -- The pictures of the sky (sun, the 8 moon phases, rain, snow, clouds) - also after the world, like the item icons
+-- More pictures from Minecraft in one call: {hud = true} (particles, attack indicator, effect boxes, hunger),
+-- {effects = true} (the icons of all status effects)
+local function loadPictureSet(generation, request, label)
+	local assets = world.assets
+	if not assets or not assets.available then
+		return
+	end
+	for _ = 1, 3 do
+		local ok, result = pcall(client.Call, client, ASSETS, request, { Timeout = 45 })
+		if generation ~= world.generation or world.assets ~= assets then
+			return
+		end
+		if ok and type(result) == "table" then
+			local added = 0
+			for key, texture in pairs(type(result.textures) == "table" and result.textures or {}) do
+				assets.textures[key] = decodeTexture(texture)
+				added += 1
+			end
+			for name, key in pairs(type(result.gui) == "table" and result.gui or {}) do
+				if assets.textures[key] then
+					assets.gui[name] = key
+				end
+			end
+			log(string.format("%s pictures from Minecraft: %d", label, added))
+			assetsChanged:FireAllClients(clientAssets())
+			return
+		end
+		task.wait(2)
+	end
+end
+
 function loadSkyPictures(generation)
 	local assets = world.assets
 	if not assets or not assets.available then
@@ -1421,7 +1481,24 @@ function loadSkyPictures(generation)
 end
 
 function afterNewPictures()
-	renderAll(false) -- only blocks that were grey so far change
+	-- only the sections that have one of the blocks with a new look are built again (a real world has thousands of
+	-- sections: building all of them every few seconds while the item icons come would never stop)
+	if next(newLooks) ~= nil then
+		local names = newLooks
+		newLooks = {}
+		for _, chunk in pairs(world.chunks) do
+			for sectionY, section in pairs(chunk.sections) do
+				if section.built or section.queued then
+					for _, name in ipairs(section.palette) do
+						if names[name] then
+							queueSection(chunk, sectionY, false)
+							break
+						end
+					end
+				end
+			end
+		end
+	end
 	assetsChanged:FireAllClients(clientAssets())
 end
 -- endregion
@@ -1824,6 +1901,8 @@ local function loadWorld()
 	loadAssets(generation)
 	task.spawn(loadItemIcons, generation) -- all item icons at the same time as the world (the clients get them at once)
 	task.spawn(loadSkyPictures, generation)
+	task.spawn(loadPictureSet, generation, { hud = true }, "HUD")
+	task.spawn(loadPictureSet, generation, { effects = true }, "effect")
 	if generation ~= world.generation then
 		return
 	end
@@ -1851,14 +1930,23 @@ local function sectionAt(blockX, blockY, blockZ, create)
 	return chunk, sectionY, section
 end
 
+local breakParticles -- below (a block breaks: Minecraft's crumbs of its picture)
 local function applyBlocks(blocks)
 	local dirty = {}
 	local names = {}
+	local crumbs = 0
 	for _, block in ipairs(blocks) do
 		local x, y, z, name = block[1], block[2], block[3], block[4]
 		table.insert(names, name)
 		if type(x) == "number" and type(y) == "number" and type(z) == "number" and type(name) == "string" then
 			local chunk, sectionY, section = sectionAt(x, y, z, true)
+			if chunk and section and crumbs < 8 and AIR[baseName(name)] then
+				local before = section.palette[cellAt(section.cells, cellIndex(x - chunk.x * 16, y - sectionY * 16, z - chunk.z * 16)) + 1]
+				if before and not AIR[baseName(before)] then
+					crumbs += 1
+					breakParticles(x, y, z, before)
+				end
+			end
 			if chunk and section then
 				local paletteIndex = table.find(section.palette, name)
 				if not paletteIndex then
@@ -1892,6 +1980,26 @@ local function applyBlocks(blocks)
 		end
 	end
 	noticeBlocks(names)
+end
+
+breakParticles = function(x, y, z, name)
+	local info = world.info
+	local look = world.assets and world.assets.blocks[name]
+	if not info or not look then
+		return
+	end
+	local key = look.particle or (look.faces and (look.faces.north or look.faces.up))
+	if not key and type(look.parts) == "table" and look.parts[1] and type(look.parts[1].f) == "table" then
+		for _, picture in pairs(look.parts[1].f) do
+			key = picture
+			break
+		end
+	end
+	if type(key) ~= "string" then
+		return
+	end
+	local scale = info.studsPerBlock
+	particlesRemote:FireAllClients("break", Vector3.new((x + 0.5) * scale, (y - info.minY + 0.5) * scale, (z + 0.5) * scale), key)
 end
 
 local function blockAt(x, y, z)
@@ -1980,6 +2088,12 @@ local function setState(player, state)
 	end
 	noticeItems(ids) -- items nobody has seen yet: their icons
 	inventoryRemote:FireClient(player, "state", state)
+	-- the item in his hand (every client shows it at his right arm)
+	local held = state.slots[37 + (tonumber(state.sel) or 0)]
+	local character = player.Character
+	if character then
+		character:SetAttribute("McHeld", if type(held) == "table" and type(held.id) == "string" then held.id else nil)
+	end
 end
 
 --[[
@@ -2359,6 +2473,7 @@ end)
 local swingTokens = {}
 swingRemote.OnServerEvent:Connect(function(player)
 	local now = os.clock()
+	lastSwing[player] = now
 	if now - (swingTokens[player] or 0) >= 0.1 then
 		swingTokens[player] = now
 		swingArm(player)
@@ -2366,6 +2481,7 @@ swingRemote.OnServerEvent:Connect(function(player)
 end)
 Players.PlayerRemoving:Connect(function(player)
 	swingTokens[player] = nil
+	lastSwing[player] = nil
 end)
 
 -- region health + damage
@@ -2463,7 +2579,7 @@ end)
 
 -- A Roblox player hits a Minecraft player's NPC: Minecraft does the damage (with knockback from our mannequin)
 local attackedAt = {}
-attackRemote.OnServerEvent:Connect(function(player, model)
+attackRemote.OnServerEvent:Connect(function(player, model, how)
 	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
 	if typeof(model) ~= "Instance" or not model:IsA("Model") or not npcFolder or not model:IsDescendantOf(npcFolder)
 		or gameModeOf(player) == "spectator" then
@@ -2483,12 +2599,29 @@ attackRemote.OnServerEvent:Connect(function(player, model)
 		return
 	end
 	attackedAt[player] = now
+	-- Minecraft decides the damage with his item (charge since the last swing, critical hit when falling)
+	local since = now - (lastSwing[player] or 0)
+	lastSwing[player] = now
+	local falling = type(how) == "table" and how.falling == true and root.AssemblyLinearVelocity.Y < 2
+	local sprint = type(how) == "table" and how.sprint == true
 	swingArm(player)
 	task.spawn(function()
-		local ok, result = pcall(client.Call, client, HURT, { target = target, amount = 1, attacker = player.UserId },
-			{ Timeout = 10 })
-		if not ok and Config.Debug then
-			warn("[MinecraftWorld] hit not sent: " .. tostring(result))
+		local ok, result = pcall(client.Call, client, HURT, { target = target, amount = 1, attacker = player.UserId,
+			since = since, falling = falling, sprint = sprint }, { Timeout = 10 })
+		if not ok then
+			if Config.Debug then
+				warn("[MinecraftWorld] hit not sent: " .. tostring(result))
+			end
+			return
+		end
+		if type(result) == "table" and npcRoot.Parent then
+			local at = npcRoot.Position + Vector3.new(0, 1, 0)
+			if result.crit then
+				particlesRemote:FireAllClients("crit", at)
+			end
+			if result.magic then
+				particlesRemote:FireAllClients("magic", at)
+			end
 		end
 	end)
 end)
@@ -2511,6 +2644,51 @@ client.MessageReceived:Connect(function(message)
 		for _, player in ipairs(Players:GetPlayers()) do
 			if player.UserId == content.u then
 				hurt(player, math.clamp(tonumber(content.amount) or 0, 0, 100), from, "attack")
+				local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+				if root then
+					if content.crit then
+						particlesRemote:FireAllClients("crit", root.Position + Vector3.new(0, 1, 0))
+					end
+					if content.magic then
+						particlesRemote:FireAllClients("magic", root.Position + Vector3.new(0, 1, 0))
+					end
+				end
+			end
+		end
+	elseif content.type == "mc.effects" then
+		-- his status effects from Minecraft: the client shows the icons + moves like Minecraft (speed, jump boost ...)
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.UserId == content.u then
+				local ok, text = pcall(HttpService.JSONEncode, HttpService, if type(content.list) == "table" then content.list else {})
+				if ok then
+					player:SetAttribute("McEffects", text)
+				end
+				local character = player.Character
+				if character then
+					local invisible = false
+					for _, effect in ipairs(if type(content.list) == "table" then content.list else {}) do
+						if type(effect) == "table" and effect.id == "invisibility" then
+							invisible = true
+						end
+					end
+					character:SetAttribute("McInvisible", invisible) -- (the other clients hide him)
+				end
+			end
+		end
+	elseif content.type == "mc.effect" then
+		-- Minecraft's effect ticks: regeneration heals 1, poison hurts 1 (never below 1), wither hurts 1
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.UserId == content.u then
+				local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+				if humanoid and humanoid.Health > 0 then
+					if content.kind == "regen" then
+						humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + 1)
+					elseif content.kind == "poison" and humanoid.Health > 1 then
+						hurt(player, 1, nil, "poison")
+					elseif content.kind == "wither" then
+						hurt(player, 1, nil, "wither")
+					end
+				end
 			end
 		end
 	elseif content.type == "mc.player" then

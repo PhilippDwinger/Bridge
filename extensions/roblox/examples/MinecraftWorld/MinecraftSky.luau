@@ -29,6 +29,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Sky = {}
+Sky.effects = {} :: { [string]: any } -- id -> {amp, dur, ...}: the player's status effects (MinecraftPlayer fills it)
 
 local BLOCK = 3 -- studs per block (MinecraftCharacter.STUDS_PER_BLOCK)
 local CELESTIAL_DISTANCE = 1500 -- studs: sun and moon are this far away (they keep their size in degrees)
@@ -248,11 +249,16 @@ function Sky.start(options: Options)
 		local daylight = math.clamp((shown.skyLight - 0.24) / 0.76, 0, 1) -- how much the sun itself shines
 		local eye = camera.CFrame.Position
 		local fluid = Character.fluidAt(eye)
+		-- status effects (MinecraftPlayer keeps them in Sky.effects): night vision = everything lit like the day,
+		-- blindness / darkness = black fog close around the eyes
+		local effects = Sky.effects
+		local nightVision = effects.night_vision ~= nil
+		local blind = effects.blindness ~= nil or effects.darkness ~= nil
 		if not options.shaderActive() then
 			local skyLightColor = attribute("McSkyLightColor", Color3.new(1, 1, 1)) :: Color3
-			Lighting.Brightness = 2.4 * daylight
-			Lighting.OutdoorAmbient = scaleColor(skyLightColor, brightness * 0.62)
-			Lighting.Ambient = Color3.fromRGB(16, 16, 20) -- (Minecraft: no sky light = dark, only block light)
+			Lighting.Brightness = 2.4 * (if nightVision then 1 else daylight)
+			Lighting.OutdoorAmbient = scaleColor(skyLightColor, (if nightVision then 1 else brightness) * 0.62)
+			Lighting.Ambient = if nightVision then Color3.fromRGB(150, 150, 150) else Color3.fromRGB(16, 16, 20) -- (Minecraft: no sky light = dark, only block light)
 			Lighting.ColorShift_Top = lerpColor(Color3.new(1, 1, 1), shown.sunrise, shown.sunriseAlpha * 0.6)
 			Lighting.ColorShift_Bottom = Color3.new(0, 0, 0)
 			Lighting.EnvironmentDiffuseScale = 0 -- (no reflections of the sky: Minecraft's blocks are plain)
@@ -261,7 +267,18 @@ function Sky.start(options: Options)
 			Lighting.ShadowSoftness = 0.35
 			Lighting.ExposureCompensation = 0
 			local a = atmosphere :: Atmosphere
-			if fluid == "water" then
+			if blind then
+				-- Minecraft: blindness = fog from 0 to 5 blocks, black
+				a.Color = Color3.new(0, 0, 0)
+				a.Decay = Color3.new(0, 0, 0)
+				a.Density = 1
+				a.Offset = 0
+				a.Haze = 10
+				a.Glare = 0
+				tint.Enabled = true
+				tint.TintColor = Color3.fromRGB(110, 110, 110)
+				tint.Saturation = -0.3
+			elseif fluid == "water" then
 				-- Minecraft's water fog: its colour, 96 blocks far (darker at night)
 				local water = lerpColor(attribute("McWaterFogColor", Color3.fromRGB(5, 5, 51)),
 					attribute("McWaterColor", Color3.fromRGB(63, 118, 228)), 0.4)

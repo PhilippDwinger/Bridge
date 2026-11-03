@@ -762,9 +762,81 @@ for menuSlot = 0, 45 do
 	end)
 end
 
--- creative: 9 x 5 items (scrolling), the hotbar row below, the scroll bar on the right, two tabs above
+-- creative: 9 x 5 items (scrolling), the hotbar row below, the scroll bar on the right, Minecraft's tabs above and
+-- below (Building Blocks, Colored Blocks, Natural, Functional, Redstone | Search; Tools, Combat, Food, Ingredients,
+-- Spawn Eggs | Survival Inventory) - the tabs + their items come from Minecraft itself (mod: Assets.creativeTabs)
 local CREATIVE_ROWS = 5
 local creativeScroll = 0 -- first row shown
+local creativeTab = "first" -- id of the chosen Minecraft tab, "search", or "first" (the first tab / all items)
+local searchText = ""
+local itemIndexFor: any = nil -- assets.items -> {id -> item}
+local itemIndex: { [string]: any } = {}
+local listCache = { key = "", list = {} :: { any } }
+
+local function creativeList(): { any }
+	local items = assets and assets.items or {}
+	local tabList = assets and assets.tabs or {}
+	if itemIndexFor ~= items then
+		itemIndexFor = items
+		itemIndex = {}
+		for _, item in ipairs(items) do
+			itemIndex[item.id] = item
+		end
+	end
+	local known = 0
+	for _ in pairs(assets and assets.itemsById or {}) do
+		known += 1
+	end
+	local key = creativeTab .. "|" .. searchText .. "|" .. tostring(items) .. "|" .. tostring(tabList) .. "|" .. known
+	if listCache.key == key then
+		return listCache.list
+	end
+	local list = items
+	if creativeTab == "search" then
+		-- every item of every tab (else the list from the start), by name or id
+		local needle = string.lower(searchText)
+		list = {}
+		local pool = items
+		if #tabList > 0 then
+			pool = {}
+			local seen = {}
+			for _, tab in ipairs(tabList) do
+				for _, id in ipairs(tab.items or {}) do
+					local item = itemIndex[id] or (assets.itemsById and assets.itemsById[id])
+					if item and not seen[id] then
+						seen[id] = true
+						table.insert(pool, item)
+					end
+				end
+			end
+		end
+		for _, item in ipairs(pool) do
+			if needle == "" or string.find(string.lower(tostring(item.name or "")), needle, 1, true)
+				or string.find(item.id, needle, 1, true) then
+				table.insert(list, item)
+			end
+		end
+	else
+		local chosen = nil
+		for _, tab in ipairs(tabList) do
+			if tab.id == creativeTab or (creativeTab == "first" and chosen == nil) then
+				chosen = tab
+			end
+		end
+		if chosen then
+			list = {}
+			for _, id in ipairs(chosen.items or {}) do
+				local item = itemIndex[id] or (assets.itemsById and assets.itemsById[id])
+				if item then
+					table.insert(list, item)
+				end
+			end
+		end
+	end
+	listCache.key = key
+	listCache.list = list
+	return list
+end
 local creativeItems: { SlotView } = {}
 for index = 0, 9 * CREATIVE_ROWS - 1 do
 	local x, y = 9 + (index % 9) * 18, 18 + (index // 9) * 18
@@ -777,7 +849,7 @@ for index = 0, 9 * CREATIVE_ROWS - 1 do
 		clickCreativeItem(index, 1)
 	end)
 	hoverable(button, creative, x, y, function()
-		local item = assets and assets.items and assets.items[creativeScroll * 9 + index + 1]
+		local item = creativeList()[creativeScroll * 9 + index + 1]
 		return if item then { id = item.id, n = 1, name = item.name } else nil
 	end)
 end
@@ -798,26 +870,121 @@ for slot = 1, 9 do
 end
 local scroller = image(creative, "Scroller", 175, 18, 12, 15, 15)
 
--- the two tabs: all items / the normal inventory (Minecraft's "Survival Inventory" tab)
+-- the tabs (made again when Minecraft's tab list comes): {frame, icon, view, tab, row = "top" | "bottom", column}
 local tabs = {}
 local setView -- below
-for index, view in ipairs({ "creative", "survival" }) do
-	local tab = image(dim, "Tab" .. view, 0, 0, 26, 32, 12)
-	tab.AnchorPoint = Vector2.new(0, 1)
-	scaled(tab)
-	local tabIcon = image(tab, "Icon", 5, 9, 16, 16, 13)
-	tabIcon.ResampleMode = Enum.ResamplerMode.Default
-	local button = Instance.new("TextButton")
-	button.Text = ""
-	button.BackgroundTransparency = 1
-	button.Size = UDim2.fromScale(1, 1)
-	button.ZIndex = 14
-	button.Parent = tab
-	button.MouseButton1Click:Connect(function()
-		setView(view)
-	end)
-	tabs[index] = { frame = tab, icon = tabIcon, view = view, index = index }
+local searchBox = Instance.new("TextBox") -- Minecraft's search field (search tab)
+searchBox.Name = "Search"
+searchBox.BackgroundTransparency = 1
+searchBox.Position = UDim2.fromOffset(82, 6)
+searchBox.Size = UDim2.fromOffset(89, 9)
+searchBox.Font = Enum.Font.Arcade
+searchBox.TextSize = 8
+searchBox.TextColor3 = Color3.new(1, 1, 1)
+searchBox.TextXAlignment = Enum.TextXAlignment.Left
+searchBox.ClearTextOnFocus = false
+searchBox.PlaceholderText = ""
+searchBox.Text = ""
+searchBox.Visible = false
+searchBox.ZIndex = 19
+searchBox.Parent = creative
+local tabTitle = Instance.new("TextLabel") -- the tab's name at the top left (Minecraft draws it there)
+tabTitle.Name = "Title"
+tabTitle.BackgroundTransparency = 1
+tabTitle.Position = UDim2.fromOffset(8, 5)
+tabTitle.Size = UDim2.fromOffset(100, 9)
+tabTitle.Font = Enum.Font.Arcade
+tabTitle.TextSize = 8
+tabTitle.TextColor3 = Color3.fromRGB(64, 64, 64)
+tabTitle.TextXAlignment = Enum.TextXAlignment.Left
+tabTitle.Text = ""
+tabTitle.ZIndex = 13
+tabTitle.Parent = creative
+
+local function chooseTab(entry)
+	if entry.view == "survival" then
+		setView("survival")
+		return
+	end
+	creativeTab = entry.tab
+	creativeScroll = 0
+	setView("creative")
+	refresh()
+	if entry.tab == "search" then
+		pcall(function()
+			searchBox:CaptureFocus()
+		end)
+	end
 end
+
+local function rebuildTabs()
+	for _, entry in ipairs(tabs) do
+		entry.frame:Destroy()
+	end
+	table.clear(tabs)
+	local list = {}
+	local tabList = assets and assets.tabs or {}
+	if #tabList == 0 then
+		-- an older mod: one tab with all items + the inventory
+		table.insert(list, { view = "creative", tab = "first", row = "top", column = 0, iconItem = "minecraft:grass_block", name = "" })
+		table.insert(list, { view = "survival", row = "top", column = 1, iconItem = "minecraft:crafting_table", name = "" })
+	else
+		for index, tab in ipairs(tabList) do
+			local i = index - 1
+			table.insert(list, { view = "creative", tab = tab.id, row = if i < 5 then "top" else "bottom",
+				column = i % 5, iconItem = tab.icon, name = tab.name })
+		end
+		table.insert(list, { view = "creative", tab = "search", row = "top", column = 6, iconItem = "minecraft:compass",
+			name = "Suche" })
+		table.insert(list, { view = "survival", row = "bottom", column = 6, iconItem = "minecraft:chest", name = "" })
+	end
+	for _, entry in ipairs(list) do
+		local tab = image(dim, "Tab", 0, 0, 26, 32, 12)
+		scaled(tab)
+		local tabIcon = image(tab, "Icon", 5, if entry.row == "top" then 9 else 7, 16, 16, 13)
+		tabIcon.ResampleMode = Enum.ResamplerMode.Default
+		local button = Instance.new("TextButton")
+		button.Text = ""
+		button.BackgroundTransparency = 1
+		button.Size = UDim2.fromScale(1, 1)
+		button.ZIndex = 14
+		button.Parent = tab
+		button.MouseButton1Click:Connect(function()
+			chooseTab(entry)
+		end)
+		button.MouseEnter:Connect(function()
+			if entry.name ~= "" then
+				hovered = function()
+					return { id = entry.iconItem, n = 1, name = entry.name }
+				end
+			end
+		end)
+		button.MouseLeave:Connect(function()
+			hovered = nil
+		end)
+		entry.frame = tab
+		entry.icon = tabIcon
+		table.insert(tabs, entry)
+	end
+	local known = creativeTab == "search" or creativeTab == "first"
+	for _, tab in ipairs(tabList) do
+		if tab.id == creativeTab then
+			known = true
+		end
+	end
+	if not known or (creativeTab == "first" and #tabList > 0) then
+		creativeTab = if #tabList > 0 then (tabList[1].id :: string) else "first"
+	end
+end
+rebuildTabs()
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+	if searchBox.Text ~= searchText then
+		searchText = searchBox.Text
+		creativeScroll = 0
+		refresh()
+	end
+end)
 
 -- the item on the mouse while moving it around
 local cursor = slotView(screen, "CursorItem", 0, 0, 30)
@@ -837,7 +1004,7 @@ cursor.count.Position = UDim2.fromOffset(0, 1)
 cursor.bar.Position = UDim2.fromOffset(2, 13)
 
 local function creativeRows(): number
-	local count = assets and assets.items and #assets.items or 0
+	local count = #creativeList()
 	return math.max(0, math.ceil(count / 9) - CREATIVE_ROWS)
 end
 
@@ -867,7 +1034,7 @@ function refresh()
 	end
 	creativeScroll = math.clamp(creativeScroll, 0, creativeRows())
 	for index, view in ipairs(creativeItems) do
-		local item = assets and assets.items and assets.items[creativeScroll * 9 + index]
+		local item = creativeList()[creativeScroll * 9 + index]
 		showStack(view, if item then { id = item.id, n = 1 } else nil)
 	end
 	local rows = creativeRows()
@@ -878,18 +1045,44 @@ function refresh()
 	creative.Visible = inventoryView == "creative"
 	local isCreative = gameMode() == "creative"
 	local scale = guiScale()
+	local searching = inventoryView == "creative" and creativeTab == "search"
+	searchBox.Visible = searching
+	if searching then
+		local searchPicture = gui("creative_search")
+		if searchPicture then
+			setPicture(creativeBack, searchPicture)
+		end
+	end
+	tabTitle.Text = ""
 	for _, tab in ipairs(tabs) do
 		tab.frame.Visible = inventoryOpen and isCreative
-		local chosen = tab.view == inventoryView
-		local picture = if chosen then gui("tab_selected") else gui("tab")
+		local chosen = if tab.view == "survival" then inventoryView == "survival"
+			else inventoryView == "creative" and (tab.tab == creativeTab)
+		if chosen and tab.name ~= "" and tab.tab ~= "search" then
+			tabTitle.Text = tab.name
+		end
+		local picture
+		if tab.row == "top" then
+			picture = if chosen then (gui("tab_top_selected_1") or gui("tab_selected")) else (gui("tab_top_unselected_1") or gui("tab"))
+		else
+			picture = if chosen then gui("tab_bottom_selected_1") else gui("tab_bottom_unselected_1")
+		end
 		setPicture(tab.frame, picture)
 		tab.frame.BackgroundTransparency = if picture then 1 else (if chosen then 0 else 0.4)
 		tab.frame.ZIndex = if chosen then 16 else 12
-		-- above the top left corner of the open window (Minecraft: the tabs stand on the window)
+		tab.icon.ZIndex = tab.frame.ZIndex + 1
+		-- Minecraft: the tabs stand on the top / bottom edge of the open window, 27 pixels apart
 		local width = if inventoryView == "creative" then 195 else 176
 		local height = if inventoryView == "creative" then 136 else 166
-		tab.frame.Position = UDim2.new(0.5, (-width / 2 + (tab.index - 1) * 27) * scale, 0.5, (-height / 2 + 4) * scale)
-		setPicture(tab.icon, iconContent(if tab.view == "creative" then "minecraft:grass_block" else "minecraft:crafting_table"))
+		local x = (-width / 2 + tab.column * 27) * scale
+		if tab.row == "top" then
+			tab.frame.AnchorPoint = Vector2.new(0, 1)
+			tab.frame.Position = UDim2.new(0.5, x, 0.5, (-height / 2 + 4) * scale)
+		else
+			tab.frame.AnchorPoint = Vector2.new(0, 0)
+			tab.frame.Position = UDim2.new(0.5, x, 0.5, (height / 2 - 4) * scale)
+		end
+		setPicture(tab.icon, iconContent(tab.iconItem))
 	end
 	local carried = if inventoryView == "creative" and creativeCursor then creativeCursor
 		elseif type(state.carried) == "table" then state.carried else nil
@@ -965,7 +1158,7 @@ local function putCreative(menuSlot: number, stack: any)
 end
 
 function clickCreativeItem(index: number, button: number)
-	local item = assets and assets.items and assets.items[creativeScroll * 9 + index + 1]
+	local item = creativeList()[creativeScroll * 9 + index + 1]
 	if creativeCursor then
 		if item and creativeCursor.id == item.id and button == 0 then
 			creativeCursor.n = math.min(creativeCursor.n + 1, creativeCursor.max or 64) -- one more of the same
@@ -1624,7 +1817,15 @@ local function act(action: string, repeated: boolean?)
 	if action == "break" then
 		if targetNpc then
 			swingArm()
-			attackRemote:FireServer(targetNpc) -- hit the Minecraft player (Minecraft does the damage)
+			-- hit the Minecraft player (Minecraft does the damage: with the item in the hand, its charge, and a
+			-- critical hit when falling - not on the ground, not in water, not flying, not sprinting)
+			local character = player.Character
+			local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+			local velocityY = if rootPart and rootPart:IsA("BasePart") then rootPart.AssemblyLinearVelocity.Y else 0
+			local falling = not onGround() and velocityY < 0 and player:GetAttribute("McFluid") == nil
+				and player:GetAttribute("McFlying") ~= true
+			attackRemote:FireServer(targetNpc, { falling = falling, sprint = character ~= nil
+				and character:GetAttribute("McSprint") == true })
 			return
 		end
 		if not target then
@@ -2428,8 +2629,10 @@ local function trackFall()
 		fallPeak = nil -- (no fall damage; flying starts the fall new)
 		return
 	end
-	if player:GetAttribute("McFluid") ~= nil then
-		fallPeak = nil -- (Minecraft: in water / lava the fall starts new - landing in water does not hurt)
+	local effectsText = tostring(player:GetAttribute("McEffects") or "")
+	if player:GetAttribute("McFluid") ~= nil or string.find(effectsText, '"slow_falling"', 1, true)
+		or string.find(effectsText, '"levitation"', 1, true) then
+		fallPeak = nil -- (Minecraft: in water / lava the fall starts new - landing in water does not hurt; slow falling)
 		return
 	end
 	local humanoidState = humanoid:GetState()
@@ -2480,6 +2683,469 @@ RunService:BindToRenderStep("MinecraftHurtCamera", Enum.RenderPriority.Camera.Va
 end)
 -- endregion
 
+-- region particles (Minecraft's own pictures, drawn as small billboards - only on this client)
+--[[
+	The server says where ("Particles": kind, position, extra): "crit" (stars when a hit is critical), "magic"
+	(enchanted hit), "effect" (the swirl of a status effect, extra = colour), "smoke". Each particle flies, slows down
+	and fades like Minecraft's (CritParticle: 0.1 blocks/tick out, gravity, 6-12 ticks).
+]]
+local particleFolder = Instance.new("Folder")
+particleFolder.Name = "MinecraftParticles"
+local particleAnchor = Instance.new("Part")
+particleAnchor.Name = "Anchor"
+particleAnchor.Anchored = true
+particleAnchor.CanCollide = false
+particleAnchor.CanQuery = false
+particleAnchor.CanTouch = false
+particleAnchor.Transparency = 1
+particleAnchor.Size = Vector3.one * 0.05
+particleAnchor.CFrame = CFrame.new()
+particleAnchor.Parent = particleFolder
+local particles = {} -- {gui, image, pos, vel, born, life, gravity, size}
+local MAX_PARTICLES = 200
+local particleRandom = Random.new()
+
+local function spawnParticle(key: string, position: Vector3, velocity: Vector3, life: number, size: number,
+	colour: Color3?, gravity: number?, picture: Content?)
+	local content = picture or gui(key)
+	if not content or #particles >= MAX_PARTICLES then
+		return
+	end
+	if not particleFolder.Parent then
+		particleFolder.Parent = workspace.CurrentCamera
+	end
+	local billboard = Instance.new("BillboardGui")
+	billboard.Adornee = particleAnchor
+	billboard.AlwaysOnTop = false
+	billboard.LightInfluence = 0
+	billboard.Size = UDim2.fromScale(size, size)
+	billboard.StudsOffsetWorldSpace = position
+	local label = Instance.new("ImageLabel")
+	label.BackgroundTransparency = 1
+	label.Size = UDim2.fromScale(1, 1)
+	label.ImageContent = content
+	label.ResampleMode = Enum.ResamplerMode.Pixelated
+	label.ImageColor3 = colour or Color3.new(1, 1, 1)
+	label.Parent = billboard
+	billboard.Parent = particleFolder
+	table.insert(particles, { gui = billboard, image = label, pos = position, vel = velocity, born = os.clock(), life = life,
+		gravity = gravity or 0 })
+end
+
+local function particleBurst(kind: string, at: Vector3, extra: any)
+	local block = assets and assets.scale or 3
+	if kind == "crit" or kind == "magic" then
+		-- Minecraft: 16 particles from the hit entity, out in every direction, a little up
+		for _ = 1, 16 do
+			local direction = Vector3.new(particleRandom:NextNumber(-1, 1), particleRandom:NextNumber(-0.2, 1),
+				particleRandom:NextNumber(-1, 1))
+			if direction.Magnitude > 0.01 then
+				direction = direction.Unit
+			end
+			local colour = if kind == "crit" then Color3.fromRGB(255, 255, 255) else Color3.fromRGB(170, 120, 255)
+			spawnParticle(if kind == "crit" then "particle_critical_hit" else "particle_enchanted_hit",
+				at + direction * 0.3 * block, direction * particleRandom:NextNumber(1.5, 3) * block,
+				particleRandom:NextNumber(0.3, 0.6), 0.2 * block, colour, 0.8 * block)
+		end
+	elseif kind == "effect" then
+		local colour = if typeof(extra) == "Color3" then extra else Color3.new(1, 1, 1)
+		for _ = 1, 2 do
+			local offset = Vector3.new(particleRandom:NextNumber(-0.3, 0.3), particleRandom:NextNumber(0, 1.8),
+				particleRandom:NextNumber(-0.3, 0.3)) * block
+			spawnParticle("particle_effect_" .. tostring(particleRandom:NextInteger(0, 7)), at + offset,
+				Vector3.new(0, 0.4 * block, 0), 1, 0.15 * block, colour, 0)
+		end
+	elseif kind == "break" then
+		-- Minecraft's crumbs of the broken block: little pieces of its picture, flying out and falling
+		local picture = if type(extra) == "string" then worldContent(extra) else nil
+		if picture then
+			for _ = 1, 14 do
+				local offset = Vector3.new(particleRandom:NextNumber(-0.4, 0.4), particleRandom:NextNumber(-0.4, 0.4),
+					particleRandom:NextNumber(-0.4, 0.4)) * block
+				spawnParticle("", at + offset, (offset / block) * 2 * block + Vector3.new(0, 1.2 * block, 0),
+					particleRandom:NextNumber(0.4, 0.9), particleRandom:NextNumber(0.08, 0.16) * block, nil, 9 * block, picture)
+			end
+		end
+	elseif kind == "smoke" then
+		for _ = 1, 8 do
+			local offset = Vector3.new(particleRandom:NextNumber(-0.4, 0.4), particleRandom:NextNumber(0, 0.6),
+				particleRandom:NextNumber(-0.4, 0.4)) * block
+			spawnParticle("particle_generic_" .. tostring(particleRandom:NextInteger(0, 7)), at + offset,
+				Vector3.new(0, 0.3 * block, 0), particleRandom:NextNumber(0.6, 1.2), 0.2 * block, Color3.fromRGB(160, 160, 160), 0)
+		end
+	end
+end
+
+RunService.Heartbeat:Connect(function(dt)
+	if #particles == 0 then
+		return
+	end
+	local now = os.clock()
+	for index = #particles, 1, -1 do
+		local particle = particles[index]
+		local age = now - particle.born
+		if age >= particle.life or not particle.gui.Parent then
+			particle.gui:Destroy()
+			table.remove(particles, index)
+		else
+			-- Minecraft: x 0.7 per tick (crits stop quickly), a little gravity
+			particle.vel = particle.vel * (0.7 ^ (dt * 20)) - Vector3.new(0, particle.gravity * dt, 0)
+			particle.pos += particle.vel * dt
+			particle.gui.StudsOffsetWorldSpace = particle.pos
+			particle.image.ImageTransparency = math.clamp((age / particle.life - 0.6) / 0.4, 0, 1)
+		end
+	end
+end)
+
+local particlesRemote = remotes:WaitForChild("Particles", 10)
+if particlesRemote then
+	(particlesRemote :: RemoteEvent).OnClientEvent:Connect(function(kind, at, extra)
+		if type(kind) == "string" and typeof(at) == "Vector3" then
+			particleBurst(kind, at, extra)
+		end
+	end)
+end
+-- endregion
+
+-- region status effects: Minecraft's icons at the top right, the swirl around everybody who has one, invisible players
+local HttpService = game:GetService("HttpService")
+local function decodeEffects(text: any): { any }
+	local ok, decoded = pcall(function()
+		return HttpService:JSONDecode(if type(text) == "string" then text else "[]")
+	end)
+	return if ok and type(decoded) == "table" then decoded else {}
+end
+local myEffects: { any } = {}
+player:GetAttributeChangedSignal("McEffects"):Connect(function()
+	myEffects = decodeEffects(player:GetAttribute("McEffects"))
+end)
+myEffects = decodeEffects(player:GetAttribute("McEffects"))
+
+local effectHud = Instance.new("Frame")
+effectHud.Name = "Effects"
+effectHud.BackgroundTransparency = 1
+effectHud.AnchorPoint = Vector2.new(1, 0)
+effectHud.Position = UDim2.new(1, 0, 0, 0)
+effectHud.Size = UDim2.fromOffset(250, 52)
+effectHud.Parent = screen
+scaled(effectHud)
+local effectSlots = {}
+local function effectSlot(index: number)
+	local slot = effectSlots[index]
+	if not slot then
+		local back = image(effectHud, "Effect" .. index, 0, 0, 24, 24, 5)
+		local icon = image(back, "Icon", 3, 3, 18, 18, 6)
+		slot = { back = back, icon = icon }
+		effectSlots[index] = slot
+	end
+	return slot
+end
+
+local nextSwirl = 0
+RunService.Heartbeat:Connect(function()
+	-- the icons: good ones in the first row, bad ones below (Minecraft: 25 pixels apart from the right)
+	local good, bad, used = 0, 0, 0
+	local now = os.clock()
+	for _, effect in ipairs(myEffects) do
+		if effect.icon == false then
+			continue
+		end
+		local picture = gui("effect_" .. tostring(effect.id))
+		if not picture then
+			continue
+		end
+		used += 1
+		local slot = effectSlot(used)
+		local row, column
+		if effect.good ~= false then
+			good += 1
+			row, column = 0, good
+		else
+			bad += 1
+			row, column = 1, bad
+		end
+		slot.back.Position = UDim2.fromOffset(250 - 25 * column, 1 + row * 26)
+		setPicture(slot.back, gui(if effect.ambient then "effect_background_ambient" else "effect_background"))
+		setPicture(slot.icon, picture)
+		local seconds = tonumber(effect.dur) or -1
+		-- the last 10 seconds: the icon blinks (Minecraft)
+		slot.icon.ImageTransparency = if seconds >= 0 and seconds <= 10 then 0.5 - 0.5 * math.cos(now * 6) else 0
+	end
+	for index = used + 1, #effectSlots do
+		effectSlots[index].back.Visible = false
+	end
+	for index = 1, used do
+		effectSlots[index].back.Visible = true
+	end
+	-- the swirl around every player with an effect (not visible ones: invisible players show none), 4 times a second
+	if now >= nextSwirl then
+		nextSwirl = now + 0.25
+		for _, other in ipairs(Players:GetPlayers()) do
+			local character = other.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if not root or not root:IsA("BasePart") then
+				continue
+			end
+			local list = if other == player then myEffects else decodeEffects(other:GetAttribute("McEffects"))
+			if #list == 0 or (other == player and (player:GetAttribute("McView") or 1) == 1) then
+				continue
+			end
+			local r, g, b, n = 0, 0, 0, 0
+			local invisible = false
+			for _, effect in ipairs(list) do
+				if effect.id == "invisibility" then
+					invisible = true
+				end
+				if effect.ambient ~= true and type(effect.color) == "number" then
+					local colour = effect.color :: number
+					r += bit32.rshift(colour, 16) % 256
+					g += bit32.rshift(colour, 8) % 256
+					b += colour % 256
+					n += 1
+				end
+			end
+			if n > 0 and not invisible then
+				particleBurst("effect", root.Position - Vector3.new(0, 1.5, 0), Color3.fromRGB(r / n, g / n, b / n))
+			end
+		end
+	end
+	-- Minecraft players (NPCs): their swirl colour + invisibility come with their snapshot
+	local others: { Model } = {}
+	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
+	if npcFolder then
+		for _, serverFolder in ipairs(npcFolder:GetChildren()) do
+			for _, model in ipairs(serverFolder:GetChildren()) do
+				if model:IsA("Model") then
+					table.insert(others, model)
+					local colour = model:GetAttribute("McEffectColor")
+					local root = model:FindFirstChild("HumanoidRootPart")
+					if type(colour) == "number" and root and root:IsA("BasePart") and model:GetAttribute("McInvisible") ~= true
+						and particleRandom:NextNumber() < 0.07 then -- (about 4 times a second)
+						particleBurst("effect", root.Position - Vector3.new(0, 1.5, 0),
+							Color3.fromRGB(bit32.rshift(colour, 16) % 256, bit32.rshift(colour, 8) % 256, colour % 256))
+					end
+				end
+			end
+		end
+	end
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player and other.Character then
+			table.insert(others, other.Character)
+		end
+	end
+	-- invisible players (Minecraft's invisibility): the others do not see them
+	for _, character in ipairs(others) do
+		do
+			local hidden = character:GetAttribute("McInvisible") == true
+			if character:GetAttribute("McHiddenHere") ~= hidden then
+				character:SetAttribute("McHiddenHere", hidden)
+				for _, item in ipairs(character:GetDescendants()) do
+					if item:IsA("BasePart") or item:IsA("Decal") or item:IsA("Texture") then
+						(item :: any).LocalTransparencyModifier = if hidden then 1 else 0
+					end
+				end
+			end
+		end
+	end
+end)
+-- endregion
+
+-- region the item in the hand: at the right arm of everybody (attribute McHeld), in first person bottom right
+local PIXEL = (assets and assets.scale or 3) / 16
+local HELD_FACES = {
+	{ Enum.NormalId.Top, "up" }, { Enum.NormalId.Bottom, "down" }, { Enum.NormalId.Front, "north" },
+	{ Enum.NormalId.Back, "south" }, { Enum.NormalId.Right, "east" }, { Enum.NormalId.Left, "west" },
+}
+-- A part that looks like the item: a block item = a small cube with its pictures, everything else = a flat picture
+-- (seen from both sides). size = its width in studs.
+local function heldPart(id: string, size: number): (BasePart?, boolean)
+	local item = itemInfo(id)
+	if not item then
+		return nil, false
+	end
+	local look = assets and assets.blocks and (assets.blocks[item.look or ""] or assets.blocks[item.block or ""])
+	local part = Instance.new("Part")
+	part.Name = "McHeldItem"
+	part.Anchored = false
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Massless = true
+	part.CastShadow = false
+	part.Transparency = 1
+	if look and look.cube and type(item.icon) ~= "string" then
+		part.Size = Vector3.one * size * 0.6
+		for _, face in ipairs(HELD_FACES) do
+			local content = worldContent(look.faces and look.faces[face[2]], 0)
+			if content then
+				local texture = Instance.new("Texture")
+				texture.Face = face[1]
+				texture.StudsPerTileU = part.Size.X
+				texture.StudsPerTileV = part.Size.X
+				texture.TextureContent = content
+				texture.Parent = part
+			end
+		end
+		return part, true
+	end
+	local content = iconContent(id)
+	if not content then
+		part:Destroy()
+		return nil, false
+	end
+	part.Size = Vector3.new(0.05, size, size)
+	for _, face in ipairs({ Enum.NormalId.Right, Enum.NormalId.Left }) do
+		local texture = Instance.new("Texture")
+		texture.Face = face
+		texture.StudsPerTileU = size
+		texture.StudsPerTileV = size
+		texture.TextureContent = content
+		texture.Parent = part
+	end
+	return part, false
+end
+
+local function attachHeld(model: Model)
+	local old = model:FindFirstChild("McHeldItem", true)
+	if old then
+		old:Destroy()
+	end
+	local id = model:GetAttribute("McHeld")
+	local arm = model:FindFirstChild("RightArm")
+	if type(id) ~= "string" or not arm or not arm:IsA("BasePart") then
+		return
+	end
+	local part, block = heldPart(id, 10 * PIXEL)
+	if not part then
+		return
+	end
+	-- Minecraft (ItemInHandLayer): at the hand, a little forward; tools point forward, blocks sit in the hand
+	local weld = Instance.new("Weld")
+	weld.Part0 = arm
+	weld.Part1 = part
+	weld.C0 = if block then CFrame.new(0, -7 * PIXEL, -2 * PIXEL)
+		else CFrame.new(0, -6 * PIXEL, -4 * PIXEL) * CFrame.Angles(math.rad(-45), 0, 0)
+	weld.Parent = part
+	part.Parent = model
+end
+
+local watchedHeld: { [Model]: boolean } = setmetatable({}, { __mode = "k" }) :: any
+local function watchHeld(model: Model)
+	if watchedHeld[model] then
+		return
+	end
+	watchedHeld[model] = true
+	model:GetAttributeChangedSignal("McHeld"):Connect(function()
+		attachHeld(model)
+	end)
+	attachHeld(model)
+end
+
+-- first person: the item bottom right in front of the camera, swinging with the arm (Minecraft's ItemInHandRenderer)
+local firstPersonItem: BasePart? = nil
+local firstPersonId: string? = nil
+RunService.RenderStepped:Connect(function()
+	local stack = hotbarStack(selected)
+	local id = if stack then stack.id else nil
+	local camera = workspace.CurrentCamera
+	local show = id ~= nil and camera ~= nil and (player:GetAttribute("McView") or 1) == 1 and not inventoryOpen
+		and gameMode() ~= "spectator"
+	if id ~= firstPersonId or (show and not firstPersonItem) then
+		if firstPersonItem then
+			firstPersonItem:Destroy()
+			firstPersonItem = nil
+		end
+		firstPersonId = id
+		if id and assets then
+			local part = heldPart(id, 0.55 * (assets.scale or 3))
+			if part then
+				part.Anchored = true
+				firstPersonItem = part
+			end
+		end
+	end
+	local part = firstPersonItem
+	if part and camera then
+		part.Parent = if show then camera else nil
+		if show then
+			local block = assets and assets.scale or 3
+			local since = os.clock() - (tonumber(player:GetAttribute("McSwingAt")) or -100)
+			local swing = if since < 0.3 then math.sin(since / 0.3 * math.pi) else 0
+			part.CFrame = camera.CFrame * CFrame.new(0.56 * block, (-0.52 - 0.25 * swing) * block, (-0.9 + 0.2 * swing) * block)
+				* CFrame.Angles(math.rad(-20 - 60 * swing), math.rad(-35), 0)
+		end
+	end
+	-- third person: everybody's item at the arm (new characters / NPCs get watched); mine not in first person
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other.Character then
+			watchHeld(other.Character)
+		end
+	end
+	local myCharacter = player.Character
+	local myHeld = myCharacter and myCharacter:FindFirstChild("McHeldItem")
+	if myHeld then
+		local hidden = (player:GetAttribute("McView") or 1) == 1
+		for _, texture in ipairs(myHeld:GetChildren()) do
+			if texture:IsA("Texture") then
+				texture.Transparency = if hidden then 1 else 0
+			end
+		end
+	end
+	local npcs = workspace:FindFirstChild("BridgeRemotePlayers")
+	if npcs then
+		for _, serverFolder in ipairs(npcs:GetChildren()) do
+			for _, model in ipairs(serverFolder:GetChildren()) do
+				if model:IsA("Model") then
+					watchHeld(model)
+				end
+			end
+		end
+	end
+end)
+-- endregion
+
+-- region crosshair + attack indicator (Minecraft: the charge of the next hit under the crosshair)
+local crosshair = image(screen, "Crosshair", 0, 0, 15, 15, 5)
+crosshair.AnchorPoint = Vector2.new(0.5, 0.5)
+crosshair.Position = UDim2.fromScale(0.5, 0.5)
+scaled(crosshair)
+local indicator = image(screen, "AttackIndicator", 0, 0, 16, 4, 5)
+indicator.AnchorPoint = Vector2.new(0.5, 0)
+scaled(indicator)
+local indicatorClip = Instance.new("Frame") -- shows the left part of the full bar (charge x 17 pixels)
+indicatorClip.Name = "Clip"
+indicatorClip.BackgroundTransparency = 1
+indicatorClip.ClipsDescendants = true
+indicatorClip.Size = UDim2.fromOffset(0, 4)
+indicatorClip.ZIndex = 6
+indicatorClip.Parent = indicator
+local indicatorFill = image(indicatorClip, "Progress", 0, 0, 16, 4, 6)
+RunService.RenderStepped:Connect(function()
+	local playing = UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter and not inventoryOpen
+	local firstPerson = (player:GetAttribute("McView") or 1) == 1
+	local cross = gui("crosshair")
+	crosshair.Visible = playing and firstPerson and cross ~= nil and gameMode() ~= "spectator"
+	if cross and crosshair.ImageContent ~= cross then
+		setPicture(crosshair, cross)
+	end
+	-- charge: (ticks since the last swing + 0.5) / (20 / attack speed of the item in the hand), shown while < 1
+	local stack = hotbarStack(selected)
+	local info = stack and itemInfo(stack.id)
+	local speed = if info and tonumber(info.speed) then tonumber(info.speed) :: number else 4
+	local since = os.clock() - (tonumber(player:GetAttribute("McSwingAt")) or -100)
+	local charge = math.clamp((since * 20 + 0.5) / (20 / math.max(0.1, speed)), 0, 1)
+	local background, progress = gui("crosshair_attack_indicator_background"), gui("crosshair_attack_indicator_progress")
+	indicator.Visible = crosshair.Visible and charge < 1 and background ~= nil and progress ~= nil
+	if indicator.Visible then
+		local scale = guiScale()
+		indicator.Position = UDim2.new(0.5, 0, 0.5, 9 * scale)
+		setPicture(indicator, background)
+		setPicture(indicatorFill, progress)
+		indicatorClip.Size = UDim2.fromOffset(math.min(16, math.floor(charge * 17)), 4)
+	end
+end)
+-- endregion
+
 -- "/drehen oben 90": every Top / Bottom picture again, turned
 for _, name in ipairs({ "McTopTurn", "McBottomTurn" }) do
 	ReplicatedStorage:GetAttributeChangedSignal(name):Connect(function()
@@ -2496,6 +3162,7 @@ local function useAssets(newAssets)
 	end
 	local first = assets == nil
 	assets = newAssets
+	rebuildTabs()
 	applyAllTextures()
 	refresh()
 	rebuildUnknownItems()

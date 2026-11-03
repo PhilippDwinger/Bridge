@@ -139,6 +139,7 @@ local function switchView()
 	if os.clock() - switchedAt > 0.15 then
 		switchedAt = os.clock()
 		view = view % 3 + 1
+		player:SetAttribute("McView", view) -- (MinecraftClient: the crosshair only in first person)
 	end
 end
 
@@ -165,6 +166,50 @@ player:GetAttributeChangedSignal("McSwingAt"):Connect(function()
 		animation:swing()
 	end
 end)
+-- endregion
+
+-- region status effects (from Minecraft: the player attribute McEffects, JSON [{id, amp, dur, ...}])
+local HttpService = game:GetService("HttpService")
+local effects: { [string]: any } = {} -- id -> {amp, dur, ...}
+local skyModule: any = nil
+local function readEffects()
+	local list = {}
+	local ok, decoded = pcall(function()
+		return HttpService:JSONDecode(player:GetAttribute("McEffects") or "[]")
+	end)
+	if ok and type(decoded) == "table" then
+		for _, effect in ipairs(decoded) do
+			if type(effect) == "table" and type(effect.id) == "string" then
+				list[effect.id] = effect
+			end
+		end
+	end
+	effects = list
+	if not skyModule then
+		local found = ReplicatedStorage:FindFirstChild("MinecraftSky")
+		if found then
+			local loaded, module = pcall(require, found :: any)
+			skyModule = if loaded then module else false
+		end
+	end
+	if skyModule then
+		skyModule.effects = list -- (night vision, blindness: MinecraftSky)
+	end
+end
+player:GetAttributeChangedSignal("McEffects"):Connect(readEffects)
+readEffects()
+
+-- Minecraft: speed +20 % per level, slowness -15 % per level (the walking speed attribute)
+local function effectSpeed(): number
+	local factor = 1
+	if effects.speed then
+		factor *= 1 + 0.2 * ((tonumber(effects.speed.amp) or 0) + 1)
+	end
+	if effects.slowness then
+		factor *= math.max(0, 1 - 0.15 * ((tonumber(effects.slowness.amp) or 0) + 1))
+	end
+	return factor
+end
 -- endregion
 
 -- region walking + flying (Minecraft's own movement, per tick turned into per frame)
@@ -478,7 +523,8 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 		humanoid.Jump = false
 		return
 	end
-	local speed = if sneaking then Character.SNEAK_SPEED elseif sprinting then Character.SPRINT_SPEED else Character.WALK_SPEED
+	local speed = (if sneaking then Character.SNEAK_SPEED elseif sprinting then Character.SPRINT_SPEED else Character.WALK_SPEED)
+		* effectSpeed()
 	if sneaking and grounded and move.Magnitude > 0 then
 		groundParams.FilterDescendantsInstances = { root.Parent :: Instance }
 		move = stayOnEdge(root, move, speed)
@@ -502,7 +548,22 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 		end)
 		local velocity = root.AssemblyLinearVelocity
 		local push = if sprinting then forward * SPRINT_JUMP else Vector3.zero
-		root.AssemblyLinearVelocity = Vector3.new(velocity.X + push.X, Character.JUMP_VELOCITY, velocity.Z + push.Z)
+		-- jump boost: + 0.1 blocks / tick per level (Minecraft's getJumpBoostPower)
+		local boost = if effects.jump_boost then 0.1 * ((tonumber(effects.jump_boost.amp) or 0) + 1) * TICKS * BLOCK else 0
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X + push.X, Character.JUMP_VELOCITY + boost, velocity.Z + push.Z)
+	end
+	-- levitation: up with 0.05 blocks / tick per level (Minecraft: vy += (target - vy) x 0.2 per tick, no gravity);
+	-- slow falling: falling with 1/8 of the gravity
+	if effects.levitation then
+		local target = 0.05 * ((tonumber(effects.levitation.amp) or 0) + 1) * TICKS * BLOCK
+		local velocity = root.AssemblyLinearVelocity
+		local vy = target + (velocity.Y - target) * 0.8 ^ (TICKS * dt) + workspace.Gravity * dt
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X, vy, velocity.Z)
+	elseif effects.slow_falling then
+		local velocity = root.AssemblyLinearVelocity
+		if velocity.Y < 0 then
+			root.AssemblyLinearVelocity = Vector3.new(velocity.X, velocity.Y + workspace.Gravity * 0.875 * dt, velocity.Z)
+		end
 	end
 	humanoid.Jump = false
 end

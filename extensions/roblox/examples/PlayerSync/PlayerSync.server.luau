@@ -352,6 +352,16 @@ local function onSnapshot(data, event)
 			npc.yaw = tonumber(player.r) or 0
 			npc.crouch = player.c == true
 			npc.swim = player.sm == true -- swimming (sprinting under water: lying in the water)
+			-- (Minecraft only) the item in his hand, the colour of his status effects, invisible
+			if npc.model then
+				local held = if type(player.hi) == "string" and player.hi ~= "" then player.hi else nil
+				if npc.model:GetAttribute("McHeld") ~= held then
+					npc.model:SetAttribute("McHeld", held)
+				end
+				local fx = tonumber(player.fx)
+				npc.model:SetAttribute("McEffectColor", if fx and fx >= 0 then fx else nil)
+				npc.model:SetAttribute("McInvisible", player.inv == true)
+			end
 			npc.sprint = player.sp == true
 			npc.rootHeight = tonumber(player.f)
 			npc.pitch = tonumber(player.hp)
