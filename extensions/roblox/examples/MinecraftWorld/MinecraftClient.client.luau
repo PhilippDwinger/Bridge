@@ -1571,6 +1571,7 @@ rayParams.FilterType = Enum.RaycastFilterType.Include
 
 local target = nil -- the block under the crosshair: {x, y, z, normal, face, hit, name, part, box, parts}
 local targetNpc = nil -- or the NPC of a Minecraft player under the crosshair (left click hits him)
+local targetMob = nil -- or the id of a Minecraft mob under the crosshair (left click hits it: Minecraft's attack)
 
 local function blockOf(position: Vector3): (number, number, number)
 	local scale = assets.scale
@@ -1613,6 +1614,7 @@ end
 local function findTarget()
 	target = nil
 	targetNpc = nil
+	targetMob = nil
 	local worldFolder = workspace:FindFirstChild("MinecraftWorld")
 	local character = player.Character
 	if not assets or not worldFolder or not character or inventoryOpen or gameMode() == "spectator" then
@@ -1624,7 +1626,15 @@ local function findTarget()
 		return
 	end
 	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
-	rayParams.FilterDescendantsInstances = if npcFolder then { worldFolder, npcFolder } else { worldFolder }
+	local mobsHere = workspace:FindFirstChild("MinecraftMobs")
+	local aimAt = { worldFolder }
+	if npcFolder then
+		table.insert(aimAt, npcFolder)
+	end
+	if mobsHere then
+		table.insert(aimAt, mobsHere)
+	end
+	rayParams.FilterDescendantsInstances = aimAt
 	local result = workspace:Raycast(origin, look * (reach() + 1) * assets.scale, rayParams)
 	-- what you only bump into (the upper half of a fence) is not aimed at: look past it (Minecraft aims at the outline)
 	for _ = 1, 4 do
@@ -1639,6 +1649,13 @@ local function findTarget()
 		return
 	end
 	local distance = (result.Position - origin).Magnitude
+	local mobId = result.Instance:GetAttribute("McMob")
+	if type(mobId) == "number" then
+		if distance <= (attackReach() + 0.5) * assets.scale then
+			targetMob = mobId
+		end
+		return
+	end
 	if npcFolder and result.Instance:IsDescendantOf(npcFolder) then
 		local model = result.Instance:FindFirstAncestorOfClass("Model")
 		while model and model:GetAttribute("McUserId") == nil do
@@ -1989,6 +2006,18 @@ local function act(action: string, repeated: boolean?)
 		return
 	end
 	if action == "break" then
+		if targetMob then
+			-- a mob: Minecraft's own attack with his item (crit when falling, sword sweep, knockback)
+			swingArm()
+			local character = player.Character
+			local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+			local velocityY = if rootPart and rootPart:IsA("BasePart") then rootPart.AssemblyLinearVelocity.Y else 0
+			local falling = not onGround() and velocityY < 0 and player:GetAttribute("McFluid") == nil
+				and player:GetAttribute("McFlying") ~= true
+			attackRemote:FireServer(nil, { falling = falling, sprint = character ~= nil
+				and character:GetAttribute("McSprint") == true }, targetMob)
+			return
+		end
 		if targetNpc then
 			swingArm()
 			-- hit the Minecraft player (Minecraft does the damage: with the item in the hand, its charge, and a
@@ -3386,7 +3415,7 @@ end
 -- the parts of one mob: per Minecraft part its boxes (anchored, pictures on all six sides)
 local MOB_FACES = { up = Enum.NormalId.Top, down = Enum.NormalId.Bottom, north = Enum.NormalId.Front,
 	south = Enum.NormalId.Back, east = Enum.NormalId.Right, west = Enum.NormalId.Left }
-local function buildMob(look: any): (Model, { any })
+local function buildMob(look: any, id: number): (Model, { any })
 	local model = Instance.new("Model")
 	model.Name = "Mob"
 	local parts = {}
@@ -3399,9 +3428,10 @@ local function buildMob(look: any): (Model, { any })
 			part.Name = spec.n
 			part.Anchored = true
 			part.CanCollide = false
-			part.CanQuery = false
+			part.CanQuery = true -- (aimed at: left click hits it)
 			part.CanTouch = false
 			part.Transparency = 1
+			part:SetAttribute("McMob", id)
 			part.Size = Vector3.new(math.max(size.X, 0.02), math.max(size.Y, 0.02), math.max(size.Z, 0.02))
 			for direction, key in pairs(box.f or {}) do
 				local normal = MOB_FACES[direction]
@@ -3499,13 +3529,13 @@ RunService.RenderStepped:Connect(function()
 	local scale = assets.scale or 3
 	local now = os.clock()
 	local moveParts, moveFrames = {}, {}
-	for _, mob in pairs(mobs) do
+	for id, mob in pairs(mobs) do
 		local look = mobLooks[mob.kind]
 		if type(look) ~= "table" then
 			continue
 		end
 		if not mob.model then
-			mob.model, mob.parts = buildMob(look)
+			mob.model, mob.parts = buildMob(look, id)
 			mob.model.Parent = mobFolder
 		end
 		local a, b = mob.from, mob.to

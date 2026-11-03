@@ -2758,7 +2758,44 @@ end)
 
 -- A Roblox player hits a Minecraft player's NPC: Minecraft does the damage (with knockback from our mannequin)
 local attackedAt = {}
-attackRemote.OnServerEvent:Connect(function(player, model, how)
+attackRemote.OnServerEvent:Connect(function(player, model, how, mobId)
+	if model == nil and type(mobId) == "number" then
+		-- a mob: Minecraft's attack by his stand-in (the item in his hand, crit, sweep, knockback - Minecraft checks reach)
+		local now = os.clock()
+		if gameModeOf(player) == "spectator" or now - (attackedAt[player] or 0) < 1 / ATTACKS_PER_SECOND then
+			return
+		end
+		attackedAt[player] = now
+		local since = now - (lastSwing[player] or 0)
+		lastSwing[player] = now
+		local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		local falling = type(how) == "table" and how.falling == true and root ~= nil and root.AssemblyLinearVelocity.Y < 2
+		local sprint = type(how) == "table" and how.sprint == true
+		exhaustNext[player] = (exhaustNext[player] or 0) + 0.1
+		swingArm(player)
+		task.spawn(function()
+			local ok, result = pcall(client.Call, client, HURT, { mob = mobId, attacker = player.UserId, since = since,
+				falling = falling, sprint = sprint, feet = feetOf(player) }, { Timeout = 10 })
+			if ok and type(result) == "table" and type(result.at) == "table" then
+				local info = world.info
+				if info then
+					local scale = info.studsPerBlock
+					local at = Vector3.new((tonumber(result.at[1]) or 0) * scale, ((tonumber(result.at[2]) or 0) - info.minY + 1) * scale,
+						(tonumber(result.at[3]) or 0) * scale)
+					if result.crit then
+						particlesRemote:FireAllClients("crit", at)
+					end
+					if result.magic then
+						particlesRemote:FireAllClients("magic", at)
+					end
+				end
+			end
+			if type(result) == "table" and result.state then
+				setState(player, result.state) -- (the sword wears)
+			end
+		end)
+		return
+	end
 	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
 	if typeof(model) ~= "Instance" or not model:IsA("Model") or not npcFolder or not model:IsDescendantOf(npcFolder)
 		or gameModeOf(player) == "spectator" then
