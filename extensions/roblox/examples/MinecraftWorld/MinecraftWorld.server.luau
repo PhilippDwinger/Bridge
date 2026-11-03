@@ -8,13 +8,18 @@
 	     reload after a Minecraft restart or a lost connection
 	  3. players: the script PlayerSync (same game) shows the Minecraft players (as Minecraft characters) and sends ours to
 	     Minecraft (shown there as mannequins). Same coordinates: 1 block = 3 studs, the lowest Minecraft layer at y 0.
-	  4. textures + items (command mcworld.assets): pictures from the Minecraft game itself - textured blocks (for now
-	     the grass block) get their own parts with a Texture per side; the client script MinecraftClient turns the
-	     pixels into images (EditableImage, they only exist on the client) and shows hotbar + inventory
-	  5. building (RemoteEvent ReplicatedStorage.MinecraftWorld.Edit -> command mcworld.edit): Roblox players place and
-	     break blocks like in creative mode; shown here at once, Minecraft confirms over mcworld.changes
-	  6. health like Minecraft (20 = 10 hearts): fall damage (Fall), hitting a Minecraft player's NPC (Attack ->
-	     command mcworld.hurt), Minecraft players hitting our mannequins (direct message "mc.hurt" from the mod)
+	  4. textures + items (command mcworld.assets): pictures from the Minecraft game itself - textured blocks get their
+	     own parts with a Texture per side, models (levers, redstone, stairs ...) parts per box; the client script
+	     MinecraftClient turns the pixels into images (EditableImage, they only exist on the client) and shows
+	     hotbar + inventory
+	  5. every Roblox player is a Minecraft player there (game mode + inventory in Minecraft, command mcworld.player):
+	     building (RemoteEvent Edit -> command mcworld.edit) goes through Minecraft's own code - right click "use"
+	     (doors, levers, buttons, or placing: logs lie the way you click, pistons face you), left click "break"
+	     (survival: after the breaking time, drops into the inventory); the inventory (RemoteEvent Inventory: clicks,
+	     crafting, creative items); block looks for every state ("minecraft:oak_log[axis=x]": cubes and models)
+	  6. health like Minecraft (20 = 10 hearts, not in creative / spectator): fall damage (Fall), hitting a Minecraft
+	     player's NPC (Attack -> command mcworld.hurt), Minecraft players hitting our mannequins (direct message
+	     "mc.hurt"); dying = Minecraft's death (message, the inventory falls out)
 	  7. everybody is a Minecraft player: StarterCharacter = MinecraftCharacter (Minecraft's model, hitbox, speeds,
 	     jump; Workspace.Gravity like Minecraft). Skins (command mcworld.skin): every model with the attribute
 	     McSkinUser gets McSkin (key of the picture) + slim / wide arms; the client asks GetSkin for the pixels.
@@ -50,6 +55,7 @@ local HURT = Config.WorldPrefix .. ".hurt"
 local SKIN = Config.WorldPrefix .. ".skin"
 local CHAT = Config.WorldPrefix .. ".chat"
 local COMMAND = Config.WorldPrefix .. ".command"
+local PLAYER = Config.WorldPrefix .. ".player"
 local CHAT_PER_5S = 6 -- messages / commands per player in 5 seconds
 local MAX_CHAT = 256 -- characters, like Minecraft
 local MAX_HEALTH = 20 -- Minecraft: 10 hearts
@@ -61,7 +67,7 @@ local REACH = 7 -- blocks from the character to a block it changes (Minecraft cr
 local EDITS_PER_SECOND = 12 -- per player
 local AIR = { ["minecraft:air"] = true, ["minecraft:cave_air"] = true, ["minecraft:void_air"] = true }
 -- Without pictures from Minecraft (old mod / dedicated server) the items are still there, with a plain icon
-local DEFAULT_ITEMS = { { id = "minecraft:grass_block", name = "Grass Block", block = "minecraft:grass_block" } }
+local DEFAULT_ITEMS = { { id = "minecraft:grass_block", name = "Grass Block", max = 64 } }
 -- Roblox face -> Minecraft face (same axes: Roblox Front = -Z = Minecraft north, Right = +X = east)
 local FACES = {
 	{ Enum.NormalId.Top, "up" },
@@ -121,14 +127,17 @@ local function remote(className, name)
 end
 local getAssets = remote("RemoteFunction", "GetAssets") -- client asks: pictures, items, scale
 local assetsChanged = remote("RemoteEvent", "AssetsChanged") -- server tells: new pictures (after a Minecraft reload)
-local editRemote = remote("RemoteEvent", "Edit") -- client wants: (action "place" | "break", x, y, z, item id)
+local editRemote = remote("RemoteEvent", "Edit") -- client wants: (action "use" | "break", x, y, z, info)
 local moveRemote = remote("RemoteEvent", "Move") -- client says: (sneaking, sprinting) - shown to everybody + Minecraft
 local attackRemote = remote("RemoteEvent", "Attack") -- client: (NPC model) hits a Minecraft player
 local fallRemote = remote("RemoteEvent", "Fall") -- client: (blocks fallen) - Minecraft's fall damage
 local hurtRemote = remote("RemoteEvent", "Hurt") -- server -> client: (amount, from position or nil) red flash, knockback
 local getSkin = remote("RemoteFunction", "GetSkin") -- client asks: (skin key) -> {w, h, pixels} (64 x 64)
 local chatRemote = remote("RemoteEvent", "Chat")
-local swingRemote = remote("RemoteEvent", "Swing") -- client: hit into the air (the arm swings, Minecraft sees it) -- client: (text) / server -> client: ("mc", kind, text, from) | ("reply", lines)
+local swingRemote = remote("RemoteEvent", "Swing") -- client: hit into the air (the arm swings, Minecraft sees it)
+-- client: (op, ...) "click" | "close" | "creative" | "pick" | "drop" | "state"; server -> client: ("state", state)
+local inventoryRemote = remote("RemoteEvent", "Inventory")
+local miningSpeed = remote("RemoteFunction", "MiningSpeed") -- client asks: (x, y, z, slot, ground) -> progress per tick
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -139,79 +148,145 @@ local function chunkKey(x, z)
 end
 
 -- region blocks -> parts
--- One place that decides how a Minecraft block looks: every full-cube block with pictures from Minecraft gets its own
--- parts with textures, all other blocks (slabs, flowers, ...) are the same grey cube.
--- Blocks with a shape of their own (trapdoors) come with their state: "minecraft:oak_trapdoor[facing=north,half=bottom,open=false]"
+-- One place that decides how a Minecraft block looks. Block names carry what their look depends on
+-- ("minecraft:oak_log[axis=x]", "minecraft:lever[face=wall,facing=east,powered=true]"); Minecraft sends the look of
+-- each such state (MinecraftWorld mod, Models): a cube (6 pictures, already turned the right way) or a model (boxes,
+-- also turned ones, with their pictures + what you bump into + what you aim at). Without a look: the grey cube.
 local function baseName(name)
 	return string.match(name, "^([^%[]+)") or name
 end
 
-local function blockState(name)
-	local props = {}
-	local inner = string.match(name, "%[(.*)%]")
-	for key, value in string.gmatch(inner or "", "([%w_]+)=([%w_]+)") do
-		props[key] = value
-	end
-	return props
-end
-
-local function stateName(base, props) -- always in this order (the mod writes it the same way)
-	return string.format("%s[facing=%s,half=%s,open=%s]", base, props.facing, props.half, props.open)
-end
-
 local function renderKey(name)
-	if name == nil or AIR[name] then
+	if name == nil or AIR[name] or AIR[baseName(name)] then
 		return nil
 	end
 	local assets = world.assets
-	local look = assets and assets.blocks[baseName(name)]
-	if look then
-		return if look.shape then name else baseName(name) -- a shape: every state looks different
+	if assets and assets.blocks[name] then
+		return name
 	end
 	return "placeholder"
 end
 
--- A trapdoor in its block (Minecraft's TrapDoorBlock shapes): size + offset of its middle in blocks, the thin axis
-local THIN = 3 / 16
-local function trapdoorBox(props)
-	if props.open ~= "true" then
-		local y = if props.half == "top" then 0.5 - THIN / 2 else -0.5 + THIN / 2
-		return Vector3.new(1, THIN, 1), Vector3.new(0, y, 0), "Y"
-	end
-	local facing = props.facing
-	if facing == "north" or facing == "south" then
-		return Vector3.new(1, 1, THIN), Vector3.new(0, 0, if facing == "north" then 0.5 - THIN / 2 else -0.5 + THIN / 2), "Z"
-	end
-	return Vector3.new(THIN, 1, 1), Vector3.new(if facing == "west" then 0.5 - THIN / 2 else -0.5 + THIN / 2, 0, 0), "X"
+-- A cube block is merged with its neighbours of the same kind (greedy meshing); models, and cubes with a collision
+-- of their own (soul sand), stand alone
+local function standsAlone(key)
+	local look = world.assets and world.assets.blocks[key]
+	return look ~= nil and (look.cube ~= true or look.single == true)
 end
 
--- the big sides get the whole picture, the thin ones the 3 pixel strip (lying or standing)
-local function shapeTrapdoor(part, key, look, scale, center)
-	local size, offset, thin = trapdoorBox(blockState(key))
-	part.Size = size * scale
-	part.CFrame = CFrame.new(center + offset * scale)
-	for _, face in ipairs(FACES) do
-		local normal = face[1]
-		local faceSize = if normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom then Vector2.new(part.Size.X, part.Size.Z)
-			elseif normal == Enum.NormalId.Left or normal == Enum.NormalId.Right then Vector2.new(part.Size.Z, part.Size.Y)
-			else Vector2.new(part.Size.X, part.Size.Y)
-		local big = (thin == "Y" and (normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom))
-			or (thin == "Z" and (normal == Enum.NormalId.Front or normal == Enum.NormalId.Back))
-			or (thin == "X" and (normal == Enum.NormalId.Left or normal == Enum.NormalId.Right))
-		local texture = Instance.new("Texture")
-		texture.Name = "McTexture"
-		texture.Face = normal
-		if big then
-			texture.StudsPerTileU = scale
-			texture.StudsPerTileV = scale
-			texture:SetAttribute("McTexture", look.full)
-		else
-			texture.StudsPerTileU = faceSize.X
-			texture.StudsPerTileV = faceSize.Y
-			texture:SetAttribute("McTexture", if faceSize.X < faceSize.Y then look.edgeV else look.edge)
-		end
-		texture.Parent = part
+local NORMALS = { up = Enum.NormalId.Top, down = Enum.NormalId.Bottom, north = Enum.NormalId.Front,
+	south = Enum.NormalId.Back, east = Enum.NormalId.Right, west = Enum.NormalId.Left }
+local THIN = 0.02 -- studs: the thickness of flat pieces (redstone dust lies 0.05 studs above the block)
+
+-- The size of a face on the part: width (U) and height (V) of its picture
+local function faceSize(part, normal)
+	local size = part.Size
+	if normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom then
+		return size.X, size.Z
+	elseif normal == Enum.NormalId.Left or normal == Enum.NormalId.Right then
+		return size.Z, size.Y
 	end
+	return size.X, size.Y
+end
+
+local function pictureOn(part, normal, key, tileU, tileV)
+	local texture = Instance.new("Texture")
+	texture.Name = "McTexture"
+	texture.Face = normal
+	texture.StudsPerTileU = tileU
+	texture.StudsPerTileV = tileV
+	texture:SetAttribute("McTexture", key)
+	texture.Parent = part
+end
+
+local function plainPart(name)
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Transparency = 1
+	part.CastShadow = false
+	part.Material = Enum.Material.SmoothPlastic
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	return part
+end
+
+-- boxes in pixels of the block (0..16) -> invisible parts: collision ("Collision") or aim ("Outline"). Collision
+-- parts can always be found by raycasts (standing on a fence); McSolidOnly = not for aiming (the client looks past)
+local function boxParts(parent, boxes, corner, unit, name, collide, query, solidOnly)
+	for _, box in ipairs(boxes or {}) do
+		local size = Vector3.new(box[4] - box[1], box[5] - box[2], box[6] - box[3]) * unit
+		if size.X > 0.001 and size.Y > 0.001 and size.Z > 0.001 then
+			local part = plainPart(name)
+			part.Size = Vector3.new(math.max(size.X, THIN), math.max(size.Y, THIN), math.max(size.Z, THIN))
+			part.CFrame = CFrame.new(corner + Vector3.new(box[1] + box[4], box[2] + box[5], box[3] + box[6]) / 2 * unit)
+			part.CanCollide = collide
+			part.CanQuery = query
+			if solidOnly then
+				part:SetAttribute("McSolidOnly", true)
+			end
+			part.Parent = parent
+		end
+	end
+end
+
+--[[
+	A block with a model (lever, piston head, redstone, stairs, trapdoor, ...): a Model with
+	- one invisible part per box of the look, its faces showing their pictures (a turned box = a turned part)
+	- "Collision" parts (what you bump into - none for redstone, levers, buttons)
+	- "Outline" parts (what you aim at; the client outlines them like Minecraft)
+]]
+local function buildModel(key, look, corner, scale, cell)
+	local model = Instance.new("Model")
+	model.Name = key
+	model:SetAttribute("McBlock", cell) -- which block it is (a piston arm reaches into the next one)
+	local unit = scale / 16
+	for _, piece in ipairs(look.parts or {}) do
+		local part = plainPart("Piece")
+		if type(piece.b) == "table" then
+			local b = piece.b
+			local size = Vector3.new(b[4] - b[1], b[5] - b[2], b[6] - b[3]) * unit
+			part.Size = Vector3.new(math.max(size.X, THIN), math.max(size.Y, THIN), math.max(size.Z, THIN))
+			part.CFrame = CFrame.new(corner + Vector3.new(b[1] + b[4], b[2] + b[5], b[3] + b[6]) / 2 * unit)
+		elseif type(piece.c) == "table" and type(piece.s) == "table" and type(piece.r) == "table" then
+			local c, size, r = piece.c, piece.s, piece.r
+			part.Size = Vector3.new(math.max(size[1] * unit, THIN), math.max(size[2] * unit, THIN), math.max(size[3] * unit, THIN))
+			part.CFrame = CFrame.new(corner + Vector3.new(c[1], c[2], c[3]) * unit)
+				* CFrame.new(0, 0, 0, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9])
+		else
+			continue
+		end
+		for direction, picture in pairs(piece.f or {}) do
+			local normal = NORMALS[direction]
+			if normal then
+				local u, v = faceSize(part, normal)
+				pictureOn(part, normal, picture, u, v)
+			end
+		end
+		part.Parent = model
+	end
+	-- what you bump into + what you aim at (the same boxes: one part does both)
+	local collision, outline = look.boxes or {}, look.outline or look.boxes or {}
+	local same = #collision == #outline
+	if same then
+		for i, box in ipairs(collision) do
+			for j = 1, 6 do
+				if box[j] ~= outline[i][j] then
+					same = false
+				end
+			end
+		end
+	end
+	if same then
+		boxParts(model, collision, corner, unit, "Collision", true, true)
+	else
+		boxParts(model, collision, corner, unit, "Collision", true, true, true)
+		boxParts(model, outline, corner, unit, "Outline", false, true)
+	end
+	return model
 end
 
 local function cellIndex(x, y, z) -- 1-based, order y, z, x (as the mod sends it)
@@ -232,7 +307,7 @@ local function meshSection(section)
 				local start = cellIndex(x, y, z)
 				local key = keys[start]
 				if key and not done[start] then
-					local single = string.find(key, "[", 1, true) ~= nil -- a shape (trapdoor): never merged
+					local single = standsAlone(key) -- a model (lever, stairs, ...) or a cube with its own collision: never merged
 					local function same(cx, cy, cz)
 						local i = cellIndex(cx, cy, cz)
 						return not single and keys[i] == key and not done[i]
@@ -315,6 +390,14 @@ local function renderSection(chunk, sectionY, section, force)
 		local blockX = chunk.x * 16 + box.x
 		local blockY = sectionY * 16 + box.y
 		local blockZ = chunk.z * 16 + box.z
+		local look = world.assets and world.assets.blocks[box.key]
+		local corner = Vector3.new(blockX * scale, (blockY - minY) * scale, blockZ * scale)
+		if look and look.cube ~= true then
+			local model = buildModel(box.key, look, corner, scale, Vector3.new(blockX, blockY, blockZ))
+			model.Parent = chunk.folder
+			kept[id] = model
+			continue
+		end
 		local part = Instance.new("Part")
 		part.Name = "Blocks"
 		part.Anchored = true
@@ -329,15 +412,8 @@ local function renderSection(chunk, sectionY, section, force)
 			(blockY - minY + box.h / 2) * scale,
 			(blockZ + box.d / 2) * scale
 		)
-		local look = world.assets and world.assets.blocks[baseName(box.key)]
-		if look and look.shape == "trapdoor" then
-			part.Name = box.key
-			part.Color = Color3.fromRGB(look.color[1], look.color[2], look.color[3])
-			part.Transparency = 1 -- (it has holes: only the pictures show)
-			part.CastShadow = false
-			shapeTrapdoor(part, box.key, look, scale, part.CFrame.Position)
-		elseif look then
-			-- Textured block: the colour shows until the client has made the pictures; one tile = one block.
+		if look then
+			-- Textured cube: the colour shows until the client has made the pictures; one tile = one block.
 			-- Glass / leaves: the part is invisible, only the pictures (with their holes) show.
 			part.Name = box.key
 			part.Color = Color3.fromRGB(look.color[1], look.color[2], look.color[3])
@@ -345,14 +421,29 @@ local function renderSection(chunk, sectionY, section, force)
 				part.Transparency = 1
 				part.CastShadow = false
 			end
+			if look.fluid then
+				-- water / lava: see-through, you go through it, nobody aims at it
+				part.CanCollide = false
+				part.CanQuery = false
+				part.CanTouch = false
+			end
 			for _, face in ipairs(FACES) do
-				local texture = Instance.new("Texture")
-				texture.Name = "McTexture"
-				texture.Face = face[1]
-				texture.StudsPerTileU = scale
-				texture.StudsPerTileV = scale
-				texture:SetAttribute("McTexture", look.faces[face[2]])
-				texture.Parent = part
+				pictureOn(part, face[1], look.faces[face[2]], scale, scale)
+			end
+			if look.boxes then
+				-- a cube with its own collision (soul sand): the picture does not collide, its boxes do
+				part.CanCollide = false
+				part.CanQuery = look.outline == nil
+				local holder = Instance.new("Model")
+				holder.Name = box.key
+				part.Parent = holder
+				boxParts(holder, look.boxes, corner, scale / 16, "Collision", true, true, look.outline ~= nil)
+				if look.outline then
+					boxParts(holder, look.outline, corner, scale / 16, "Outline", false, true)
+				end
+				holder.Parent = chunk.folder
+				kept[id] = holder
+				continue
 			end
 		end
 		part.Parent = chunk.folder
@@ -389,55 +480,80 @@ local function renderAll(force)
 	end
 end
 
--- Blocks Minecraft has not sent pictures for yet (they appear in the world): ask for them in one call, then build again
-local askQueue = {}
+-- Blocks (states) Minecraft has not sent the look of yet (they appear in the world) and items it has not described yet
+-- (they come into an inventory): ask for them in one call, then build again
+local askQueue = { blocks = {}, items = {} }
 local askScheduled = false
 local mergeBlocks -- below (adds an assets answer)
 local afterNewPictures -- below (re-render + tell the clients)
+local noticeItems -- below
 
-local function noticeBlocks(names)
+local function askLater()
 	local assets = world.assets
-	if not assets or not assets.available then
-		return
-	end
-	for _, fullName in ipairs(names) do
-		local name = if type(fullName) == "string" then baseName(fullName) else nil
-		if name and not AIR[name] and not assets.blocks[name] and not assets.other[name] and not assets.asked[name] then
-			assets.asked[name] = true
-			table.insert(askQueue, name)
-		end
-	end
-	if #askQueue == 0 or askScheduled then
+	if askScheduled or (#askQueue.blocks == 0 and #askQueue.items == 0) then
 		return
 	end
 	askScheduled = true
 	task.delay(0.3, function()
 		askScheduled = false
-		local list = {}
-		while #askQueue > 0 and #list < MAX_ASK do
-			table.insert(list, table.remove(askQueue, 1))
+		local blocks, items = {}, {}
+		while #askQueue.blocks > 0 and #blocks < MAX_ASK do
+			table.insert(blocks, table.remove(askQueue.blocks, 1))
 		end
-		local ok, result = pcall(client.Call, client, ASSETS, { blocks = list }, { Timeout = 20 })
+		while #askQueue.items > 0 and #items < MAX_ASK do
+			table.insert(items, table.remove(askQueue.items, 1))
+		end
+		local ok, result = pcall(client.Call, client, ASSETS, { blocks = blocks, items = items }, { Timeout = 20 })
 		if world.assets ~= assets then
 			return -- everything was loaded again meanwhile
 		end
 		if ok and type(result) == "table" then
 			mergeBlocks(assets, result)
-			for _, name in ipairs(list) do
+			for _, name in ipairs(blocks) do
 				if not assets.blocks[name] then
 					assets.other[name] = true
 				end
 			end
 			afterNewPictures()
 		else
-			for _, name in ipairs(list) do
+			for _, name in ipairs(blocks) do
 				assets.asked[name] = nil -- try again when it shows up next time
 			end
+			for _, id in ipairs(items) do
+				assets.asked["item " .. id] = nil
+			end
 		end
-		if #askQueue > 0 then
-			noticeBlocks({})
-		end
+		askLater()
 	end)
+end
+
+local function noticeBlocks(names)
+	local assets = world.assets
+	if not assets or not assets.available then
+		return
+	end
+	for _, name in ipairs(names) do
+		if type(name) == "string" and not AIR[baseName(name)] and not assets.blocks[name] and not assets.other[name]
+			and not assets.asked[name] then
+			assets.asked[name] = true
+			table.insert(askQueue.blocks, name)
+		end
+	end
+	askLater()
+end
+
+function noticeItems(ids)
+	local assets = world.assets
+	if not assets then
+		return
+	end
+	for _, id in ipairs(ids) do
+		if type(id) == "string" and not assets.itemsById[id] and not assets.asked["item " .. id] then
+			assets.asked["item " .. id] = true
+			table.insert(askQueue.items, id)
+		end
+	end
+	askLater()
 end
 
 local function applyChunk(data)
@@ -572,6 +688,7 @@ local function clientAssets()
 		textures = assets.textures,
 		blocks = assets.blocks,
 		items = assets.items,
+		itemsById = assets.itemsById,
 		gui = assets.gui,
 	}
 end
@@ -594,28 +711,50 @@ local function decodeTexture(texture)
 	return { w = texture.w, h = texture.h, pixels = buffer.fromstring(raw) }
 end
 
--- Adds textures + blocks of an assets answer. Blocks whose pictures did not all arrive count as "other" (grey).
+-- Adds textures + blocks + items of an assets answer. Blocks whose pictures did not all arrive count as "other" (grey).
+local function lookComplete(assets, look)
+	if type(look) ~= "table" then
+		return false
+	end
+	if look.cube == true then
+		if type(look.faces) ~= "table" then
+			return false
+		end
+		for _, face in ipairs(FACES) do
+			if not assets.textures[look.faces[face[2]]] then
+				return false
+			end
+		end
+		return true
+	end
+	if look.model ~= true or type(look.parts) ~= "table" then
+		return false
+	end
+	for _, piece in ipairs(look.parts) do
+		for _, picture in pairs(type(piece) == "table" and piece.f or {}) do
+			if not assets.textures[picture] then
+				return false
+			end
+		end
+	end
+	return true
+end
+
 function mergeBlocks(assets, result)
 	for key, texture in pairs(result.textures or {}) do
 		assets.textures[key] = decodeTexture(texture)
 	end
 	for name, look in pairs(result.blocks or {}) do
-		local complete = type(look) == "table" and look.cube == true and type(look.faces) == "table"
-		if type(look) == "table" and look.shape == "trapdoor" then
-			-- a trapdoor: its whole picture + the two edge strips
-			complete = assets.textures[look.full] ~= nil and assets.textures[look.edge] ~= nil
-				and assets.textures[look.edgeV] ~= nil and type(look.faces) == "table"
-		elseif complete then
-			for _, face in ipairs(FACES) do
-				if not assets.textures[look.faces[face[2]]] then
-					complete = false
-				end
-			end
-		end
-		if complete then
+		if lookComplete(assets, look) then
 			assets.blocks[name] = look
+			assets.other[name] = nil
 		else
 			assets.other[name] = true
+		end
+	end
+	for _, item in ipairs(if type(result.items) == "table" then result.items else {}) do
+		if type(item) == "table" and type(item.id) == "string" then
+			assets.itemsById[item.id] = item
 		end
 	end
 end
@@ -629,12 +768,13 @@ local function count(map)
 end
 
 local function loadAssets(generation)
-	local ok, result = pcall(client.Call, client, ASSETS, nil, { Timeout = 30 })
+	-- the GUI + the item list first (small: the world can be built right away); the item icons come afterwards
+	local ok, result = pcall(client.Call, client, ASSETS, { gui = true }, { Timeout = 30 })
 	if generation ~= world.generation then
 		return
 	end
-	local assets = { available = false, textures = {}, blocks = {}, items = DEFAULT_ITEMS, gui = {}, reason = nil,
-		other = {}, asked = {} }
+	local assets = { available = false, textures = {}, blocks = {}, items = DEFAULT_ITEMS, itemsById = {}, gui = {},
+		reason = nil, other = {}, asked = {} }
 	if ok and type(result) == "table" then
 		mergeBlocks(assets, result)
 		for name, key in pairs(result.gui or {}) do
@@ -643,7 +783,7 @@ local function loadAssets(generation)
 			end
 		end
 		if type(result.items) == "table" and #result.items > 0 then
-			assets.items = result.items
+			assets.items = result.items -- the creative inventory (in this order)
 		end
 		assets.available = result.available == true and next(assets.blocks) ~= nil
 		assets.reason = result.reason
@@ -831,6 +971,12 @@ local function loadWorld()
 		end
 		log(string.format("Minecraft world loaded: %d chunks, %d parts, %.1f s", #list, parts, os.clock() - started))
 		onWorldReady()
+		-- now the icons of the creative inventory (in the background, a few calls)
+		local ids = {}
+		for _, item in ipairs(world.assets and world.assets.items or {}) do
+			table.insert(ids, item.id)
+		end
+		noticeItems(ids)
 	else
 		task.delay(3, function()
 			if generation == world.generation then
@@ -892,8 +1038,27 @@ local function blockAt(x, y, z)
 	return section.palette[(index or 0) + 1] or "minecraft:air"
 end
 
--- region building (Roblox players, creative mode)
+-- region Roblox players as Minecraft players: game mode, inventory, building (mcworld.player / mcworld.edit)
+--[[
+	Every Roblox player is a Minecraft player in Minecraft (the mod keeps a stand-in for him): his game mode
+	(survival / creative / adventure / spectator, changed with /gamemode in the chat) and his inventory live there.
+	Right click = "use" (Minecraft decides: open a door, press a button, pull a lever - or place the item in his hand:
+	a log lies the way you clicked, a piston faces you), left click = "break" (survival: after the breaking time the
+	client counts; the drops go into his inventory). The state comes back with every answer:
+	{gm, sel, slots = [46 x (false | {id, n, name, max, bar?})], carried} -> player attribute McGameMode + to his client.
+]]
 local editTokens = {} -- player -> {tokens, at}
+local states = {} -- player -> his state from Minecraft
+local busy = {} -- player -> list of waiting inventory jobs (one after the other, in order)
+local killedByCommand = {} -- player -> true: Minecraft did the death already (/kill)
+local lastHurt = {} -- player -> {cause, at}
+local NOCLIP = "McNoclip" -- spectators fly through blocks
+pcall(function()
+	local physics = game:GetService("PhysicsService")
+	physics:RegisterCollisionGroup(NOCLIP)
+	physics:CollisionGroupSetCollidable(NOCLIP, "Default", false)
+	physics:CollisionGroupSetCollidable(NOCLIP, NOCLIP, false)
+end)
 
 local function allowEdit(player)
 	local now = os.clock()
@@ -908,37 +1073,106 @@ local function allowEdit(player)
 	return true
 end
 
-Players.PlayerRemoving:Connect(function(player)
-	editTokens[player] = nil
-end)
+local function gameModeOf(player)
+	local state = states[player]
+	return if state and type(state.gm) == "string" then state.gm else "survival"
+end
 
-local function itemById(id)
-	for _, item in ipairs(world.assets and world.assets.items or DEFAULT_ITEMS) do
-		if item.id == id then
-			return item
+-- the attribute everybody sees (clients: flying, hearts, visibility; PlayerSync) + spectators go through blocks
+local function applyGameMode(player)
+	local mode = gameModeOf(player)
+	pcall(function()
+		player:SetAttribute("McGameMode", mode)
+	end)
+	local character = player.Character
+	if character then
+		character:SetAttribute("McGameMode", mode)
+		local group = if mode == "spectator" then NOCLIP else "Default"
+		for _, part in ipairs(character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				pcall(function()
+					part.CollisionGroup = group
+				end)
+			end
 		end
+	end
+end
+
+local function setState(player, state)
+	if type(state) ~= "table" or type(state.slots) ~= "table" then
+		return
+	end
+	states[player] = state
+	applyGameMode(player)
+	local ids = {}
+	for _, stack in ipairs(state.slots) do
+		if type(stack) == "table" and type(stack.id) == "string" then
+			table.insert(ids, stack.id)
+		end
+	end
+	if type(state.carried) == "table" and type(state.carried.id) == "string" then
+		table.insert(ids, state.carried.id)
+	end
+	noticeItems(ids) -- items nobody has seen yet: their icons
+	inventoryRemote:FireClient(player, "state", state)
+end
+
+-- where his feet are, in Minecraft blocks
+local function feetOf(player)
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local info = world.info
+	if not root or not info then
+		return nil
+	end
+	local scale = info.studsPerBlock
+	local position = root.Position
+	return { position.X / scale, (position.Y - Character.ROOT_HEIGHT) / scale + info.minY, position.Z / scale }
+end
+
+local function vectorList(value)
+	if typeof(value) ~= "Vector3" or value.X ~= value.X or value.Y ~= value.Y or value.Z ~= value.Z then
+		return nil
+	end
+	return { value.X, value.Y, value.Z }
+end
+
+local function callPlayer(player, op, args)
+	args = args or {}
+	args.u = player.UserId
+	args.name = player.DisplayName
+	args.op = op
+	local ok, result = pcall(client.Call, client, PLAYER, args, { Timeout = 10 })
+	if ok and type(result) == "table" then
+		if result.state then
+			setState(player, result.state)
+		end
+		return result
+	end
+	if Config.Debug then
+		warn("[MinecraftWorld] " .. op .. " for " .. player.Name .. " failed: " .. tostring(result))
 	end
 	return nil
 end
 
--- Somebody's character stands in the block (Minecraft's hitbox: 0.6 x 1.8 blocks from the feet up)
-local function characterInBlock(center, scale)
-	for _, other in ipairs(Players:GetPlayers()) do
-		local character = other.Character
-		local root = character and character:FindFirstChild("HumanoidRootPart")
-		if root then
-			local p = root.Position
-			local half = scale / 2
-			local feet = p.Y - Character.ROOT_HEIGHT
-			local width = Character.HITBOX.X / 2
-			if math.abs(p.X - center.X) < half + width and math.abs(p.Z - center.Z) < half + width
-				and feet < center.Y + half and feet + Character.HITBOX.Y > center.Y - half then
-				return true
-			end
-		end
+-- inventory clicks one after the other (two quick clicks must reach Minecraft in their order)
+local function inOrder(player, job)
+	local queue = busy[player]
+	if queue then
+		table.insert(queue, job)
+		return
 	end
-	return false
+	queue = { job }
+	busy[player] = queue
+	task.spawn(function()
+		while #queue > 0 do
+			local next = table.remove(queue, 1)
+			pcall(next)
+		end
+		busy[player] = nil
+	end)
 end
+
 
 local function isWhole(value)
 	return type(value) == "number" and value == value and math.floor(value) == value and math.abs(value) < 1e7
@@ -957,21 +1191,95 @@ local function swingArm(player)
 	end
 end
 
-local HORIZONTAL = { north = true, south = true, east = true, west = true }
+local FACE_NAMES = { up = Vector3.new(0, 1, 0), down = Vector3.new(0, -1, 0), north = Vector3.new(0, 0, -1),
+	south = Vector3.new(0, 0, 1), east = Vector3.new(1, 0, 0), west = Vector3.new(-1, 0, 0) }
 
-local function onEdit(player, action, x, y, z, itemId, placement)
-	if (action ~= "place" and action ~= "break" and action ~= "use") or not isWhole(x) or not isWhole(y)
-		or not isWhole(z) then
+-- Somebody's character stands in the block (Minecraft's hitbox: 0.6 x 1.8 blocks from the feet up)
+local function characterInBlock(center, scale)
+	for _, other in ipairs(Players:GetPlayers()) do
+		local character = other.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root and character:GetAttribute("McGameMode") ~= "spectator" then
+			local p = root.Position
+			local half = scale / 2
+			local feet = p.Y - Character.ROOT_HEIGHT
+			local width = Character.HITBOX.X / 2
+			if math.abs(p.X - center.X) < half + width and math.abs(p.Z - center.Z) < half + width
+				and feet < center.Y + half and feet + Character.HITBOX.Y > center.Y - half then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function itemInfo(id)
+	local assets = world.assets
+	if type(id) ~= "string" or not assets then
+		return nil
+	end
+	if assets.itemsById[id] then
+		return assets.itemsById[id]
+	end
+	for _, item in ipairs(assets.items or {}) do
+		if item.id == id then
+			return item
+		end
+	end
+	return nil
+end
+
+--[[
+	A right click that will surely place a plain block (planks, stone, glass: no rotation, nothing to choose): shown at
+	once, Minecraft's answer confirms it. Everything else (logs, stairs, pistons - they turn; doors, levers - they
+	are used) waits for Minecraft (a moment), so nothing ever shows wrong.
+]]
+local function guessPlacement(player, x, y, z, face, slot, sneaking)
+	local mode = gameModeOf(player)
+	local state = states[player]
+	local normal = FACE_NAMES[face]
+	if (mode ~= "creative" and mode ~= "survival") or not state or not normal or not slot then
 		return
 	end
+	local stack = state.slots[37 + slot] -- hotbar slot 0-8 = menu slots 36-44
+	local item = type(stack) == "table" and itemInfo(stack.id)
+	local block = item and item.block
+	if type(block) ~= "string" or string.find(block, "[", 1, true) then
+		return
+	end
+	local clicked = blockAt(x, y, z)
+	local look = world.assets and world.assets.blocks[clicked]
+	-- only on a plain cube that is not used by a click (a crafting table opens, a door opens ...)
+	if not look or look.cube ~= true or look.single or string.find(clicked, "[", 1, true)
+		or (string.find(baseName(clicked), "_table$") and not sneaking) or baseName(clicked) == "minecraft:jukebox" then
+		return
+	end
+	local px, py, pz = x + normal.X, y + normal.Y, z + normal.Z
 	local info = world.info
-	if not world.loaded or not info or y < info.minY or y >= info.maxY or not allowEdit(player) then
+	if not AIR[baseName(blockAt(px, py, pz))] or py < info.minY or py >= info.maxY then
 		return
 	end
 	local scale = info.studsPerBlock
+	if characterInBlock(Vector3.new((px + 0.5) * scale, (py - info.minY + 0.5) * scale, (pz + 0.5) * scale), scale) then
+		return
+	end
+	applyBlocks({ { px, py, pz, block } })
+end
+
+-- info = {face = "up" | ..., hit = Vector3 (studs), slot = 0..8, look = Vector3, ground = boolean}
+local function onEdit(player, action, x, y, z, info)
+	if (action ~= "use" and action ~= "break") or not isWhole(x) or not isWhole(y) or not isWhole(z) then
+		return
+	end
+	info = if type(info) == "table" then info else {}
+	local worldInfo = world.info
+	if not world.loaded or not worldInfo or y < worldInfo.minY or y >= worldInfo.maxY or not allowEdit(player) then
+		return
+	end
+	local scale = worldInfo.studsPerBlock
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
-	local center = Vector3.new((x + 0.5) * scale, (y - info.minY + 0.5) * scale, (z + 0.5) * scale)
+	local center = Vector3.new((x + 0.5) * scale, (y - worldInfo.minY + 0.5) * scale, (z + 0.5) * scale)
 	if not root or (center - root.Position).Magnitude > REACH * scale then
 		return
 	end
@@ -979,61 +1287,118 @@ local function onEdit(player, action, x, y, z, itemId, placement)
 	if not chunk then
 		return -- outside the area Roblox shows
 	end
-	local current = blockAt(x, y, z)
-	local name
-	local extra = {}
-	if action == "use" then
-		-- open / close a wooden trapdoor (iron ones only with redstone, like Minecraft)
-		local base = baseName(current)
-		if not string.find(base, "_trapdoor", 1, true) or base == "minecraft:iron_trapdoor" then
-			return
-		end
-		local props = blockState(current)
-		props.open = if props.open == "true" then "false" else "true"
-		name = stateName(base, props)
-	elseif action == "break" then
-		if AIR[current] then
-			return
-		end
-		name = "minecraft:air"
-	else
-		local item = itemById(itemId)
-		if not item or type(item.block) ~= "string" or not AIR[current] or characterInBlock(center, scale) then
-			return
-		end
-		name = item.block
-		if string.find(name, "_trapdoor", 1, true) then
-			-- the client did Minecraft's placement: which side it hangs on, up or down
-			local facing = if type(placement) == "table" and HORIZONTAL[placement.facing] then placement.facing else "north"
-			local half = if type(placement) == "table" and placement.half == "top" then "top" else "bottom"
-			extra = { facing = facing, half = half }
-			name = stateName(name, { facing = facing, half = half, open = "false" })
-		end
+	local mode = gameModeOf(player)
+	if mode == "spectator" or (action == "break" and mode == "adventure") then
+		return
 	end
-	-- Shown at once; Minecraft confirms it over mcworld.changes (the same block again)
-	applyBlocks({ { x, y, z, name } })
+	if action == "break" then
+		if AIR[baseName(blockAt(x, y, z))] then
+			return
+		end
+		applyBlocks({ { x, y, z, "minecraft:air" } }) -- shown at once; Minecraft confirms (or puts it back)
+	end
 	swingArm(player)
+	local hit = typeof(info.hit) == "Vector3" and info.hit or center
+	local slot = if isWhole(info.slot) and info.slot >= 0 and info.slot <= 8 then info.slot else nil
+	if action == "use" then
+		guessPlacement(player, x, y, z, info.face, slot, character ~= nil and character:GetAttribute("McSneak") == true)
+	end
 	task.spawn(function()
 		local ok, result = pcall(client.Call, client, EDIT, {
+			u = player.UserId,
+			name = player.DisplayName,
 			action = action,
 			x = x,
 			y = y,
 			z = z,
-			block = if action == "place" then baseName(name) else nil,
-			facing = extra.facing,
-			half = extra.half,
-			player = player.Name,
+			face = if FACE_NAMES[info.face] then info.face else "up",
+			hit = { hit.X / scale, hit.Y / scale + worldInfo.minY, hit.Z / scale },
+			look = vectorList(info.look),
+			feet = feetOf(player),
+			slot = slot,
+			sneak = character ~= nil and character:GetAttribute("McSneak") == true,
+			ground = info.ground ~= false,
 		}, { Timeout = 10 })
-		if not ok or type(result) ~= "table" or result.ok ~= true then
-			-- Minecraft said no (somebody stands there, ...) or is not there: show what really is there
-			log(string.format("%s: %s at %d %d %d not possible (%s)", player.Name, action, x, y, z,
-				tostring(if ok and type(result) == "table" then result.reason else result)))
+		if ok and type(result) == "table" then
+			if type(result.blocks) == "table" then
+				applyBlocks(result.blocks) -- what Minecraft made of it (also: not broken = back again)
+			end
+			if result.state then
+				setState(player, result.state)
+			end
+			if result.ok ~= true and Config.Debug then
+				log(string.format("%s: %s at %d %d %d - %s", player.Name, action, x, y, z, tostring(result.reason)))
+			end
+		else
+			log(string.format("%s: %s at %d %d %d not possible (%s)", player.Name, action, x, y, z, tostring(result)))
 			loadChunks({ { chunk.x, chunk.z } }, world.generation)
 		end
 	end)
 end
 
 editRemote.OnServerEvent:Connect(onEdit)
+
+-- The inventory (E): Minecraft's own clicks, creative items, middle click, Q
+inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c)
+	if type(op) ~= "string" or not allowEdit(player) then
+		return
+	end
+	if op == "click" and isWhole(a) and (a == -999 or (a >= 0 and a <= 45)) then
+		inOrder(player, function()
+			callPlayer(player, "click", { slot = a, button = if b == 1 then 1 else 0, shift = c == true, feet = feetOf(player) })
+		end)
+	elseif op == "close" then
+		inOrder(player, function()
+			callPlayer(player, "close", { feet = feetOf(player) })
+		end)
+	elseif op == "creative" and isWhole(a) and (a == -1 or (a >= 1 and a <= 45)) and (b == nil or (type(b) == "string" and #b < 100)) then
+		inOrder(player, function()
+			callPlayer(player, "creative", { slot = a, id = b, count = if isWhole(c) then c else 1, feet = feetOf(player) })
+		end)
+	elseif op == "pick" and isWhole(a) and isWhole(b) and isWhole(c) then
+		inOrder(player, function()
+			callPlayer(player, "pick", { x = a, y = b, z = c }) -- middle click: what Minecraft gives for that block
+		end)
+	elseif op == "drop" then
+		inOrder(player, function()
+			callPlayer(player, "drop", { all = a == true, slot = if isWhole(b) and b >= 0 and b <= 8 then b else nil,
+				feet = feetOf(player), look = vectorList(c) })
+		end)
+	elseif op == "state" then
+		inOrder(player, function()
+			callPlayer(player, "state")
+		end)
+	end
+end)
+
+-- How fast a block breaks for him (survival: Minecraft knows his item, the block, whether he stands)
+local speedAsks = {}
+miningSpeed.OnServerInvoke = function(player, x, y, z, slot, ground)
+	if not isWhole(x) or not isWhole(y) or not isWhole(z) then
+		return nil
+	end
+	local now = os.clock()
+	if now - (speedAsks[player] or 0) < 0.05 then
+		return nil
+	end
+	speedAsks[player] = now
+	local ok, result = pcall(client.Call, client, PLAYER, { u = player.UserId, name = player.DisplayName, op = "speed",
+		x = x, y = y, z = z, slot = if isWhole(slot) then slot else nil, ground = ground ~= false, feet = feetOf(player) },
+		{ Timeout = 10 })
+	return if ok and type(result) == "table" and type(result.progress) == "number" then result.progress else nil
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	if states[player] then
+		task.spawn(callPlayer, player, "close") -- the crafting grid goes back into his inventory
+	end
+	editTokens[player] = nil
+	states[player] = nil
+	busy[player] = nil
+	killedByCommand[player] = nil
+	lastHurt[player] = nil
+	speedAsks[player] = nil
+end)
 
 -- A hit into the air: no block, nobody - Minecraft still swings the arm (the mannequin too)
 local swingTokens = {}
@@ -1049,16 +1414,34 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 -- region health + damage
+local function onDied(player)
+	if killedByCommand[player] then
+		killedByCommand[player] = nil -- Minecraft did it already
+		return
+	end
+	local hurtBy = lastHurt[player]
+	local cause = if hurtBy and os.clock() - hurtBy.at < 10 then hurtBy.cause else "other"
+	-- Minecraft's death: the message for everybody, the inventory falls out where he died (unless keepInventory)
+	callPlayer(player, "died", { feet = feetOf(player), cause = cause })
+end
+
 local function setupHealth(character)
 	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 10)
 	local player = Players:GetPlayerFromCharacter(character)
 	if player then
 		character:SetAttribute("McSkinUser", player.UserId)
 		wantSkin(character)
+		applyGameMode(player)
+		task.spawn(callPlayer, player, "state") -- his game mode + inventory from Minecraft
 	end
 	if humanoid then
 		humanoid.MaxHealth = MAX_HEALTH
 		humanoid.Health = MAX_HEALTH
+		if player then
+			humanoid.Died:Connect(function()
+				onDied(player)
+			end)
+		end
 	end
 end
 
@@ -1077,21 +1460,26 @@ for _, player in ipairs(Players:GetPlayers()) do
 	watchPlayer(player)
 end
 
-local function hurt(player, amount, from)
+-- Creative and spectator players cannot be hurt (Minecraft)
+local function hurt(player, amount, from, cause)
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.Health <= 0 or amount <= 0 then
+	local mode = gameModeOf(player)
+	if not humanoid or humanoid.Health <= 0 or amount <= 0 or mode == "creative" or mode == "spectator" then
 		return
 	end
+	lastHurt[player] = { cause = cause, at = os.clock() }
 	humanoid:TakeDamage(amount)
 	Character.flashRed(character)
 	hurtRemote:FireClient(player, amount, from)
 end
 
--- Minecraft: falling more than 3 blocks hurts 1 per block more
+-- Minecraft: falling more than 3 blocks hurts 1 per block more (not while flying)
 fallRemote.OnServerEvent:Connect(function(player, blocks)
-	if type(blocks) == "number" and blocks == blocks and blocks > 3 then
-		hurt(player, math.ceil(math.min(blocks, 400) - 3), nil)
+	local character = player.Character
+	if type(blocks) == "number" and blocks == blocks and blocks > 3
+		and not (character and character:GetAttribute("McFlying") == true) then
+		hurt(player, math.ceil(math.min(blocks, 400) - 3), nil, "fall")
 	end
 end)
 
@@ -1099,7 +1487,8 @@ end)
 local attackedAt = {}
 attackRemote.OnServerEvent:Connect(function(player, model)
 	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
-	if typeof(model) ~= "Instance" or not model:IsA("Model") or not npcFolder or not model:IsDescendantOf(npcFolder) then
+	if typeof(model) ~= "Instance" or not model:IsA("Model") or not npcFolder or not model:IsDescendantOf(npcFolder)
+		or gameModeOf(player) == "spectator" then
 		return
 	end
 	local target = model:GetAttribute("McUserId")
@@ -1130,30 +1519,40 @@ Players.PlayerRemoving:Connect(function(player)
 	attackedAt[player] = nil
 end)
 
--- A Minecraft player hit our mannequin: the mod sends a direct message to this game server
+-- Direct messages from the mod: a Minecraft player hit our mannequin / his inventory changed (picked something up)
 client.MessageReceived:Connect(function(message)
 	local content = message.Content
-	if type(content) ~= "table" or content.type ~= "mc.hurt" then
+	if type(content) ~= "table" then
 		return
 	end
-	local from = nil
-	if type(content.from) == "table" then
-		from = Vector3.new(tonumber(content.from[1]) or 0, tonumber(content.from[2]) or 0, tonumber(content.from[3]) or 0)
-	end
-	for _, player in ipairs(Players:GetPlayers()) do
-		if player.UserId == content.u then
-			hurt(player, math.clamp(tonumber(content.amount) or 0, 0, 100), from)
+	if content.type == "mc.hurt" then
+		local from = nil
+		if type(content.from) == "table" then
+			from = Vector3.new(tonumber(content.from[1]) or 0, tonumber(content.from[2]) or 0, tonumber(content.from[3]) or 0)
+		end
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.UserId == content.u then
+				hurt(player, math.clamp(tonumber(content.amount) or 0, 0, 100), from, "attack")
+			end
+		end
+	elseif content.type == "mc.player" then
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.UserId == content.u then
+				setState(player, content.state)
+			end
 		end
 	end
 end)
 -- endregion
 
--- Sneaking / sprinting: attributes on the character - the client scripts show the pose, PlayerSync sends it to Minecraft
-moveRemote.OnServerEvent:Connect(function(player, sneak, sprint, pitch)
+-- Sneaking / sprinting / flying: attributes on the character - the client scripts show the pose, PlayerSync sends it
+moveRemote.OnServerEvent:Connect(function(player, sneak, sprint, pitch, flying)
 	local character = player.Character
 	if character then
+		local mode = gameModeOf(player)
 		character:SetAttribute("McSneak", sneak == true)
 		character:SetAttribute("McSprint", sprint == true and sneak ~= true)
+		character:SetAttribute("McFlying", flying == true and (mode == "creative" or mode == "spectator"))
 		if type(pitch) == "number" and pitch == pitch then
 			character:SetAttribute("McPitch", math.clamp(pitch, -1.58, 1.58)) -- the head looks up / down (radians)
 		end
@@ -1209,6 +1608,18 @@ local function runCommand(player, command)
 		table.insert(lines, "/" .. command)
 	end
 	reply(player, lines)
+	if result.state then
+		setState(player, result.state) -- /gamemode, /give, /clear ...
+	end
+	if result.killed == true then
+		-- /kill: Minecraft did his death (message, items) - the character dies too, without a second death
+		local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid and humanoid.Health > 0 then
+			killedByCommand[player] = true
+			humanoid.Health = 0
+		end
+		return
+	end
 	-- the command moved his mannequin (/tp @s ...): his character goes there too (teleport = root part at 3 studs)
 	local teleport = result.teleport
 	local character = player.Character

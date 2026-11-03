@@ -6,14 +6,19 @@
 	  skins (RemoteFunction GetSkin) on every body part with "McSkinFace". Every picture is made once and kept; one
 	  that fails is tried again (no grey blocks any more). Studio / game: Game Settings > Security > "Allow Mesh /
 	  Image APIs" must be on.
-	- Hotbar (keys 1-9, mouse wheel) and inventory (E) with Minecraft's own GUI pictures. Creative mode: items never
-	  run out. Click a slot in the inventory to pick an item up, click another one to put it down (or swap).
-	- Health like Minecraft: 10 hearts over the hotbar, fall damage (more than 3 blocks), left click on a Minecraft
-	  player hits him, hits from Minecraft players come with a red flash, a tilted camera and knockback.
-	- Building: left click breaks the block you look at (hold = repeat), right click places the selected item - aimed
-	  from the eyes like in Minecraft (MinecraftPlayer says where they are and where they look).
-	  The server checks it and sends it to Minecraft over Bridge.
-	Camera, walking, sneaking / sprinting, the animations and the chat: MinecraftPlayer.
+	- The player is a Minecraft player in Minecraft: his game mode and inventory live there (the server sends them:
+	  RemoteEvent Inventory "state"). Hotbar (keys 1-9, mouse wheel) with the item counts, inventory (E): survival /
+	  adventure = Minecraft's inventory with its own clicks (left / right / shift, the 2x2 crafting grid), creative =
+	  the creative inventory (all items, scroll with the wheel, a tab for the normal inventory). Q throws the item
+	  away (Ctrl + Q the whole stack), the middle mouse button picks the block you look at.
+	- Health like Minecraft: 10 hearts over the hotbar (not in creative / spectator), fall damage (more than 3
+	  blocks), left click on a Minecraft player hits him, hits from Minecraft players come with a red flash, a tilted
+	  camera and knockback.
+	- Building: aimed from the eyes like in Minecraft (MinecraftPlayer says where they are and where they look).
+	  Right click = use (Minecraft decides: a door, a lever, a button - or it places the item in the hand), left click
+	  = break: creative at once, survival after Minecraft's breaking time with the cracks, adventure not at all,
+	  spectator nothing. The server sends it to Minecraft over Bridge; Minecraft's own code does it.
+	Camera, walking, flying, sneaking / sprinting, the animations and the chat: MinecraftPlayer.
 ]]
 local AssetService = game:GetService("AssetService")
 local ContextActionService = game:GetService("ContextActionService")
@@ -33,10 +38,12 @@ local fallRemote = remotes:WaitForChild("Fall") :: RemoteEvent
 local hurtRemote = remotes:WaitForChild("Hurt") :: RemoteEvent
 local swingRemote = remotes:WaitForChild("Swing") :: RemoteEvent
 local getSkin = remotes:WaitForChild("GetSkin") :: RemoteFunction
+local inventoryRemote = remotes:WaitForChild("Inventory") :: RemoteEvent
+local miningSpeed = remotes:WaitForChild("MiningSpeed") :: RemoteFunction
 
 local player = Players.LocalPlayer
-local REACH = 5 -- blocks from the eyes, like Minecraft in creative mode
-local REPEAT = 0.25 -- seconds between two actions while a mouse button is held
+local REPEAT_BREAK = 0.25 -- creative: 5 ticks between two blocks while the button is held (also after a block broke)
+local REPEAT_USE = 0.2 -- 4 ticks between two right clicks while the button is held
 local TEXTURE_SCALE = 8 -- world textures: every Minecraft pixel becomes 8x8 (sharp also where Roblox smooths)
 local ICON_SIZE = 128
 local HOTBAR_KEYS = {
@@ -44,23 +51,65 @@ local HOTBAR_KEYS = {
 	[Enum.KeyCode.Five] = 5, [Enum.KeyCode.Six] = 6, [Enum.KeyCode.Seven] = 7, [Enum.KeyCode.Eight] = 8,
 	[Enum.KeyCode.Nine] = 9,
 }
+-- Top / Bottom faces of Roblox parts: how much their pictures have to be turned (clockwise) to look like Minecraft's
+-- (Minecraft's up face: north at the top of the picture). 0 = Roblox lays them the same way.
+local TOP_TURN = 0
+local BOTTOM_TURN = 0
 
 local assets = nil -- what the server sent (see MinecraftWorld: clientAssets)
 local imagesFailed = false -- the very first picture failed: "Allow Mesh / Image APIs" is off
 
--- region inventory state: slots 1-9 = hotbar, 10-36 = the three rows above
-local slots = table.create(36) :: { any }
-local selected = 1
-local cursorItem = nil
+-- region inventory state (from Minecraft)
+--[[
+	state = {gm, sel, slots, carried} - slots[i] = Minecraft's menu slot i - 1: 1 crafting result, 2-5 crafting
+	grid, 6-9 armour, 10-36 inventory, 37-45 hotbar, 46 offhand; each false or {id, n, name, max, bar?}
+]]
+local state: any = { gm = "survival", sel = 0, slots = table.create(46, false), carried = false }
+local stateArrived = false
+local selected = 1 -- hotbar slot 1-9 (chosen here, Minecraft gets it with every click)
 local inventoryOpen = false
+local inventoryView = "survival" -- "survival" | "creative" (the window that is open)
+local creativeCursor = nil -- creative inventory: the item on the mouse {id, n} (only here until it is put down)
 
-local function itemById(id)
-	for _, item in ipairs(assets and assets.items or {}) do
+local function gameMode(): string
+	if stateArrived and type(state.gm) == "string" then
+		return state.gm
+	end
+	local mode = player:GetAttribute("McGameMode")
+	return if type(mode) == "string" then mode else "survival"
+end
+
+local function stackAt(menuSlot: number): any
+	local stack = state.slots[menuSlot + 1]
+	return if type(stack) == "table" then stack else nil
+end
+
+local function hotbarStack(slot: number): any
+	return stackAt(35 + slot) -- hotbar 1-9 = menu slots 36-44
+end
+
+local function itemInfo(id: string?): any
+	if type(id) ~= "string" or not assets then
+		return nil
+	end
+	if assets.itemsById and assets.itemsById[id] then
+		return assets.itemsById[id]
+	end
+	for _, item in ipairs(assets.items or {}) do
 		if item.id == id then
 			return item
 		end
 	end
 	return nil
+end
+
+-- Minecraft: reach 4.5 blocks in survival / adventure, 5 in creative; Minecraft players: 3 / 5
+local function reach(): number
+	return if gameMode() == "creative" then 5 else 4.5
+end
+
+local function attackReach(): number
+	return if gameMode() == "creative" then 5 else 3
 end
 -- endregion
 
@@ -108,14 +157,16 @@ local function makeImage(cacheKey: string, source: string, build: () -> any): Co
 	return content
 end
 
-local function worldContent(key: any): Content?
+local function worldContent(key: any, turn: number?): Content?
 	local texture = type(key) == "string" and assets and assets.textures and assets.textures[key]
 	if not texture then
 		return nil
 	end
-	return makeImage("world:" .. tostring(key), buffer.tostring(texture.pixels), function()
-		return Images.upscale(texture, TEXTURE_SCALE)
-	end)
+	local quarter = ((turn or 0) // 90) % 4
+	return makeImage("world:" .. tostring(key) .. (if quarter ~= 0 then "@" .. quarter else ""), buffer.tostring(texture.pixels),
+		function()
+			return Images.upscale(if quarter ~= 0 then Images.turn(texture, quarter * 90) else texture, TEXTURE_SCALE)
+		end)
 end
 
 local function guiPicture(key: string): Content?
@@ -128,19 +179,49 @@ local function guiPicture(key: string): Content?
 	end)
 end
 
-local function iconContent(item): Content?
+-- An item's icon (like Minecraft's inventory): a flat picture (redstone, doors, tools) or its block / model in 3D
+local function iconContent(id: string?): Content?
+	local item = itemInfo(id)
+	if not id or not item then
+		return nil
+	end
 	local textures = assets and assets.textures or {}
-	local look = item.block and assets and assets.blocks and assets.blocks[item.block]
-	local faces = look and look.faces or {}
-	local top, north, east = textures[faces.up], textures[faces.north], textures[faces.east]
-	if top and north and east then
-		local source = buffer.tostring(top.pixels) .. buffer.tostring(north.pixels) .. buffer.tostring(east.pixels)
-		local thickness = if look.shape == "trapdoor" then 3 / 16 else 1
-		return makeImage("icon:" .. item.id, source, function()
-			return Images.blockIcon(top, north, east, ICON_SIZE, thickness)
+	if type(item.icon) == "string" and textures[item.icon] then
+		local picture = textures[item.icon]
+		return makeImage("icon:" .. id, item.icon, function()
+			return Images.upscale(picture, math.max(1, ICON_SIZE // math.max(picture.w, 1)))
 		end)
 	end
-	return makeImage("icon:" .. item.id, "plain", function()
+	local look = assets and assets.blocks and (assets.blocks[item.look or ""] or assets.blocks[item.block or ""])
+	if look and look.cube then
+		local faces = look.faces or {}
+		local top, north, east = textures[faces.up], textures[faces.north], textures[faces.east]
+		if top and north and east then
+			return makeImage("icon:" .. id, faces.up .. faces.north .. faces.east, function()
+				return Images.blockIcon(top, north, east, ICON_SIZE)
+			end)
+		end
+	elseif look and look.model then
+		local boxes = {}
+		local source = ""
+		for _, piece in ipairs(look.parts or {}) do
+			if type(piece.b) == "table" then
+				local faces = {}
+				for direction, key in pairs(piece.f or {}) do
+					faces[direction] = textures[key]
+					source ..= key
+				end
+				table.insert(boxes, { from = { piece.b[1], piece.b[2], piece.b[3] }, to = { piece.b[4], piece.b[5], piece.b[6] },
+					faces = faces })
+			end
+		end
+		if #boxes > 0 then
+			return makeImage("icon:" .. id, source, function()
+				return Images.modelIcon(boxes, ICON_SIZE)
+			end)
+		end
+	end
+	return makeImage("icon:" .. id, "plain", function()
 		return Images.solid(16, 16, 120, 160, 80) -- a plain square when Minecraft sent no pictures
 	end)
 end
@@ -227,13 +308,18 @@ local function hold(key: string, content: Content)
 	end
 end
 
+local function turnOf(texture: Texture): number
+	return if texture.Face == Enum.NormalId.Top then TOP_TURN elseif texture.Face == Enum.NormalId.Bottom then BOTTOM_TURN else 0
+end
+
 local function showAgain(key: string)
-	local content = worldContent(key)
-	if not content then
+	local plain = worldContent(key)
+	if not plain then
 		return
 	end
 	for texture in pairs(shownBy[key] or {}) do
 		if texture.Parent then
+			local content = worldContent(key, turnOf(texture)) or plain
 			texture.TextureContent = Content.none
 			texture.TextureContent = content
 		end
@@ -241,7 +327,7 @@ local function showAgain(key: string)
 	local holder = holders[key]
 	if holder then
 		holder.TextureContent = Content.none
-		holder.TextureContent = content
+		holder.TextureContent = plain
 	end
 end
 
@@ -258,7 +344,7 @@ local function applyTexture(texture: Texture)
 		content = skinContent(key :: string, region)
 	else
 		local key = texture:GetAttribute("McTexture")
-		content = worldContent(key)
+		content = worldContent(key, turnOf(texture))
 		if content and type(key) == "string" then
 			shownBy[key] = shownBy[key] or setmetatable({}, { __mode = "k" })
 			shownBy[key][texture] = true
@@ -395,6 +481,60 @@ local function setPicture(label: ImageLabel, content: Content?)
 	label.ImageContent = content or Content.none
 end
 
+local function gui(name: string): Content?
+	local key = assets and assets.gui and assets.gui[name]
+	return if key then guiPicture(key) else nil
+end
+
+-- A slot: the icon, the count (bottom right, Minecraft only shows it above 1), the durability bar of tools
+type SlotView = { icon: ImageLabel, count: TextLabel, bar: Frame, fill: Frame }
+local function slotView(parent: Instance, name: string, x: number, y: number, z: number): SlotView
+	local icon = image(parent, name, x, y, 16, 16, z)
+	icon.ResampleMode = Enum.ResamplerMode.Default -- the icons are bigger pictures: smooth
+	local count = Instance.new("TextLabel")
+	count.Name = "Count"
+	count.BackgroundTransparency = 1
+	count.Position = UDim2.fromOffset(x, y + 1)
+	count.Size = UDim2.fromOffset(17, 16)
+	count.TextXAlignment = Enum.TextXAlignment.Right
+	count.TextYAlignment = Enum.TextYAlignment.Bottom
+	count.Font = Enum.Font.Arcade
+	count.TextSize = 9
+	count.TextColor3 = Color3.new(1, 1, 1)
+	count.TextStrokeTransparency = 0.3
+	count.ZIndex = z + 2
+	count.Text = ""
+	count.Parent = parent
+	local bar = Instance.new("Frame")
+	bar.Name = "Durability"
+	bar.BorderSizePixel = 0
+	bar.BackgroundColor3 = Color3.new(0, 0, 0)
+	bar.Position = UDim2.fromOffset(x + 2, y + 13)
+	bar.Size = UDim2.fromOffset(13, 2)
+	bar.ZIndex = z + 1
+	bar.Visible = false
+	bar.Parent = parent
+	local fill = Instance.new("Frame")
+	fill.BorderSizePixel = 0
+	fill.Size = UDim2.fromOffset(13, 1)
+	fill.ZIndex = z + 1
+	fill.Parent = bar
+	return { icon = icon, count = count, bar = bar, fill = fill }
+end
+
+local function showStack(view: SlotView, stack: any)
+	local id = if type(stack) == "table" then stack.id else nil
+	setPicture(view.icon, iconContent(id))
+	local n = if type(stack) == "table" then tonumber(stack.n) or 1 else 0
+	view.count.Text = if n > 1 then tostring(n) else ""
+	local bar = if type(stack) == "table" then tonumber(stack.bar) else nil
+	view.bar.Visible = bar ~= nil
+	if bar then
+		view.fill.Size = UDim2.fromOffset(math.max(1, math.floor(13 * bar + 0.5)), 1)
+		view.fill.BackgroundColor3 = Color3.fromHSV(bar / 3, 1, 1) -- green -> red like Minecraft
+	end
+end
+
 -- Hotbar: 182 x 22 Minecraft pixels at the bottom
 local hotbar = Instance.new("Frame")
 hotbar.Name = "Hotbar"
@@ -405,12 +545,11 @@ hotbar.BackgroundTransparency = 1
 hotbar.Parent = screen
 scaled(hotbar)
 local hotbarBack = image(hotbar, "Background", 0, 0, 182, 22, 1)
-local hotbarIcons = {}
+local hotbarSlots: { SlotView } = {}
 for slot = 1, 9 do
-	hotbarIcons[slot] = image(hotbar, "Slot" .. slot, 3 + (slot - 1) * 20, 3, 16, 16, 2)
-	hotbarIcons[slot].ResampleMode = Enum.ResamplerMode.Default -- the icons are bigger pictures: smooth
+	hotbarSlots[slot] = slotView(hotbar, "Slot" .. slot, 3 + (slot - 1) * 20, 3, 2)
 end
-local selection = image(hotbar, "Selection", -1, -1, 24, 23, 3)
+local selection = image(hotbar, "Selection", -1, -1, 24, 23, 5)
 local itemName = Instance.new("TextLabel")
 itemName.Name = "ItemName"
 itemName.BackgroundTransparency = 1
@@ -425,36 +564,50 @@ itemName.TextTransparency = 1
 itemName.Parent = hotbar
 local nameShownAt = -math.huge
 
--- Inventory: Minecraft's 176 x 166 window in the middle
-local dim = Instance.new("Frame")
+-- The inventory windows over a darker screen; a click on the dark part = outside the window
+local dim = Instance.new("TextButton")
 dim.Name = "Inventory"
+dim.Text = ""
+dim.AutoButtonColor = false
 dim.BackgroundColor3 = Color3.new(0, 0, 0)
 dim.BackgroundTransparency = 0.45
 dim.Size = UDim2.fromScale(1, 1)
 dim.Visible = false
 dim.ZIndex = 10
 dim.Parent = screen
-local window = Instance.new("Frame")
-window.Name = "Window"
-window.AnchorPoint = Vector2.new(0.5, 0.5)
-window.Position = UDim2.fromScale(0.5, 0.5)
-window.Size = UDim2.fromOffset(176, 166)
-window.BackgroundTransparency = 1
-window.ZIndex = 11
-window.Parent = dim
-scaled(window)
-local windowBack = image(window, "Background", 0, 0, 176, 166, 11)
+
+local function newWindow(name: string, w: number, h: number): (Frame, ImageLabel)
+	local frame = Instance.new("Frame")
+	frame.Name = name
+	frame.AnchorPoint = Vector2.new(0.5, 0.5)
+	frame.Position = UDim2.fromScale(0.5, 0.5)
+	frame.Size = UDim2.fromOffset(w, h)
+	frame.BackgroundTransparency = 1
+	frame.ZIndex = 11
+	frame.Parent = dim
+	scaled(frame)
+	local back = image(frame, "Background", 0, 0, w, h, 11)
+	-- clicks on the window itself (not on a slot) are not "outside"
+	local catcher = Instance.new("TextButton")
+	catcher.Text = ""
+	catcher.BackgroundTransparency = 1
+	catcher.Size = UDim2.fromScale(1, 1)
+	catcher.ZIndex = 12
+	catcher.Parent = frame
+	return frame, back
+end
+
+local window, windowBack = newWindow("Window", 176, 166) -- Minecraft's inventory (survival / adventure)
+local creative, creativeBack = newWindow("Creative", 195, 136) -- Minecraft's creative inventory, items tab
+
 local preview = Instance.new("ViewportFrame") -- the player in the black box, like in Minecraft
 preview.Name = "Player"
 preview.BackgroundTransparency = 1
 preview.Position = UDim2.fromOffset(26, 8)
 preview.Size = UDim2.fromOffset(49, 70)
-preview.ZIndex = 12
+preview.ZIndex = 13
 preview.Parent = window
 
-local slotButtons = {}
-local slotIcons = {}
-local hovered = nil
 local highlight = Instance.new("Frame")
 highlight.Name = "Highlight"
 highlight.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -462,69 +615,165 @@ highlight.BackgroundTransparency = 0.55
 highlight.BorderSizePixel = 0
 highlight.Size = UDim2.fromOffset(16, 16)
 highlight.Visible = false
-highlight.ZIndex = 14
-highlight.Parent = window
+highlight.ZIndex = 17
+local hovered: any = nil
+local hoverName = Instance.new("TextLabel") -- the item name next to the mouse (Minecraft's tooltip)
+hoverName.Name = "Tooltip"
+hoverName.BackgroundColor3 = Color3.fromRGB(16, 0, 16)
+hoverName.BackgroundTransparency = 0.1
+hoverName.BorderSizePixel = 0
+hoverName.Font = Enum.Font.Arcade
+hoverName.TextSize = 18
+hoverName.TextColor3 = Color3.new(1, 1, 1)
+hoverName.AutomaticSize = Enum.AutomaticSize.X
+hoverName.Size = UDim2.fromOffset(0, 22)
+hoverName.Visible = false
+hoverName.ZIndex = 40
+hoverName.Parent = screen
 
-local function slotPosition(slot: number): (number, number)
-	if slot <= 9 then
-		return 8 + (slot - 1) * 18, 142 -- hotbar row of the inventory
+-- where Minecraft's menu slots are in the inventory picture
+local function survivalSlotPosition(menuSlot: number): (number, number)
+	if menuSlot == 0 then
+		return 154, 28 -- crafting result
+	elseif menuSlot <= 4 then
+		local index = menuSlot - 1
+		return 98 + (index % 2) * 18, 18 + (index // 2) * 18 -- 2x2 crafting grid
+	elseif menuSlot <= 8 then
+		return 8, 8 + (menuSlot - 5) * 18 -- armour
+	elseif menuSlot <= 35 then
+		local index = menuSlot - 9
+		return 8 + (index % 9) * 18, 84 + (index // 9) * 18
+	elseif menuSlot <= 44 then
+		return 8 + (menuSlot - 36) * 18, 142 -- hotbar row
 	end
-	local index = slot - 10
-	return 8 + (index % 9) * 18, 84 + (index // 9) * 18
+	return 77, 62 -- offhand
 end
 
 local refresh -- defined below
+local clickSurvival -- below
+local clickCreativeItem -- below
+local clickCreativeHotbar -- below
 
-local function clickSlot(slot: number)
-	if cursorItem == nil then
-		cursorItem, slots[slot] = slots[slot], nil
-	elseif slots[slot] == nil then
-		slots[slot], cursorItem = cursorItem, nil
-	else
-		slots[slot], cursorItem = cursorItem, slots[slot]
-	end
-	refresh()
-end
-
-for slot = 1, 36 do
-	local x, y = slotPosition(slot)
-	local button = Instance.new("TextButton")
-	button.Name = "Slot" .. slot
-	button.Text = ""
-	button.BackgroundTransparency = 1
-	button.Position = UDim2.fromOffset(x - 1, y - 1)
-	button.Size = UDim2.fromOffset(18, 18)
-	button.ZIndex = 15
-	button.Parent = window
-	button.MouseButton1Click:Connect(function()
-		clickSlot(slot)
-	end)
+local function hoverable(button: GuiButton, parent: Instance, x: number, y: number, what: () -> any)
 	button.MouseEnter:Connect(function()
-		hovered = slot
+		hovered = what
+		highlight.Parent = parent
 		highlight.Position = UDim2.fromOffset(x, y)
 		highlight.Visible = true
 	end)
 	button.MouseLeave:Connect(function()
-		if hovered == slot then
+		if hovered == what then
 			hovered = nil
 			highlight.Visible = false
 		end
 	end)
-	slotButtons[slot] = button
-	local icon = image(window, "Icon" .. slot, x, y, 16, 16, 13)
-	icon.ResampleMode = Enum.ResamplerMode.Default
-	slotIcons[slot] = icon
+end
+
+local function slotButton(parent: Instance, name: string, x: number, y: number): TextButton
+	local button = Instance.new("TextButton")
+	button.Name = name
+	button.Text = ""
+	button.BackgroundTransparency = 1
+	button.Position = UDim2.fromOffset(x - 1, y - 1)
+	button.Size = UDim2.fromOffset(18, 18)
+	button.ZIndex = 18
+	button.Parent = parent
+	return button
+end
+
+local survivalSlots: { SlotView } = {}
+for menuSlot = 0, 45 do
+	local x, y = survivalSlotPosition(menuSlot)
+	survivalSlots[menuSlot + 1] = slotView(window, "Slot" .. menuSlot, x, y, 14)
+	local button = slotButton(window, "Click" .. menuSlot, x, y)
+	button.MouseButton1Click:Connect(function()
+		clickSurvival(menuSlot, 0)
+	end)
+	button.MouseButton2Click:Connect(function()
+		clickSurvival(menuSlot, 1)
+	end)
+	hoverable(button, window, x, y, function()
+		return stackAt(menuSlot)
+	end)
+end
+
+-- creative: 9 x 5 items (scrolling), the hotbar row below, the scroll bar on the right, two tabs above
+local CREATIVE_ROWS = 5
+local creativeScroll = 0 -- first row shown
+local creativeItems: { SlotView } = {}
+for index = 0, 9 * CREATIVE_ROWS - 1 do
+	local x, y = 9 + (index % 9) * 18, 18 + (index // 9) * 18
+	creativeItems[index + 1] = slotView(creative, "Item" .. index, x, y, 14)
+	local button = slotButton(creative, "ClickItem" .. index, x, y)
+	button.MouseButton1Click:Connect(function()
+		clickCreativeItem(index, 0)
+	end)
+	button.MouseButton2Click:Connect(function()
+		clickCreativeItem(index, 1)
+	end)
+	hoverable(button, creative, x, y, function()
+		local item = assets and assets.items and assets.items[creativeScroll * 9 + index + 1]
+		return if item then { id = item.id, n = 1, name = item.name } else nil
+	end)
+end
+local creativeHotbar: { SlotView } = {}
+for slot = 1, 9 do
+	local x, y = 9 + (slot - 1) * 18, 112
+	creativeHotbar[slot] = slotView(creative, "Hotbar" .. slot, x, y, 14)
+	local button = slotButton(creative, "ClickHotbar" .. slot, x, y)
+	button.MouseButton1Click:Connect(function()
+		clickCreativeHotbar(slot, 0)
+	end)
+	button.MouseButton2Click:Connect(function()
+		clickCreativeHotbar(slot, 1)
+	end)
+	hoverable(button, creative, x, y, function()
+		return hotbarStack(slot)
+	end)
+end
+local scroller = image(creative, "Scroller", 175, 18, 12, 15, 15)
+
+-- the two tabs: all items / the normal inventory (Minecraft's "Survival Inventory" tab)
+local tabs = {}
+local setView -- below
+for index, view in ipairs({ "creative", "survival" }) do
+	local tab = image(dim, "Tab" .. view, 0, 0, 26, 32, 12)
+	tab.AnchorPoint = Vector2.new(0, 1)
+	scaled(tab)
+	local tabIcon = image(tab, "Icon", 5, 9, 16, 16, 13)
+	tabIcon.ResampleMode = Enum.ResamplerMode.Default
+	local button = Instance.new("TextButton")
+	button.Text = ""
+	button.BackgroundTransparency = 1
+	button.Size = UDim2.fromScale(1, 1)
+	button.ZIndex = 14
+	button.Parent = tab
+	button.MouseButton1Click:Connect(function()
+		setView(view)
+	end)
+	tabs[index] = { frame = tab, icon = tabIcon, view = view, index = index }
 end
 
 -- the item on the mouse while moving it around
-local cursor = image(screen, "CursorItem", 0, 0, 16, 16, 30)
-cursor.AnchorPoint = Vector2.new(0.5, 0.5)
-cursor.ResampleMode = Enum.ResamplerMode.Default
-cursor.Visible = false
+local cursor = slotView(screen, "CursorItem", 0, 0, 30)
+local cursorFrame = Instance.new("Frame")
+cursorFrame.Name = "Cursor"
+cursorFrame.BackgroundTransparency = 1
+cursorFrame.Size = UDim2.fromOffset(16, 16)
+cursorFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+cursorFrame.ZIndex = 30
+cursorFrame.Parent = screen
+scaled(cursorFrame)
+for _, item in ipairs({ cursor.icon, cursor.count, cursor.bar }) do
+	item.Parent = cursorFrame
+end
+cursor.icon.Position = UDim2.fromOffset(0, 0)
+cursor.count.Position = UDim2.fromOffset(0, 1)
+cursor.bar.Position = UDim2.fromOffset(2, 13)
 
-local function gui(name: string): Content?
-	local key = assets and assets.gui and assets.gui[name]
-	return if key then guiPicture(key) else nil
+local function creativeRows(): number
+	local count = assets and assets.items and #assets.items or 0
+	return math.max(0, math.ceil(count / 9) - CREATIVE_ROWS)
 end
 
 function refresh()
@@ -538,24 +787,54 @@ function refresh()
 	selection.BackgroundTransparency = if selectionPicture then 1 else 0.6
 	windowBack.BackgroundTransparency = if windowPicture then 1 else 0
 	windowBack.BackgroundColor3 = Color3.fromRGB(198, 198, 198)
+	local creativePicture = gui("creative_items")
+	setPicture(creativeBack, creativePicture)
+	creativeBack.BackgroundTransparency = if creativePicture then 1 else 0
+	creativeBack.BackgroundColor3 = Color3.fromRGB(198, 198, 198)
 	selection.Position = UDim2.fromOffset(-1 + (selected - 1) * 20, -1)
-	for slot = 1, 36 do
-		local item = slots[slot]
-		local content = if item then iconContent(item) else nil
-		setPicture(slotIcons[slot], content)
-		if slot <= 9 then
-			setPicture(hotbarIcons[slot], content)
-		end
+	hotbar.Visible = gameMode() ~= "spectator" -- (Minecraft's spectators have no hotbar)
+	for slot = 1, 9 do
+		showStack(hotbarSlots[slot], hotbarStack(slot))
+		showStack(creativeHotbar[slot], hotbarStack(slot))
 	end
-	setPicture(cursor, if cursorItem then iconContent(cursorItem) else nil)
-	cursor.Visible = inventoryOpen and cursorItem ~= nil
+	for menuSlot = 0, 45 do
+		showStack(survivalSlots[menuSlot + 1], stackAt(menuSlot))
+	end
+	creativeScroll = math.clamp(creativeScroll, 0, creativeRows())
+	for index, view in ipairs(creativeItems) do
+		local item = assets and assets.items and assets.items[creativeScroll * 9 + index]
+		showStack(view, if item then { id = item.id, n = 1 } else nil)
+	end
+	local rows = creativeRows()
+	setPicture(scroller, if rows > 0 then gui("scroller") else gui("scroller_disabled") or gui("scroller"))
+	scroller.BackgroundTransparency = if gui("scroller") then 1 else 0.2
+	scroller.Position = UDim2.fromOffset(175, 18 + (if rows > 0 then math.floor(creativeScroll / rows * (112 - 15) + 0.5) else 0))
+	window.Visible = inventoryView == "survival"
+	creative.Visible = inventoryView == "creative"
+	local isCreative = gameMode() == "creative"
 	local scale = guiScale()
-	cursor.Size = UDim2.fromOffset(16 * scale, 16 * scale)
+	for _, tab in ipairs(tabs) do
+		tab.frame.Visible = inventoryOpen and isCreative
+		local chosen = tab.view == inventoryView
+		local picture = if chosen then gui("tab_selected") else gui("tab")
+		setPicture(tab.frame, picture)
+		tab.frame.BackgroundTransparency = if picture then 1 else (if chosen then 0 else 0.4)
+		tab.frame.ZIndex = if chosen then 16 else 12
+		-- above the top left corner of the open window (Minecraft: the tabs stand on the window)
+		local width = if inventoryView == "creative" then 195 else 176
+		local height = if inventoryView == "creative" then 136 else 166
+		tab.frame.Position = UDim2.new(0.5, (-width / 2 + (tab.index - 1) * 27) * scale, 0.5, (-height / 2 + 4) * scale)
+		setPicture(tab.icon, iconContent(if tab.view == "creative" then "minecraft:grass_block" else "minecraft:crafting_table"))
+	end
+	local carried = if inventoryView == "creative" and creativeCursor then creativeCursor
+		elseif type(state.carried) == "table" then state.carried else nil
+	showStack(cursor, carried)
+	cursorFrame.Visible = inventoryOpen and carried ~= nil
 end
 
 local function showItemName()
-	local item = slots[selected]
-	itemName.Text = item and item.name or ""
+	local stack = hotbarStack(selected)
+	itemName.Text = if stack then tostring(stack.name or stack.id) else ""
 	nameShownAt = os.clock()
 end
 
@@ -566,7 +845,7 @@ local function select(slot: number)
 end
 -- endregion
 
--- region inventory open / close
+-- region inventory open / close + clicks
 local function blockMovement()
 	return Enum.ContextActionResult.Sink
 end
@@ -585,6 +864,8 @@ local function updatePreview()
 		for _, item in ipairs(copy:GetDescendants()) do
 			if item:IsA("BaseScript") then
 				item:Destroy()
+			elseif item:IsA("BasePart") or item:IsA("Decal") then
+				item.LocalTransparencyModifier = 0
 			end
 		end
 		copy:PivotTo(CFrame.new(0, 0, 0) * CFrame.Angles(0, math.rad(200), 0))
@@ -599,60 +880,284 @@ local function updatePreview()
 	end)
 end
 
+local function shiftDown(): boolean
+	return UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+end
+
+-- survival / adventure (and the inventory tab in creative): Minecraft's own click, done in Minecraft
+function clickSurvival(menuSlot: number, button: number)
+	if gameMode() == "spectator" then
+		return
+	end
+	inventoryRemote:FireServer("click", menuSlot, button, shiftDown())
+end
+
+-- creative: the item on the mouse stays here until it is put into a slot (Minecraft does the same)
+local function putCreative(menuSlot: number, stack: any)
+	inventoryRemote:FireServer("creative", menuSlot, if stack then stack.id else nil, if stack then stack.n else 0)
+	-- shown at once (Minecraft's answer comes a moment later and says the same)
+	state.slots[menuSlot + 1] = if stack then { id = stack.id, n = stack.n, name = stack.name, max = stack.max } else false
+end
+
+function clickCreativeItem(index: number, button: number)
+	local item = assets and assets.items and assets.items[creativeScroll * 9 + index + 1]
+	if creativeCursor then
+		if item and creativeCursor.id == item.id and button == 0 then
+			creativeCursor.n = math.min(creativeCursor.n + 1, creativeCursor.max or 64) -- one more of the same
+		else
+			creativeCursor = nil -- an item put back on the item list is gone (Minecraft)
+		end
+	elseif item then
+		local max = tonumber(item.max) or 64
+		if shiftDown() then
+			-- shift: a whole stack into the first free hotbar / inventory slot
+			for _, menuSlot in ipairs({ 36, 37, 38, 39, 40, 41, 42, 43, 44 }) do
+				if not stackAt(menuSlot) then
+					putCreative(menuSlot, { id = item.id, n = max, name = item.name, max = max })
+					refresh()
+					return
+				end
+			end
+			for menuSlot = 9, 35 do
+				if not stackAt(menuSlot) then
+					putCreative(menuSlot, { id = item.id, n = max, name = item.name, max = max })
+					break
+				end
+			end
+		else
+			creativeCursor = { id = item.id, n = if button == 1 then max else 1, name = item.name, max = max }
+		end
+	end
+	refresh()
+end
+
+function clickCreativeHotbar(slot: number, button: number)
+	local menuSlot = 35 + slot
+	local stack = stackAt(menuSlot)
+	if shiftDown() and not creativeCursor then
+		putCreative(menuSlot, nil) -- shift-click: empty it
+	elseif creativeCursor then
+		if stack and stack.id == creativeCursor.id then
+			local max = tonumber(stack.max) or 64
+			local add = if button == 1 then 1 else creativeCursor.n
+			local total = math.min(max, stack.n + add)
+			local used = total - stack.n
+			putCreative(menuSlot, { id = stack.id, n = total, name = stack.name, max = stack.max })
+			creativeCursor.n -= used
+			if creativeCursor.n <= 0 then
+				creativeCursor = nil
+			end
+		elseif button == 1 and not stack then
+			putCreative(menuSlot, { id = creativeCursor.id, n = 1, name = creativeCursor.name, max = creativeCursor.max })
+			creativeCursor.n -= 1
+			if creativeCursor.n <= 0 then
+				creativeCursor = nil
+			end
+		else
+			local old = stack
+			putCreative(menuSlot, creativeCursor)
+			creativeCursor = if old then { id = old.id, n = old.n, name = old.name, max = old.max } else nil
+		end
+	elseif stack then
+		if button == 1 then
+			-- right click: half of it on the mouse
+			local half = math.ceil(stack.n / 2)
+			creativeCursor = { id = stack.id, n = half, name = stack.name, max = stack.max }
+			putCreative(menuSlot, if stack.n - half > 0 then { id = stack.id, n = stack.n - half, name = stack.name,
+				max = stack.max } else nil)
+		else
+			creativeCursor = { id = stack.id, n = stack.n, name = stack.name, max = stack.max }
+			putCreative(menuSlot, nil)
+		end
+	end
+	refresh()
+end
+
+-- a click on the dark part around the window: throw what is on the mouse away (Minecraft)
+local function clickOutside(button: number)
+	if not inventoryOpen then
+		return
+	end
+	if inventoryView == "creative" and creativeCursor then
+		local stack = creativeCursor
+		creativeCursor = nil
+		local count = if button == 1 then 1 else stack.n
+		inventoryRemote:FireServer("creative", -1, stack.id, count)
+		if button == 1 and stack.n > 1 then
+			creativeCursor = { id = stack.id, n = stack.n - 1, name = stack.name, max = stack.max }
+		end
+		refresh()
+	elseif inventoryView == "survival" and type(state.carried) == "table" then
+		clickSurvival(-999, button)
+	end
+end
+dim.MouseButton1Click:Connect(function()
+	clickOutside(0)
+end)
+dim.MouseButton2Click:Connect(function()
+	clickOutside(1)
+end)
+
+function setView(view: string)
+	if view == inventoryView then
+		return
+	end
+	if inventoryView == "creative" and creativeCursor then
+		creativeCursor = nil -- (Minecraft keeps it; here it goes away like an item put back)
+	end
+	if inventoryView == "survival" then
+		inventoryRemote:FireServer("close") -- the crafting grid + the mouse go back into the inventory
+	end
+	inventoryView = view
+	if view == "survival" then
+		updatePreview()
+	end
+	refresh()
+end
+
 local function setInventory(open: boolean)
 	if inventoryOpen == open then
 		return
+	end
+	if open and gameMode() == "spectator" then
+		return -- (Minecraft's spectators have no inventory)
 	end
 	inventoryOpen = open
 	dim.Visible = open
 	player:SetAttribute("McGuiOpen", open) -- MinecraftPlayer frees the mouse and stops walking
 	if open then
+		inventoryView = if gameMode() == "creative" then "creative" else "survival"
 		updatePreview()
 		ContextActionService:BindActionAtPriority("MinecraftInventory", blockMovement, false,
 			Enum.ContextActionPriority.High.Value, Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D,
 			Enum.KeyCode.Space, Enum.KeyCode.Up, Enum.KeyCode.Down, Enum.KeyCode.Left, Enum.KeyCode.Right)
 	else
 		ContextActionService:UnbindAction("MinecraftInventory")
-		if cursorItem then
-			-- put the item on the mouse back into the first free slot (Minecraft would throw it on the ground)
-			for slot = 1, 36 do
-				if slots[slot] == nil then
-					slots[slot] = cursorItem
+		if creativeCursor then
+			-- the item on the mouse goes into the first free slot (else it is gone)
+			for menuSlot = 36, 44 do
+				if not stackAt(menuSlot) then
+					putCreative(menuSlot, creativeCursor)
 					break
 				end
 			end
-			cursorItem = nil
+			creativeCursor = nil
 		end
+		inventoryRemote:FireServer("close") -- crafting grid + mouse back into the inventory (Minecraft)
 		hovered = nil
 		highlight.Visible = false
+		hoverName.Visible = false
 	end
 	refresh()
 end
+
+-- the wheel scrolls the creative item list
+local function scrollCreative(step: number)
+	creativeScroll = math.clamp(creativeScroll + step, 0, creativeRows())
+	refresh()
+end
+
+-- a new state from Minecraft (after every click, placed block, /gamemode, picked up item ...)
+local lastServerSel = -1
+inventoryRemote.OnClientEvent:Connect(function(kind, newState)
+	if kind ~= "state" or type(newState) ~= "table" or type(newState.slots) ~= "table" then
+		return
+	end
+	local first = not stateArrived
+	stateArrived = true
+	local oldMode = state.gm
+	state = newState
+	if type(newState.sel) == "number" and (first or newState.sel + 1 ~= selected) and newState.sel ~= lastServerSel then
+		selected = math.clamp(newState.sel + 1, 1, 9) -- Minecraft chose another slot (middle click picked a block)
+	end
+	lastServerSel = if type(newState.sel) == "number" then newState.sel else lastServerSel
+	if inventoryOpen and (newState.gm == "spectator" or (oldMode ~= newState.gm)) then
+		setInventory(false) -- the game mode changed: the window that fits comes with the next E
+	end
+	refresh()
+	if first then
+		showItemName()
+	end
+end)
 -- endregion
 
--- region building
-local selectionPart = Instance.new("Part")
-selectionPart.Name = "MinecraftBlockSelection"
+-- region building: aim, use, break (with Minecraft's breaking time in survival)
+local selectionBoxes: { SelectionBox } = {}
+local selectionHolder = Instance.new("Folder")
+selectionHolder.Name = "MinecraftBlockSelection"
+selectionHolder.Parent = workspace
+local selectionPart = Instance.new("Part") -- the outline of a whole cube
+selectionPart.Name = "Cube"
 selectionPart.Anchored = true
 selectionPart.CanCollide = false
 selectionPart.CanQuery = false
 selectionPart.CanTouch = false
 selectionPart.Transparency = 1
-selectionPart.Parent = workspace
-local selectionBox = Instance.new("SelectionBox")
-selectionBox.Adornee = selectionPart
-selectionBox.Color3 = Color3.new(0, 0, 0)
-selectionBox.LineThickness = 0.03
-selectionBox.SurfaceTransparency = 1
-selectionBox.Transparency = 0.35
-selectionBox.Visible = false
-selectionBox.Parent = selectionPart
+selectionPart.Parent = selectionHolder
+
+local function selectionBox(index: number): SelectionBox
+	local box = selectionBoxes[index]
+	if not box then
+		box = Instance.new("SelectionBox")
+		box.Color3 = Color3.new(0, 0, 0)
+		box.LineThickness = 0.03
+		box.SurfaceTransparency = 1
+		box.Transparency = 0.35
+		box.Parent = selectionHolder
+		selectionBoxes[index] = box
+	end
+	return box
+end
+
+-- the cracks while breaking (survival): a box around the block with Minecraft's destroy_stage pictures
+local crackPart = Instance.new("Part")
+crackPart.Name = "Cracks"
+crackPart.Anchored = true
+crackPart.CanCollide = false
+crackPart.CanQuery = false
+crackPart.CanTouch = false
+crackPart.Transparency = 1
+crackPart.CastShadow = false
+local crackTextures = {}
+for _, normal in ipairs(Enum.NormalId:GetEnumItems()) do
+	local texture = Instance.new("Texture")
+	texture.Face = normal
+	texture.Parent = crackPart
+	crackTextures[normal] = texture
+end
+local shownStage = -1
+
+local function showCracks(target, stage: number)
+	if stage < 0 or not target then
+		crackPart.Parent = nil
+		shownStage = -1
+		return
+	end
+	local key = assets and assets.gui and assets.gui["destroy_" .. stage]
+	local content = if key then worldContent(key) else nil
+	local box = target.box
+	crackPart.Size = box.Size + Vector3.one * 0.04
+	crackPart.CFrame = box.CFrame
+	if stage ~= shownStage then
+		shownStage = stage
+		local scale = assets.scale
+		for _, texture in pairs(crackTextures) do
+			texture.StudsPerTileU = scale
+			texture.StudsPerTileV = scale
+			texture.TextureContent = content or Content.none
+			pcall(function()
+				texture.ResampleMode = Enum.ResamplerMode.Pixelated
+			end)
+		end
+	end
+	crackPart.Parent = workspace
+end
 
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Include
 
-local target = nil -- {x, y, z, normal = Vector3} of the block under the mouse
-local targetNpc = nil -- or the NPC of a Minecraft player under the mouse (left click hits him)
+local target = nil -- the block under the crosshair: {x, y, z, normal, face, hit, name, part, box, parts}
+local targetNpc = nil -- or the NPC of a Minecraft player under the crosshair (left click hits him)
 
 local function blockOf(position: Vector3): (number, number, number)
 	local scale = assets.scale
@@ -664,63 +1169,135 @@ local function blockCenter(x: number, y: number, z: number): Vector3
 	return Vector3.new((x + 0.5) * scale, (y - assets.minY + 0.5) * scale, (z + 0.5) * scale)
 end
 
+local DIRECTIONS = { -- normal -> Minecraft direction
+	{ Vector3.new(0, 0, -1), "north" }, { Vector3.new(0, 0, 1), "south" }, { Vector3.new(1, 0, 0), "east" },
+	{ Vector3.new(-1, 0, 0), "west" }, { Vector3.new(0, 1, 0), "up" }, { Vector3.new(0, -1, 0), "down" },
+}
+local function direction(normal: Vector3): string
+	local best, bestDot = "up", -math.huge
+	for _, entry in ipairs(DIRECTIONS) do
+		local dot = entry[1]:Dot(normal)
+		if dot > bestDot then
+			best, bestDot = entry[2], dot
+		end
+	end
+	return best
+end
+
+local function eyeAndLook(): (Vector3?, Vector3?)
+	local eye, look = player:GetAttribute("McEye"), player:GetAttribute("McLook")
+	if typeof(eye) == "Vector3" and typeof(look) == "Vector3" then
+		return eye, look.Unit
+	end
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return nil, nil
+	end
+	local ray = camera:ViewportPointToRay(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+	return ray.Origin, ray.Direction
+end
+
 local function findTarget()
 	target = nil
 	targetNpc = nil
 	local worldFolder = workspace:FindFirstChild("MinecraftWorld")
 	local character = player.Character
-	local head = character and (character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart"))
-	local camera = workspace.CurrentCamera
-	if not assets or not worldFolder or not head or not camera or inventoryOpen then
+	if not assets or not worldFolder or not character or inventoryOpen or gameMode() == "spectator" then
 		return
 	end
-	-- Like Minecraft: from the eyes where the player looks (also in third person / front view) - MinecraftPlayer says
-	-- where that is; without it the middle of the screen
-	local eye, look = player:GetAttribute("McEye"), player:GetAttribute("McLook")
-	local origin, direction
-	if typeof(eye) == "Vector3" and typeof(look) == "Vector3" then
-		origin, direction = eye, look.Unit
-	else
-		local ray = camera:ViewportPointToRay(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
-		origin, direction = ray.Origin, ray.Direction
+	-- Like Minecraft: from the eyes where the player looks (also in third person / front view)
+	local origin, look = eyeAndLook()
+	if not origin or not look then
+		return
 	end
 	local npcFolder = workspace:FindFirstChild("BridgeRemotePlayers")
 	rayParams.FilterDescendantsInstances = if npcFolder then { worldFolder, npcFolder } else { worldFolder }
-	local result = workspace:Raycast(origin, direction * (REACH + 1) * assets.scale, rayParams)
+	local result = workspace:Raycast(origin, look * (reach() + 1) * assets.scale, rayParams)
+	-- what you only bump into (the upper half of a fence) is not aimed at: look past it (Minecraft aims at the outline)
+	for _ = 1, 4 do
+		if not result or not result.Instance:GetAttribute("McSolidOnly") then
+			break
+		end
+		local from = result.Position + look * 0.01
+		local left = (reach() + 1) * assets.scale - (from - origin).Magnitude
+		result = if left > 0 then workspace:Raycast(from, look * left, rayParams) else nil
+	end
 	if not result then
 		return
 	end
+	local distance = (result.Position - origin).Magnitude
 	if npcFolder and result.Instance:IsDescendantOf(npcFolder) then
 		local model = result.Instance:FindFirstAncestorOfClass("Model")
 		while model and model:GetAttribute("McUserId") == nil do
 			model = model:FindFirstAncestorOfClass("Model")
 		end
-		if model and (result.Position - origin).Magnitude <= (REACH + 0.5) * assets.scale then
+		if model and distance <= (attackReach() + 0.5) * assets.scale and model:GetAttribute("McGameMode") ~= "spectator" then
 			targetNpc = model
 		end
 		return
 	end
-	local x, y, z = blockOf(result.Position - result.Normal * 0.05)
-	if (result.Position - origin).Magnitude > REACH * assets.scale then
+	if distance > reach() * assets.scale then
 		return
 	end
-	local normal = Vector3.new(math.round(result.Normal.X), math.round(result.Normal.Y), math.round(result.Normal.Z))
-	target = { x = x, y = y, z = z, normal = normal, hit = result.Position, name = result.Instance.Name,
-		part = result.Instance }
+	local x, y, z = blockOf(result.Position - result.Normal * 0.02)
+	local part = result.Instance :: BasePart
+	-- a model block (lever, stairs, ...): its parts are in a Model named like the block; cubes: the part has the name
+	local holder = part.Parent
+	local isModel = holder ~= nil and holder:IsA("Model")
+	local cell = if isModel then (holder :: Instance):GetAttribute("McBlock") else nil
+	if typeof(cell) == "Vector3" then
+		x, y, z = cell.X, cell.Y, cell.Z -- (a piston arm reaches into the next block: it still belongs to its own)
+	end
+	local name = if isModel then (holder :: Instance).Name else part.Name
+	local parts = {}
+	if isModel then
+		for _, item in ipairs((holder :: Instance):GetChildren()) do
+			if item:IsA("BasePart") and item.CanQuery and not item:GetAttribute("McSolidOnly") then
+				table.insert(parts, item)
+			end
+		end
+	end
+	-- the cube of the block (for whole blocks inside merged parts) / the model's parts together
+	local box = selectionPart
+	if #parts > 0 then
+		local minV, maxV = Vector3.one * math.huge, -Vector3.one * math.huge
+		for _, item in ipairs(parts) do
+			local half = item.Size / 2
+			minV = minV:Min(item.Position - half)
+			maxV = maxV:Max(item.Position + half)
+		end
+		box = { Size = maxV - minV, CFrame = CFrame.new((minV + maxV) / 2) } :: any
+	else
+		box = { Size = Vector3.one * assets.scale, CFrame = CFrame.new(blockCenter(x, y, z)) } :: any
+	end
+	target = { x = x, y = y, z = z, normal = result.Normal, face = direction(result.Normal), hit = result.Position,
+		name = name, part = part, parts = parts, box = box }
 end
 
--- Would a block at x, y, z stand in my own character?
-local function inMyCharacter(x: number, y: number, z: number): boolean
-	local character = player.Character
-	if not character then
-		return false
+local function showOutline()
+	local used = 0
+	if target then
+		if #target.parts > 0 then
+			-- Minecraft outlines the shape of the block (its boxes)
+			for _, item in ipairs(target.parts) do
+				used += 1
+				local box = selectionBox(used)
+				box.Adornee = item
+				box.Visible = true
+			end
+		else
+			selectionPart.Size = Vector3.one * (assets.scale + 0.04)
+			selectionPart.CFrame = CFrame.new(blockCenter(target.x, target.y, target.z))
+			used += 1
+			local box = selectionBox(used)
+			box.Adornee = selectionPart
+			box.Visible = true
+		end
 	end
-	local box, size = character:GetBoundingBox()
-	local center = blockCenter(x, y, z)
-	local half = assets.scale / 2
-	local delta = center - box.Position
-	return math.abs(delta.X) < half + size.X / 2 - 0.1 and math.abs(delta.Y) < half + size.Y / 2 - 0.1
-		and math.abs(delta.Z) < half + size.Z / 2 - 0.1
+	for index = used + 1, #selectionBoxes do
+		selectionBoxes[index].Visible = false
+		selectionBoxes[index].Adornee = nil
+	end
 end
 
 -- My own arm swings when I hit / build: the script MinecraftPlayer plays Minecraft's swing (replicates to the others);
@@ -729,93 +1306,121 @@ local function swingArm()
 	player:SetAttribute("McSwingAt", os.clock())
 end
 
--- Blocks you can use with the right mouse button (Minecraft: wooden trapdoors open / close by hand, iron ones not)
-local function usable(name: string?): boolean
-	return type(name) == "string" and string.find(name, "_trapdoor[", 1, true) ~= nil
-		and string.find(name, "iron_trapdoor", 1, true) == nil
+local function onGround(): boolean
+	return player:GetAttribute("McGround") ~= false -- (MinecraftPlayer: the feet on a block)
 end
 
-local DIRECTIONS = { -- normal -> Minecraft direction
-	{ Vector3.new(0, 0, -1), "north" }, { Vector3.new(0, 0, 1), "south" }, { Vector3.new(1, 0, 0), "east" },
-	{ Vector3.new(-1, 0, 0), "west" }, { Vector3.new(0, 1, 0), "up" }, { Vector3.new(0, -1, 0), "down" },
-}
-local OPPOSITE = { north = "south", south = "north", east = "west", west = "east" }
-local function direction(normal: Vector3): string
-	for _, entry in ipairs(DIRECTIONS) do
-		if (entry[1] - normal).Magnitude < 0.01 then
-			return entry[2]
-		end
-	end
-	return "up"
+local function editInfo(): { [string]: any }
+	local _, look = eyeAndLook()
+	return { face = target and target.face, hit = target and target.hit, slot = selected - 1, look = look, ground = onGround() }
 end
 
--- How a block is placed (Minecraft's getStateForPlacement) - for now the trapdoor: clicked on the side of a block =
--- it hangs on that side, up or down after where you clicked; clicked on top / below = it faces you.
-local function placementState(item, x: number, y: number): { [string]: string }?
-	if type(item.block) ~= "string" or not string.find(item.block, "_trapdoor", 1, true) or not target then
-		return nil
+-- region breaking (survival: Minecraft's breaking time - the server asks Minecraft how fast for his item, this block)
+local mining = nil -- {x, y, z, name, progress, perTick, swungAt}
+local breakDelay = 0 -- Minecraft waits 5 ticks after a block broke before the next one starts
+local speeds = {} -- "block|item|ground" -> progress per tick (from Minecraft)
+
+-- Minecraft's formula for the hand (until Minecraft's own answer is there): 1 / hardness / (30, or 100 when the
+-- block needs a tool), 5 x slower in the air
+local function guessSpeed(name: string): number
+	local look = assets and assets.blocks and assets.blocks[name]
+	local hardness = if look then tonumber(look.hard) else nil
+	if not hardness then
+		return 1 / 1.5 / 100
 	end
-	local face = direction(target.normal)
-	if face ~= "up" and face ~= "down" then
-		local inBlock = (target.hit.Y / assets.scale + assets.minY) - y -- 0 .. 1 inside the new block
-		return { facing = face, half = if inBlock > 0.5 then "top" else "bottom" }
+	if hardness < 0 then
+		return 0
 	end
-	local look = player:GetAttribute("McLook")
-	local lookVector = if typeof(look) == "Vector3" then look else Vector3.new(0, 0, -1)
-	local horizontal = if math.abs(lookVector.X) > math.abs(lookVector.Z)
-		then (if lookVector.X > 0 then "east" else "west")
-		else (if lookVector.Z > 0 then "south" else "north")
-	return { facing = OPPOSITE[horizontal], half = if face == "up" then "bottom" else "top" }
+	if hardness == 0 then
+		return 1
+	end
+	return 1 / hardness / (if look.tool then 100 else 30) * (if onGround() then 1 else 0.2)
 end
+
+local function startMining()
+	if not target then
+		return
+	end
+	local stack = hotbarStack(selected)
+	local key = target.name .. "|" .. (if stack then stack.id else "") .. "|" .. tostring(onGround())
+	mining = { x = target.x, y = target.y, z = target.z, name = target.name, progress = 0,
+		perTick = speeds[key] or guessSpeed(target.name), swungAt = -math.huge }
+	if speeds[key] == nil then
+		local wanted = mining
+		task.spawn(function()
+			local ok, progress = pcall(function()
+				return miningSpeed:InvokeServer(wanted.x, wanted.y, wanted.z, selected - 1, onGround())
+			end)
+			if ok and type(progress) == "number" then
+				speeds[key] = progress
+				if mining == wanted then
+					wanted.perTick = progress
+				end
+			end
+		end)
+	end
+end
+
+local function stopMining()
+	mining = nil
+	showCracks(nil, -1)
+end
+-- endregion
 
 local function act(action: string, repeated: boolean?)
-	if action == "break" and not targetNpc and not target then
-		-- a hit into the air: Minecraft swings the arm anyway (not again while the button is only held)
-		if not repeated then
-			swingArm()
-			swingRemote:FireServer()
-		end
+	local mode = gameMode()
+	if mode == "spectator" then
 		return
 	end
 	if action == "break" then
-		swingArm()
-	end
-	if action == "break" and targetNpc then
-		attackRemote:FireServer(targetNpc) -- hit the Minecraft player (Minecraft does the damage)
+		if targetNpc then
+			swingArm()
+			attackRemote:FireServer(targetNpc) -- hit the Minecraft player (Minecraft does the damage)
+			return
+		end
+		if not target then
+			if not repeated then
+				-- a hit into the air: Minecraft swings the arm anyway (not again while the button is only held)
+				swingArm()
+				swingRemote:FireServer()
+			end
+			return
+		end
+		if mode == "creative" then
+			swingArm()
+			editRemote:FireServer("break", target.x, target.y, target.z, editInfo())
+		elseif mode == "survival" and not repeated then
+			startMining()
+		elseif mode == "adventure" and not repeated then
+			swingArm() -- (adventure: blocks do not break)
+			swingRemote:FireServer()
+		end
 		return
 	end
 	if not target then
 		return
 	end
-	if action == "break" then
-		editRemote:FireServer("break", target.x, target.y, target.z)
-		return
-	end
-	local item = slots[selected]
-	local character = player.Character
-	local sneaking = character and character:GetAttribute("McSneak") == true
-	if usable(target.name) and not (sneaking and item) then
-		-- right click on a trapdoor: open / close it (Minecraft does it, with its sound)
-		swingArm()
-		editRemote:FireServer("use", target.x, target.y, target.z)
-		return
-	end
-	if not item or not item.block then
-		return
-	end
-	local x, y, z = target.x + target.normal.X, target.y + target.normal.Y, target.z + target.normal.Z
-	if inMyCharacter(x, y, z) then
-		return
-	end
+	-- right click: Minecraft decides (open / press / pull - or place the item in the hand on that face)
 	swingArm()
-	editRemote:FireServer("place", x, y, z, item.id, placementState(item, x, y))
+	editRemote:FireServer("use", target.x, target.y, target.z, editInfo())
 end
 
-local held = {} -- "break" / "place" -> time of the last action while the button is held
+local held = {} -- "break" / "use" -> time of the last action while the button is held
+
+local function pickBlock()
+	findTarget()
+	if target and gameMode() ~= "spectator" then
+		inventoryRemote:FireServer("pick", target.x, target.y, target.z)
+	end
+end
 
 UserInputService.InputBegan:Connect(function(input, processed)
 	if input.KeyCode == Enum.KeyCode.E and not processed and player:GetAttribute("McMenuOpen") ~= true then
 		setInventory(not inventoryOpen)
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.Escape and inventoryOpen then
+		setInventory(false)
 		return
 	end
 	if player:GetAttribute("McMenuOpen") == true then
@@ -827,63 +1432,104 @@ UserInputService.InputBegan:Connect(function(input, processed)
 	local slot = HOTBAR_KEYS[input.KeyCode]
 	if slot then
 		select(slot)
+	elseif input.KeyCode == Enum.KeyCode.Q and gameMode() ~= "spectator" then
+		-- Q: throw one away, Ctrl + Q: the whole stack (Minecraft)
+		local _, look = eyeAndLook()
+		local all = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+		swingArm()
+		inventoryRemote:FireServer("drop", all, selected - 1, look)
 	elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
 		findTarget()
 		act("break")
 		held["break"] = os.clock()
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-		-- the mouse is always caught like in Minecraft (MinecraftPlayer): the right button only places
+		-- the mouse is always caught like in Minecraft (MinecraftPlayer): the right button only builds
 		findTarget()
-		act("place")
-		held.place = os.clock()
+		act("use")
+		held.use = os.clock()
+	elseif input.UserInputType == Enum.UserInputType.MouseButton3 then
+		pickBlock()
 	end
 end)
 UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
 		held["break"] = nil
+		stopMining()
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-		held.place = nil
+		held.use = nil
 	end
 end)
--- the mouse wheel goes through the hotbar (like Minecraft)
+-- the mouse wheel goes through the hotbar (like Minecraft) - in the creative inventory it scrolls the items
 UserInputService.InputChanged:Connect(function(input, processed)
-	if processed or inventoryOpen or input.UserInputType ~= Enum.UserInputType.MouseWheel then
+	if input.UserInputType ~= Enum.UserInputType.MouseWheel then
 		return
 	end
 	local step = if input.Position.Z > 0 then -1 elseif input.Position.Z < 0 then 1 else 0
+	if inventoryOpen then
+		if inventoryView == "creative" and step ~= 0 then
+			scrollCreative(step)
+		end
+		return
+	end
+	if processed then
+		return
+	end
 	if step ~= 0 then
 		select((selected - 1 + step) % 9 + 1)
 	end
 end)
 
-RunService.RenderStepped:Connect(function()
+RunService.RenderStepped:Connect(function(dt)
 	findTarget()
-	if target then
-		if string.find(target.name, "[", 1, true) and target.part:IsA("BasePart") then
-			-- a block with its own shape (trapdoor): the outline of that shape, like Minecraft
-			selectionPart.Size = target.part.Size + Vector3.one * 0.04
-			selectionPart.CFrame = target.part.CFrame
-		else
-			selectionPart.Size = Vector3.one * (assets.scale + 0.04)
-			selectionPart.CFrame = CFrame.new(blockCenter(target.x, target.y, target.z))
-		end
-		selectionBox.Visible = true
-	else
-		selectionBox.Visible = false
-	end
+	showOutline()
 	local now = os.clock()
-	for action, at in pairs(held) do
-		if now - at >= REPEAT then
-			held[action] = now
-			act(action, true)
+	local mode = gameMode()
+	-- holding the left button: creative breaks one block every 5 ticks, survival counts the breaking time
+	if held["break"] and mode == "survival" then
+		breakDelay = math.max(0, breakDelay - dt)
+		if not target or targetNpc then
+			stopMining()
+		elseif breakDelay <= 0 then
+			if not mining or mining.x ~= target.x or mining.y ~= target.y or mining.z ~= target.z or mining.name ~= target.name then
+				startMining()
+			end
+			if mining then
+				mining.progress += mining.perTick * 20 * dt
+				if now - mining.swungAt > 0.25 then
+					mining.swungAt = now
+					swingArm()
+				end
+				if mining.progress >= 1 then
+					editRemote:FireServer("break", mining.x, mining.y, mining.z, editInfo())
+					stopMining()
+					breakDelay = REPEAT_BREAK
+				else
+					showCracks(target, math.floor(mining.progress * 10) - 1) -- Minecraft: stage 0 from 10 %
+				end
+			end
 		end
+	elseif mining then
+		stopMining()
+	end
+	if held["break"] and mode == "creative" and now - held["break"] >= REPEAT_BREAK then
+		held["break"] = now
+		act("break", true)
+	end
+	if held.use and now - held.use >= REPEAT_USE then
+		held.use = now
+		act("use", true)
 	end
 	if inventoryOpen then
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		UserInputService.MouseIconEnabled = true
-		if cursorItem then
-			local mouse = UserInputService:GetMouseLocation()
-			cursor.Position = UDim2.fromOffset(mouse.X, mouse.Y)
+		local mouse = UserInputService:GetMouseLocation()
+		cursorFrame.Position = UDim2.fromOffset(mouse.X, mouse.Y)
+		local stack = if hovered then hovered() else nil
+		local carried = cursorFrame.Visible
+		hoverName.Visible = stack ~= nil and not carried
+		if stack then
+			hoverName.Text = "  " .. tostring(stack.name or stack.id) .. "  "
+			hoverName.Position = UDim2.fromOffset(mouse.X + 14, mouse.Y - 30)
 		end
 	end
 	-- the item name above the hotbar fades out after 2 s (like Minecraft)
@@ -1148,6 +1794,14 @@ flash.ZIndex = 0
 flash.Parent = screen
 
 local function updateHearts()
+	local mode = gameMode()
+	local survival = mode == "survival" or mode == "adventure" -- (creative / spectator: no hearts, like Minecraft)
+	for _, heart in ipairs(hearts) do
+		heart.container.Visible = survival
+	end
+	if not survival then
+		return
+	end
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local health = if humanoid then math.max(humanoid.Health, 0) else 0
@@ -1182,14 +1836,19 @@ local function trackFall()
 		fallPeak = nil
 		return
 	end
-	local state = humanoid:GetState()
+	local mode = gameMode()
+	if mode == "creative" or mode == "spectator" or player:GetAttribute("McFlying") == true then
+		fallPeak = nil -- (no fall damage; flying starts the fall new)
+		return
+	end
+	local humanoidState = humanoid:GetState()
 	local y = root.Position.Y
-	if FALLING[state] then
+	if FALLING[humanoidState] then
 		fallPeak = math.max(fallPeak or y, y)
 	elseif fallPeak then
 		local blocks = (fallPeak - y) / (assets and assets.scale or 3)
 		fallPeak = nil
-		if blocks > 3 and state ~= Enum.HumanoidStateType.Swimming and state ~= Enum.HumanoidStateType.Climbing then
+		if blocks > 3 and humanoidState ~= Enum.HumanoidStateType.Swimming and humanoidState ~= Enum.HumanoidStateType.Climbing then
 			fallRemote:FireServer(blocks)
 		end
 	end
@@ -1236,25 +1895,11 @@ local function useAssets(newAssets)
 	end
 	local first = assets == nil
 	assets = newAssets
-	if first then
-		-- Creative mode: every item once - the first 9 in the hotbar, the others in the inventory above
-		for index, item in ipairs(assets.items or {}) do
-			if index <= 36 then
-				slots[index] = item
-			end
-		end
-	else
-		-- keep where the player put things, with the new item data
-		for slot = 1, 36 do
-			if slots[slot] then
-				slots[slot] = itemById(slots[slot].id)
-			end
-		end
-	end
 	applyAllTextures()
 	refresh()
 	if first then
 		showItemName()
+		inventoryRemote:FireServer("state") -- (the server sends it when the character comes too)
 	end
 end
 
@@ -1275,6 +1920,7 @@ if workspace.CurrentCamera then
 		refresh()
 	end)
 end
+player:GetAttributeChangedSignal("McGameMode"):Connect(refresh)
 refresh()
 task.spawn(function()
 	-- The server may still be loading the world: ask until it has the pictures (AssetsChanged also brings them)

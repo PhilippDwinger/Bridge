@@ -199,7 +199,7 @@ local function observe()
 				result.parts += 1
 				info.parts += 1
 				result.partNames[part.Name] = (result.partNames[part.Name] or 0) + 1
-				if part.Name == "minecraft:grass_block" then
+				if string.sub(part.Name, 1, 21) == "minecraft:grass_block" and part:IsA("BasePart") then
 					result.grassParts += 1
 					if result.grassParts == 1 then
 						for _, texture in ipairs(part:GetChildren()) do
@@ -208,10 +208,14 @@ local function observe()
 						end
 					end
 				end
-				local p, s = part.CFrame.Position, part.Size
-				info.blocks += math.floor(s.X * s.Y * s.Z / 27 + 0.5)
-				if chunk.Name == "Chunk 0,0" then
-					table.insert(result.sample, { p.X, p.Y, p.Z, s.X, s.Y, s.Z })
+				if part:IsA("BasePart") then
+					local p, s = part.CFrame.Position, part.Size
+					info.blocks += math.floor(s.X * s.Y * s.Z / 27 + 0.5)
+					if chunk.Name == "Chunk 0,0" then
+						table.insert(result.sample, { p.X, p.Y, p.Z, s.X, s.Y, s.Z })
+					end
+				else
+					info.blocks += 1 -- a model block (lever, trapdoor, ...)
 				end
 			end
 			result.perChunk[chunk.Name] = info
@@ -244,20 +248,39 @@ local function observe()
 		result.paddy = { skin = paddy.Character:GetAttribute("McSkin"), slim = paddy.Character:GetAttribute("McSlim"),
 			skinUser = paddy.Character:GetAttribute("McSkinUser") }
 	end
-	result.trapdoors = {}
+	-- blocks with a model (trapdoor, lever, ...): their pieces (pictures), collision + outline parts
+	result.models = {}
 	if worldFolder then
-		for _, part in ipairs(worldFolder:GetDescendants()) do
-			if part:IsA("BasePart") and string.find(part.Name, "_trapdoor[", 1, true) then
-				local textures = {}
-				for _, texture in ipairs(part:GetChildren()) do
-					textures[texture.Face.Name] = texture:GetAttribute("McTexture")
+		for _, model in ipairs(worldFolder:GetDescendants()) do
+			if model:IsA("Model") then
+				local entry = { name = model.Name, pieces = {}, collision = {}, outline = {}, block = nil }
+				local cell = model:GetAttribute("McBlock")
+				if typeof(cell) == "Vector3" then
+					entry.block = { cell.X, cell.Y, cell.Z }
 				end
-				local p, size = part.CFrame.Position, part.Size
-				table.insert(result.trapdoors, { name = part.Name, pos = { p.X, p.Y, p.Z }, size = { size.X, size.Y, size.Z },
-					textures = textures, collide = part.CanCollide })
+				for _, part in ipairs(model:GetChildren()) do
+					if part:IsA("BasePart") then
+						local p, size = part.CFrame.Position, part.Size
+						local info = { pos = { p.X, p.Y, p.Z }, size = { size.X, size.Y, size.Z }, collide = part.CanCollide,
+							query = part.CanQuery, turned = math.abs(part.CFrame.UpVector.Y - 1) > 0.001 }
+						if part.Name == "Piece" then
+							info.textures = {}
+							for _, texture in ipairs(part:GetChildren()) do
+								info.textures[texture.Face.Name] = texture:GetAttribute("McTexture")
+							end
+							table.insert(entry.pieces, info)
+						elseif part.Name == "Collision" then
+							table.insert(entry.collision, info)
+						elseif part.Name == "Outline" then
+							table.insert(entry.outline, info)
+						end
+					end
+				end
+				table.insert(result.models, entry)
 			end
 		end
 	end
+	result.mode = paddy.Character and paddy.Character:GetAttribute("McGameMode")
 	result.starterCharacter = starterPlayer:FindFirstChild("StarterCharacter") ~= nil
 	result.animateBlocked = starterScripts:FindFirstChild("Animate") ~= nil
 	result.gravity = workspaceRoot.Gravity
@@ -301,6 +324,9 @@ while os.clock() - started < scenario.seconds do
 			observations[event.name] = { available = payload and payload.available, scale = payload and payload.scale,
 				minY = payload and payload.minY, sizes = sizes, items = payload and payload.items, gui = payload and payload.gui,
 				blocks = payload and payload.blocks }
+		elseif event.action == "inventory" then
+			-- what the client sends from the inventory (creative: take an item into a slot)
+			handlers.Inventory(paddy, event.op, event.a, event.b, event.c)
 		elseif event.action == "sneak" then
 			paddy.Character:SetAttribute("McSneak", event.value == true)
 		elseif event.action == "chat" then
@@ -321,7 +347,18 @@ while os.clock() - started < scenario.seconds do
 				part:SetAttribute("SimBefore", true)
 				before += 1
 			end
-			editHandler(paddy, event.what, event.x, event.y, event.z, event.item, event.placement)
+			-- like the client: the block under the crosshair, the face, where on it, the hotbar slot, where he looks
+			local scale = 3
+			local face = event.face or "up"
+			local normals = { up = Vector3.new(0, 1, 0), down = Vector3.new(0, -1, 0), north = Vector3.new(0, 0, -1),
+				south = Vector3.new(0, 0, 1), east = Vector3.new(1, 0, 0), west = Vector3.new(-1, 0, 0) }
+			local center = Vector3.new((event.x + 0.5) * scale, (event.y + 64 + 0.5) * scale, (event.z + 0.5) * scale)
+			local look = if event.look then Vector3.new(event.look[1], event.look[2], event.look[3]) else Vector3.new(0, -1, 0)
+			editHandler(paddy, event.what, event.x, event.y, event.z, { face = face, hit = center + normals[face] * scale / 2,
+				slot = event.slot or 0, look = look, ground = true })
+			if event.wait then
+				task.wait(event.wait) -- (Minecraft's answer comes back first: a right click is not guessed in advance)
+			end
 			observations[event.name] = observe()
 			local kept = 0
 			for _, part in ipairs(chunk and chunk:GetChildren() or {}) do

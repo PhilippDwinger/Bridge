@@ -380,6 +380,8 @@ local function onSnapshot(data, event)
 				npc.model:SetAttribute("McSneak", npc.crouch)
 				npc.model:SetAttribute("McSprint", npc.sprint)
 				npc.model:SetAttribute("McPitch", npc.pitch)
+				-- his game mode (Minecraft: spectators are only seen by spectators - the game's clients decide)
+				npc.model:SetAttribute("McGameMode", if type(player.gm) == "string" then player.gm else nil)
 			end
 			npc.speed = if type(player.w) == "table"
 				then Vector3.new(npc.velocity.X, 0, npc.velocity.Z).Magnitude
@@ -476,7 +478,7 @@ local function snapshot()
 				w = { round(velocity.X, 0.01), round(velocity.Y, 0.01), round(velocity.Z, 0.01) }, -- studs per second
 				r = round(math.atan2(-look.X, -look.Z), 0.001), -- yaw: CFrame.Angles(0, r, 0) looks the same way
 				s = round(Vector3.new(velocity.X, 0, velocity.Z).Magnitude, 0.1),
-				a = humanoid.FloorMaterial == Enum.Material.Air,
+				a = humanoid.FloorMaterial == Enum.Material.Air and character:GetAttribute("McFlying") ~= true, -- (flying: no fall)
 				c = character:GetAttribute("McSneak") == true, -- sneaking / sprinting (set by a game script, e.g. MinecraftWorld)
 				sp = character:GetAttribute("McSprint") == true,
 				sw = character:GetAttribute("McSwing") == true,

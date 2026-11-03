@@ -5,13 +5,18 @@
 	  third person from behind -> from the front (4 blocks away, pulled closer by walls). Crosshair in first person.
 	- Walking like Minecraft (Roblox's own controls are off): W A S D relative to where you look - also in the front
 	  view -, Space (hold = jump again), Shift = sneak (slower, eyes lower, you do not fall off edges), Ctrl = sprint
-	  only while it is held and you walk forward. Speeds, jump height, gravity: MinecraftCharacter.
+	  only while it is held and you walk forward (jumping while sprinting pushes forward). Minecraft's own movement:
+	  the speed is set every frame with Minecraft's friction (ground: quick, air: momentum), steps up to 0.6 blocks
+	  are walked up. Speeds, jump height, gravity: MinecraftCharacter.
+	- Game modes (player attribute McGameMode from the server): creative = Space twice to fly (Space up, Shift down,
+	  Ctrl twice as fast, landing stops it), spectator = always flying, through blocks, only other spectators see
+	  him (as a see-through head) - Minecraft players in spectator only spectators see too.
 	- Animations: Minecraft's own (MinecraftCharacter.animate) on the own character - Roblox replicates them to the
 	  others; the head follows the look up / down on everybody (attribute McPitch).
 	- Chat: T opens it. Messages go to Minecraft, Minecraft's chat comes in; "/..." runs a Minecraft command (the
 	  answer only you see), "/skin <Minecraft name>" wears that account's skin, "/skin" the default one again.
-	For MinecraftClient: player attributes McEye / McLook (where the eyes are / look, for building), McGuiOpen
-	(inventory open: mouse free, no walking), McSwingAt (swing the arm).
+	For MinecraftClient: player attributes McEye / McLook (where the eyes are / look, for building), McGround (feet
+	on a block), McFlying, McGuiOpen (inventory open: mouse free, no walking), McSwingAt (swing the arm).
 ]]
 local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
@@ -46,7 +51,7 @@ local eyeHeight = Character.EYE_HEIGHT
 local fov = FOV
 local animation = nil
 local animatedCharacter = nil
-local sent = { sneak = nil :: boolean?, sprint = nil :: boolean?, pitch = 0, at = 0 }
+local sent = { sneak = nil :: boolean?, sprint = nil :: boolean?, pitch = 0, at = 0, flying = nil :: boolean? }
 
 -- Roblox's own walking is off: Minecraft walks relative to where the player looks (the camera may face him)
 local controls = nil
@@ -156,14 +161,38 @@ player:GetAttributeChangedSignal("McSwingAt"):Connect(function()
 end)
 -- endregion
 
--- region walking
+-- region walking + flying (Minecraft's own movement, per tick turned into per frame)
+local TICKS = 20
+local GROUND_KEEP = 0.546 -- per tick on the ground: block friction 0.6 x 0.91 (no key: standing still in ~0.2 s)
+local AIR_KEEP = 0.91 -- per tick in the air / flying: what is left of the speed
+local FLY_VERTICAL_KEEP = 0.6
+local BLOCK = Character.STUDS_PER_BLOCK
+local FLY_SPEED = 0.05 * 0.98 / (1 - AIR_KEEP) * TICKS * BLOCK -- creative flying: 10.9 blocks/s (sprinting x 2)
+local FLY_VERTICAL = 7.5 * BLOCK -- Space / Shift while flying: 7.5 blocks/s
+local SPRINT_JUMP = 0.2 * TICKS * BLOCK -- jumping while sprinting: + 0.2 blocks/tick forward
+local STEP_HEIGHT = 0.6 * BLOCK -- Minecraft walks up 0.6 blocks without jumping (slabs, trapdoors)
+local DOUBLE_TAP = 0.35 -- 7 ticks: Space twice = fly (creative)
+
 local groundParams = RaycastParams.new()
 groundParams.FilterType = Enum.RaycastFilterType.Exclude
+pcall(function()
+	groundParams.RespectCanCollide = true -- redstone, levers, buttons have no collision: nobody stands on them
+end)
+
+local flying = false
+local flyingSince = 0
+local lastSpaceTap = -math.huge
+local lastJump = -math.huge
+
+local function gameMode(): string
+	local mode = player:GetAttribute("McGameMode")
+	return if type(mode) == "string" then mode else "survival"
+end
 
 local function hasGround(feet: Vector3): boolean
 	-- Minecraft: sneaking stops where the hitbox, 0.6 blocks lower, would hang in the air
 	local half = Character.HITBOX.X / 2 - 0.05
-	local depth = 0.6 * Character.STUDS_PER_BLOCK + 0.1
+	local depth = 0.6 * BLOCK + 0.1
 	for _, corner in ipairs({ Vector3.new(half, 0, half), Vector3.new(-half, 0, half), Vector3.new(half, 0, -half),
 		Vector3.new(-half, 0, -half) }) do
 		if workspace:Raycast(feet + corner + Vector3.new(0, 0.1, 0), Vector3.new(0, -depth, 0), groundParams) then
@@ -173,8 +202,8 @@ local function hasGround(feet: Vector3): boolean
 	return false
 end
 
--- Minecraft only jumps standing on something. Roblox's humanoid feels the floor a bit before it touches it (and
--- would jump out of the air): here the feet must really be on a block.
+-- Minecraft only jumps standing on something - here the feet must really be on a block (any corner of the hitbox:
+-- standing on the very edge counts, like in Minecraft)
 local function onGround(root: BasePart): boolean
 	if root.AssemblyLinearVelocity.Y < -1 then
 		return false
@@ -183,7 +212,7 @@ local function onGround(root: BasePart): boolean
 	local feet = root.Position - Vector3.new(0, Character.ROOT_HEIGHT, 0)
 	local half = Character.HITBOX.X / 2 - 0.05
 	for _, corner in ipairs({ Vector3.new(half, 0, half), Vector3.new(-half, 0, half), Vector3.new(half, 0, -half),
-		Vector3.new(-half, 0, -half) }) do
+		Vector3.new(-half, 0, -half), Vector3.zero }) do
 		if workspace:Raycast(feet + corner + Vector3.new(0, 0.2, 0), Vector3.new(0, -0.35, 0), groundParams) then
 			return true
 		end
@@ -208,8 +237,83 @@ local function stayOnEdge(root: BasePart, move: Vector3, speed: number): Vector3
 	return Vector3.new(x, 0, z)
 end
 
-local lastJump = -math.huge
+--[[
+	Minecraft's horizontal movement: every tick the speed keeps a part of itself (friction) and moves towards what the
+	keys want - on the ground fast, in the air slowly (momentum). Set directly on the root part every frame (no
+	friction there): nothing can make the player stick, nobody glides on.
+]]
+local function steer(root: BasePart, target: Vector3, keep: number): Vector3
+	local velocity = root.AssemblyLinearVelocity
+	local flat = Vector3.new(velocity.X, 0, velocity.Z)
+	local new = target + (flat - target) * keep
+	if target.Magnitude < 0.01 and new.Magnitude < 0.3 then
+		new = Vector3.zero
+	end
+	root.AssemblyLinearVelocity = Vector3.new(new.X, velocity.Y, new.Z)
+	return new
+end
+
+-- Minecraft walks up steps up to 0.6 blocks high (a slab, a closed trapdoor) without jumping
+local function stepUp(root: BasePart, horizontal: Vector3, dt: number)
+	if horizontal.Magnitude < 0.5 then
+		return
+	end
+	local direction = horizontal.Unit
+	local width = Character.HITBOX.X - 0.1
+	local feet = root.Position - Vector3.new(0, Character.ROOT_HEIGHT, 0)
+	local ahead = horizontal.Magnitude * dt + 0.1
+	groundParams.FilterDescendantsInstances = { root.Parent :: Instance }
+	local ok, low, wall, top = pcall(function()
+		local lowBox = Vector3.new(width, STEP_HEIGHT - 0.04, width)
+		local highBox = Vector3.new(width, Character.HITBOX.Y - STEP_HEIGHT - 0.04, width)
+		local lowHit = workspace:Blockcast(CFrame.new(feet + Vector3.new(0, 0.02 + lowBox.Y / 2, 0)), lowBox,
+			direction * ahead, groundParams)
+		local wallHit = workspace:Blockcast(CFrame.new(feet + Vector3.new(0, STEP_HEIGHT + 0.02 + highBox.Y / 2, 0)), highBox,
+			direction * ahead, groundParams)
+		local downFrom = feet + direction * ahead + Vector3.new(0, STEP_HEIGHT + 0.05, 0)
+		local topHit = workspace:Blockcast(CFrame.new(downFrom), Vector3.new(width, 0.02, width),
+			Vector3.new(0, -(STEP_HEIGHT + 0.05), 0), groundParams)
+		return lowHit, wallHit, topHit
+	end)
+	if not ok or not low or wall or not top then
+		return
+	end
+	local rise = top.Position.Y - feet.Y
+	if rise > 0.15 and rise <= STEP_HEIGHT + 0.01 then -- (Minecraft's smallest step: 1/16 block)
+		root.CFrame += Vector3.new(0, rise + 0.02, 0)
+	end
+end
+
+-- Space twice quickly: fly (creative) - like Minecraft
+UserInputService.InputBegan:Connect(function(input, processed)
+	if input.KeyCode ~= Enum.KeyCode.Space or processed or chatFocused() then
+		return
+	end
+	if gameMode() ~= "creative" then
+		lastSpaceTap = -math.huge
+		return
+	end
+	local now = os.clock()
+	if now - lastSpaceTap < DOUBLE_TAP then
+		flying = not flying
+		flyingSince = now
+		lastSpaceTap = -math.huge
+	else
+		lastSpaceTap = now
+	end
+end)
+
+local antiGravity: VectorForce? = nil
+local yawAlign: AlignOrientation? = nil
+
 local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: number)
+	local mode = gameMode()
+	local spectator = mode == "spectator"
+	if spectator then
+		flying = true -- spectators always fly (and go through blocks: their collision group, from the server)
+	elseif mode ~= "creative" then
+		flying = false
+	end
 	local forward = Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
 	local right = Vector3.new(math.cos(yaw), 0, -math.sin(yaw))
 	local ahead, side = 0, 0
@@ -221,43 +325,75 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 	if move.Magnitude > 1 then
 		move = move.Unit
 	end
-	sneaking = not free and keyDown(Enum.KeyCode.LeftShift, Enum.KeyCode.RightShift)
+	local shift = not free and keyDown(Enum.KeyCode.LeftShift, Enum.KeyCode.RightShift)
+	local space = not free and keyDown(Enum.KeyCode.Space)
+	local grounded = not spectator and onGround(root)
+	if player:GetAttribute("McGround") ~= grounded then
+		player:SetAttribute("McGround", grounded) -- (MinecraftClient: breaking is 5 x slower in the air)
+	end
+	if player:GetAttribute("McFlying") ~= flying then
+		player:SetAttribute("McFlying", flying) -- (no fall damage while flying)
+	end
+	if flying and not spectator and grounded and not space and os.clock() - flyingSince > 0.3 then
+		flying = false -- landed: Minecraft stops flying
+	end
+	sneaking = shift and not flying
 	-- sprinting: only while Ctrl is held and you walk forward (and not while sneaking)
 	sprinting = not free and keyDown(Enum.KeyCode.LeftControl) and ahead > 0 and not sneaking
+	humanoid.AutoRotate = false
+	pcall(function()
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false) -- Minecraft climbs only ladders
+	end)
+	humanoid.PlatformStand = flying -- flying: no hip spring, no floor: the speed below is all there is
+	if antiGravity then
+		antiGravity.Force = Vector3.new(0, root.AssemblyMass * workspace.Gravity, 0)
+		antiGravity.Enabled = flying
+	end
+	if flying then
+		local speed = FLY_SPEED * (if sprinting then 2 else 1)
+		local horizontal = steer(root, move * speed, AIR_KEEP ^ (TICKS * dt))
+		local wanted = ((if space then 1 else 0) - (if shift then 1 else 0)) * FLY_VERTICAL
+		local velocity = root.AssemblyLinearVelocity
+		local vertical = wanted + (velocity.Y - wanted) * FLY_VERTICAL_KEEP ^ (TICKS * dt)
+		if math.abs(vertical) < 0.05 and wanted == 0 then
+			vertical = 0
+		end
+		root.AssemblyLinearVelocity = Vector3.new(horizontal.X, vertical, horizontal.Z)
+		humanoid:Move(Vector3.zero, false)
+		humanoid.Jump = false
+		return
+	end
 	local speed = if sneaking then Character.SNEAK_SPEED elseif sprinting then Character.SPRINT_SPEED else Character.WALK_SPEED
-	humanoid.WalkSpeed = speed
-	if sneaking and humanoid.FloorMaterial ~= Enum.Material.Air and move.Magnitude > 0 then
+	if sneaking and grounded and move.Magnitude > 0 then
 		groundParams.FilterDescendantsInstances = { root.Parent :: Instance }
 		move = stayOnEdge(root, move, speed)
 	end
-	humanoid:Move(move, false)
-	if move.Magnitude == 0 and onGround(root) then
-		-- no key pressed, feet on a block: Minecraft's ground friction (x 0.546 per tick) - nobody slides
-		local velocity = root.AssemblyLinearVelocity
-		local keep = if Vector3.new(velocity.X, 0, velocity.Z).Magnitude < 0.3 then 0 else 0.546 ^ (20 * dt)
-		root.AssemblyLinearVelocity = Vector3.new(velocity.X * keep, velocity.Y, velocity.Z * keep)
+	local horizontal = steer(root, move * speed, (if grounded then GROUND_KEEP else AIR_KEEP) ^ (TICKS * dt))
+	-- the humanoid wants the same speed (it would brake against it otherwise)
+	humanoid.WalkSpeed = horizontal.Magnitude
+	humanoid:Move(if horizontal.Magnitude > 0.01 then horizontal.Unit else Vector3.zero, false)
+	if grounded then
+		stepUp(root, horizontal, dt)
 	end
-	-- Jumping like Minecraft: only with the feet on a block, held = again after landing, at most every 10 ticks
-	local space = not free and keyDown(Enum.KeyCode.Space)
+	-- Jumping like Minecraft: only with the feet on a block, held = again after landing, at most every 10 ticks;
+	-- sprinting gives a push forward
 	if not space then
 		lastJump = -math.huge
 	end
-	if space and humanoid.Health > 0 and os.clock() - lastJump >= 0.5 and onGround(root) then
+	if space and humanoid.Health > 0 and os.clock() - lastJump >= 0.5 and grounded then
 		lastJump = os.clock()
-		if humanoid:GetState() == Enum.HumanoidStateType.Freefall then
-			-- on the very edge of a block Roblox's humanoid thinks it falls (it only looks under its middle): jump anyway
-			local velocity = root.AssemblyLinearVelocity
-			root.AssemblyLinearVelocity = Vector3.new(velocity.X, Character.JUMP_VELOCITY, velocity.Z)
-		else
-			humanoid.Jump = true
-		end
-	else
-		humanoid.Jump = false
+		pcall(function()
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end)
+		local velocity = root.AssemblyLinearVelocity
+		local push = if sprinting then forward * SPRINT_JUMP else Vector3.zero
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X + push.X, Character.JUMP_VELOCITY, velocity.Z + push.Z)
 	end
-	humanoid.AutoRotate = false
-	if humanoid.Health > 0 then
-		root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0) -- the body turns with the view
-	end
+	humanoid.Jump = false
+end
+
+local function isFlying(): boolean
+	return flying
 end
 -- endregion
 
@@ -266,19 +402,66 @@ local cameraParams = RaycastParams.new()
 cameraParams.FilterType = Enum.RaycastFilterType.Exclude
 
 local function clip(from: Vector3, direction: Vector3, character: Model): number
+	if gameMode() == "spectator" then
+		return THIRD_DISTANCE -- (Minecraft: a spectator's camera goes through blocks)
+	end
 	local npcs = workspace:FindFirstChild("BridgeRemotePlayers")
 	cameraParams.FilterDescendantsInstances = if npcs then { character, npcs } else { character }
 	local hit = workspace:Raycast(from, direction * THIRD_DISTANCE, cameraParams)
 	return if hit then math.max(0, (hit.Position - from).Magnitude - 0.3) else THIRD_DISTANCE
 end
 
-local function hideCharacter(character: Model, hidden: boolean)
-	for _, item in ipairs(character:GetDescendants()) do
-		if item:IsA("BasePart") or item:IsA("Decal") then -- (the skin Textures too, they are Decals)
-			item.LocalTransparencyModifier = if hidden then 1 else 0
+-- how a body is shown: "all", "none" (first person / a spectator for the others), "head" (a spectator as other
+-- spectators see him: only the head, see-through - like Minecraft)
+local function showModel(model: Model, how: string)
+	for _, item in ipairs(model:GetDescendants()) do
+		if item:IsA("BasePart") or item:IsA("Decal") then
+			local part = if item:IsA("Decal") then item.Parent else item
+			local head = part ~= nil and (part.Name == "Head" or part.Name == "Hat")
+			item.LocalTransparencyModifier = if how == "all" then 0 elseif how == "none" then 1 elseif head then 0.5 else 1
 		end
 	end
 end
+
+local function hideCharacter(character: Model, hidden: boolean)
+	showModel(character, if hidden then "none" elseif gameMode() == "spectator" then "head" else "all")
+end
+
+-- the others: spectators only for spectators (Roblox players: their character's McGameMode from the server,
+-- Minecraft players: their NPC's, from PlayerSync)
+local function showOthers()
+	local iAmSpectator = gameMode() == "spectator"
+	local function apply(model: Model)
+		local spectator = model:GetAttribute("McGameMode") == "spectator"
+		showModel(model, if not spectator then "all" elseif iAmSpectator then "head" else "none")
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.DisplayDistanceType = if spectator and not iAmSpectator then Enum.HumanoidDisplayDistanceType.None
+				else Enum.HumanoidDisplayDistanceType.Viewer
+		end
+	end
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player and other.Character then
+			apply(other.Character)
+		end
+	end
+	local npcs = workspace:FindFirstChild("BridgeRemotePlayers")
+	if npcs then
+		for _, folder in ipairs(npcs:GetChildren()) do
+			for _, model in ipairs(folder:GetChildren()) do
+				if model:IsA("Model") then
+					apply(model)
+				end
+			end
+		end
+	end
+end
+task.spawn(function()
+	while true do
+		task.wait(0.25)
+		pcall(showOthers)
+	end
+end)
 -- endregion
 
 -- region the head follows the look (everybody: own character, other players, Minecraft players)
@@ -324,10 +507,33 @@ local function onCharacter(character: Model)
 	end
 	animation = Character.animate(character)
 	animatedCharacter = character
+	flying = false
+	-- the body turns with the view (a constraint - setting the root's CFrame every frame disturbed the physics)
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "McYaw"
+	attachment.Parent = root
+	local align = Instance.new("AlignOrientation")
+	align.Name = "McYaw"
+	align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	align.Attachment0 = attachment
+	align.RigidityEnabled = true
+	align.CFrame = CFrame.Angles(0, yaw, 0)
+	align.Parent = root
+	yawAlign = align
+	local force = Instance.new("VectorForce") -- flying: no gravity
+	force.Name = "McFly"
+	force.Attachment0 = attachment
+	force.RelativeTo = Enum.ActuatorRelativeTo.World
+	force.ApplyAtCenterOfMass = true
+	force.Enabled = false
+	force.Parent = root
+	antiGravity = force
 	humanoid.Died:Connect(function()
 		if animatedCharacter == character and animation then
 			animation:die()
 		end
+		align.Enabled = false
+		force.Enabled = false
 		root.Anchored = true -- lies where it fell (the death animation tips it over, not the physics)
 	end)
 end
@@ -361,6 +567,9 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 	end
 	camera.CameraType = Enum.CameraType.Scriptable
 	walk(humanoid, root, free, dt)
+	if yawAlign and yawAlign.Parent == root and humanoid.Health > 0 then
+		yawAlign.CFrame = CFrame.Angles(0, yaw, 0)
+	end
 	if animation and animatedCharacter == character then
 		local velocity = root.AssemblyLinearVelocity
 		animation:update(dt, { speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude, sneak = sneaking })
@@ -392,10 +601,10 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 
 	-- the others see it: sneaking / sprinting at once, the head pitch a few times per second
 	local now = os.clock()
-	if sneaking ~= sent.sneak or sprinting ~= sent.sprint
+	if sneaking ~= sent.sneak or sprinting ~= sent.sprint or isFlying() ~= sent.flying
 		or (math.abs(pitch - sent.pitch) > 0.03 and now - sent.at > SEND_EVERY) then
-		sent.sneak, sent.sprint, sent.pitch, sent.at = sneaking, sprinting, pitch, now
-		moveRemote:FireServer(sneaking, sprinting, math.floor(pitch * 100 + 0.5) / 100)
+		sent.sneak, sent.sprint, sent.pitch, sent.at, sent.flying = sneaking, sprinting, pitch, now, isFlying()
+		moveRemote:FireServer(sneaking, sprinting, math.floor(pitch * 100 + 0.5) / 100, isFlying())
 	end
 end)
 

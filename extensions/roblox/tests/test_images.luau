@@ -71,5 +71,28 @@ local _, _, _, outside = pixel(edge, 1, 1)
 check("crop: the part of the picture (a face of a skin), outside the picture transparent",
 	face.w == 2 and face.h == 2 and c00 == 11 and c11 == 22 and pixel(edge, 0, 0) == 32 and outside == 0)
 
+-- turn: clockwise like Minecraft's face rotation (a 2 x 1 picture -> 1 x 2, the left pixel on top)
+local strip = Images.solid(2, 1, 0, 0, 0)
+buffer.writeu8(strip.pixels, 0, 1)
+buffer.writeu8(strip.pixels, 4, 2)
+local turned = Images.turn(strip, 90)
+local back = Images.turn(Images.turn(turned, 180), 90)
+check("turn: 90 degrees clockwise (2 x 1 -> 1 x 2, left -> top), 4 x 90 = the same picture",
+	turned.w == 1 and turned.h == 2 and pixel(turned, 0, 0) == 1 and pixel(turned, 0, 1) == 2
+	and back.w == 2 and pixel(back, 0, 0) == 1 and pixel(back, 1, 0) == 2)
+
+-- model icon: a slab (bottom half): the top face lower than a full cube's, the upper part transparent
+local slab = Images.modelIcon({ { from = { 0, 0, 0 }, to = { 16, 8, 16 }, faces = { up = top, south = side, east = side } } }, 64)
+local full = Images.modelIcon({ { from = { 0, 0, 0 }, to = { 16, 16, 16 }, faces = { up = top, south = side, east = side } } }, 64)
+local fr, fg, _, fa = pixel(full, 32, 14)
+local _, _, _, sa = pixel(slab, 32, 14)
+local sr, sg = pixel(slab, 32, 28)
+local lr2, lg2 = pixel(full, 18, 40)
+local rr2, rg2 = pixel(full, 46, 40)
+check("model icon: a full box looks like the block icon (top bright, south side * 0.8 left, east * 0.6 right)",
+	fr == 200 and fg == 100 and fa == 255 and lr2 == 80 and lg2 == 160 and rr2 == 60 and rg2 == 120, fr .. "," .. lr2 .. "," .. rr2)
+check("model icon: a slab - nothing where a cube's top would be, its own top lower down", sa == 0 and sr == 200 and sg == 100,
+	sa .. "," .. sr)
+
 print(string.format("\n%d ok, %d failed", results.ok, results.fail))
 process.exit(if results.fail > 0 then 1 else 0)

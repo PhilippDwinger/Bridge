@@ -167,6 +167,11 @@ function Character.build(options: { slim: boolean?, name: string? }?): Model
 	root.TopSurface = Enum.SurfaceType.Smooth
 	root.BottomSurface = Enum.SurfaceType.Smooth
 	root.CFrame = CFrame.new(0, Character.ROOT_HEIGHT, 0)
+	-- no friction: Minecraft's movement (MinecraftPlayer) sets the speed itself - a box resting on the edge of a block
+	-- must never stick to it (it did: standing on placed blocks, walking sometimes did nothing)
+	pcall(function()
+		root.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0, 0, 100, 1)
+	end)
 	root.Parent = model
 	model.PrimaryPart = root
 

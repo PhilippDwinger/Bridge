@@ -7,6 +7,7 @@
 
 	    local big = Images.upscale(texture, 8)              -- 16x16 -> 128x128, every pixel a sharp 8x8 square
 	    local icon = Images.blockIcon(top, left, right, 128) -- the block as a little 3D cube, like in the inventory
+	    local icon = Images.modelIcon(boxes, 128)           -- a model (stairs, button, fence) the same way
 ]]
 export type Picture = { w: number, h: number, pixels: buffer }
 
@@ -25,6 +26,32 @@ function Images.upscale(picture: Picture, factor: number): Picture
 		end
 	end
 	return { w = w, h = h, pixels = out }
+end
+
+--- Turned clockwise by 90 / 180 / 270 degrees.
+function Images.turn(picture: Picture, degrees: number): Picture
+	local quarter = (degrees // 90) % 4
+	if quarter == 0 then
+		return picture
+	end
+	local w, h = picture.w, picture.h
+	local outW, outH = if quarter == 2 then w else h, if quarter == 2 then h else w
+	local out = buffer.create(outW * outH * 4)
+	for y = 0, h - 1 do
+		for x = 0, w - 1 do
+			local pixel = buffer.readu32(picture.pixels, (y * w + x) * 4)
+			local nx, ny
+			if quarter == 1 then
+				nx, ny = h - 1 - y, x
+			elseif quarter == 2 then
+				nx, ny = w - 1 - x, h - 1 - y
+			else
+				nx, ny = y, w - 1 - x
+			end
+			buffer.writeu32(out, (ny * outW + nx) * 4, pixel)
+		end
+	end
+	return { w = outW, h = outH, pixels = out }
 end
 
 --- One colour everywhere (for blocks / items without a picture).
@@ -109,6 +136,84 @@ function Images.blockIcon(top: Picture, left: Picture, right: Picture, size: num
 				local t = (qy - b - s * b) / h
 				if s >= 0 and s <= 1 and t >= 0 and t <= 1 then
 					sample(right, 1 - s, t, 0.6, out, offset)
+				end
+			end
+		end
+	end
+	return { w = size, h = size, pixels = out }
+end
+
+export type IconBox = { from: { number }, to: { number }, faces: { [string]: Picture? } }
+
+--[[
+	A model as an item icon (stairs, slabs, fences, buttons, trapdoors): its boxes (in pixels 0..16, along the axes)
+	seen like blockIcon sees a cube - from above, the south side on the left, the east side on the right. For every
+	pixel the ray into the picture finds the nearest box face; that face's picture is sampled in Minecraft's face
+	orientation (up: east right / south down; south: east right; east: north right; sides upright).
+]]
+function Images.modelIcon(boxes: { IconBox }, size: number): Picture
+	local out = buffer.create(size * size * 4)
+	local edge = size * 0.6
+	local a = edge * 0.70710678
+	local b = edge * 0.35355339
+	local full = edge * 0.8660254
+	local cx = size / 2
+	local originY = (size - (2 * b + full)) / 2 + full -- the screen point of the block's corner (0, 0, 0)
+	-- the direction into the picture: screen(D) = 0
+	local dx, dy, dz = -1, -2 * b / full, -1
+	for py = 0, size - 1 do
+		for px = 0, size - 1 do
+			-- a point on the ray at height 0: screen = (cx, originY) + x (a, b) + z (-a, b)
+			local qx, qy = px + 0.5 - cx, py + 0.5 - originY
+			local x0 = (qx / a + qy / b) / 2
+			local z0 = (qy / b - qx / a) / 2
+			-- start far on the viewer's side, go along D
+			local sx, sy, sz = x0 - 3 * dx, -3 * dy, z0 - 3 * dz
+			local best, bestFace, bestBox = math.huge, nil, nil
+			for _, box in ipairs(boxes) do
+				local lo = { box.from[1] / 16, box.from[2] / 16, box.from[3] / 16 }
+				local hi = { box.to[1] / 16, box.to[2] / 16, box.to[3] / 16 }
+				local tmin, tmax, face = -math.huge, math.huge, nil
+				local origin = { sx, sy, sz }
+				local direction = { dx, dy, dz }
+				local names = { "east", "up", "south" } -- the face you enter through, per axis (rays go towards -x, -y, -z)
+				local miss = false
+				for axis = 1, 3 do
+					local o, d = origin[axis], direction[axis]
+					local t1, t2 = (hi[axis] - o) / d, (lo[axis] - o) / d -- d < 0: hi first
+					if t1 > tmin then
+						tmin = t1
+						face = names[axis]
+					end
+					if t2 < tmax then
+						tmax = t2
+					end
+					if tmin > tmax then
+						miss = true
+						break
+					end
+				end
+				if not miss and face and tmin < best then
+					best, bestFace, bestBox = tmin, face, box
+				end
+			end
+			if bestBox and bestFace then
+				local picture = bestBox.faces[bestFace]
+				if picture then
+					local hx, hy, hz = sx + best * dx, sy + best * dy, sz + best * dz
+					local from, to = bestBox.from, bestBox.to
+					local function fraction(value: number, low: number, high: number): number
+						return if high - low > 1e-6 then math.clamp((value * 16 - low) / (high - low), 0, 0.9999) else 0
+					end
+					local u, v, shade
+					if bestFace == "up" then
+						u, v, shade = fraction(hx, from[1], to[1]), fraction(hz, from[3], to[3]), 1
+					elseif bestFace == "south" then
+						u, v, shade = fraction(hx, from[1], to[1]), 1 - fraction(hy, from[2], to[2]), 0.8
+					else
+						u, v, shade = 1 - fraction(hz, from[3], to[3]), 1 - fraction(hy, from[2], to[2]), 0.6
+					end
+					sample(picture, u, math.clamp(v, 0, 0.9999), shade, out, (py * size + px) * 4)
 				end
 			end
 		end

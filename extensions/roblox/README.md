@@ -166,17 +166,33 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
 - **Neu bauen nur, was sich ändert:** Nach einer Änderung bleibt jeder Part, dessen Box gleich geblieben ist, neue Parts
   kommen, bevor alte gehen – der Boden unter den Füßen verschwindet nie (kein Ruckeln der Kamera). Verschwinden
   Texturen, bekommen alle Blöcke dieser Art ihr Bild im nächsten Frame noch mal (Roblox ließ sie sonst manchmal grau).
-- **Texturen:** Die Bilder kommen aus dem Minecraft-Spiel selbst (Command `mcworld.assets`, das Spiel enthält keine).
-  **Jeder Würfel-Block** sieht aus wie in Minecraft: die Mod liest Blockstate → Modell → Textur jeder der 6 Seiten
-  (mit Overlay und Biom-Farbe für Gras und Laub; Glas und Laub durchsichtig). Taucht in der Welt ein Block auf, für den
-  Roblox noch keine Bilder hat, fragt der Server ihn nach. Andere Formen (Stufen, Treppen, Blumen, Fackeln …)
-  bleiben graue Würfel. Jeder Block bekommt eigene Parts mit einer `Texture` pro Seite (1 Kachel = 1 Block). Die
-  Bilder macht das Client-Script `MinecraftClient` (EditableImage gibt es nur auf dem Client).
-- **Hotbar + Inventar** mit Minecrafts eigener GUI-Grafik: Hotbar unten (Tasten **1–9**), Inventar mit **E**
-  (Item anklicken = aufnehmen, anderes Feld anklicken = ablegen oder tauschen). Kreativmodus: Items gehen nie aus.
-  23 Blöcke: Gras, Erde, Stein, Bruchstein, Eichenstamm, -bretter, -laub, Glas, Sand, Kies, Sandstein, Ziegel,
-  Steinziegel, Werkbank, Bücherregal, weiße Wolle, Schnee, Kohle-, Eisen-, Gold-, Diamanterz, Obsidian, Eichen-Falltür (die ersten 9
-  in der Hotbar). Icons als kleine 3D-Würfel.
+- **Texturen + Formen:** Die Bilder kommen aus dem Minecraft-Spiel selbst (Command `mcworld.assets`, das Spiel
+  enthält keine). **Jeder Blockzustand** sieht aus wie in Minecraft: Blocknamen tragen, wovon das Aussehen abhängt
+  (`minecraft:oak_log[axis=x]`), die Mod schickt das fertig gedrehte Aussehen. Würfel (auch liegende Stämme, Kolben in
+  jede Richtung) werden mit ihren Nachbarn zusammengefasst; Modelle (Hebel mit schrägem Griff, Redstone mit Farbe nach
+  Stärke, Treppen, Stufen, Zäune, Türen, Falltüren, Knöpfe, Kolbenköpfe, Fackeln, Pflanzen, Wasser/Lava durchsichtig)
+  bekommen je Box ein unsichtbares Teil mit einer `Texture` pro Seite, dazu „Collision“-Teile (wo man anstößt –
+  Redstone, Hebel, Knöpfe haben keine) und „Outline“-Teile (worauf man zielt, mit Minecrafts Umriss). Taucht ein neuer
+  Zustand auf, fragt der Server nach. Die Bilder macht das Client-Script `MinecraftClient` (EditableImage gibt es nur
+  auf dem Client).
+- **Spielmodi wie Minecraft** (Spielmodus + Inventar leben in Minecraft, `/gamemode` im Chat ändert ihn, neue Spieler
+  bekommen den Standard der Welt): **Überleben** – Items werden verbraucht, Abbauen dauert Minecrafts Abbauzeit (mit
+  Rissen; Minecraft sagt, wie schnell – Hand, Werkzeug, in der Luft 5× langsamer), die Drops landen im Inventar,
+  Items am Boden werden aufgehoben, Fallschaden, beim Tod fällt das Inventar raus (Todesnachricht in Minecraft).
+  **Kreativ** – Items gehen nie aus, Abbauen sofort, **2× Leertaste = fliegen** (Leertaste hoch, Shift runter, Strg
+  doppelt so schnell, Landen beendet es), kein Schaden, keine Herzen. **Abenteuer** – nichts abbauen/setzen, aber
+  Türen, Hebel, Knöpfe benutzen. **Zuschauer** – immer fliegen, durch Blöcke, unsichtbar für alle außer anderen
+  Zuschauern (die sehen einen durchsichtigen Kopf), kein Inventar, keine Hotbar, nichts anklicken; in Minecraft kein
+  Mannequin. Minecraft-Spieler im Zuschauermodus sehen auch nur Zuschauer.
+- **Hotbar + Inventar** mit Minecrafts eigener GUI-Grafik: Hotbar unten (Tasten **1–9**, Mausrad) mit Anzahl und
+  Haltbarkeit, **E** = Inventar: Überleben/Abenteuer Minecrafts Inventar mit Minecrafts eigenen Klicks (links =
+  aufnehmen/ablegen/tauschen, rechts = Hälfte/einzeln, Shift = verschieben, **2×2-Werkbank**, Klick daneben = wegwerfen),
+  Kreativ das Kreativ-Inventar (alle Items, Mausrad scrollt; Klick = 1 aufnehmen, Rechtsklick = Stapel, Shift = Stapel
+  in die Hotbar; zweiter Reiter = normales Inventar). **Q** wirft ein Item weg (Strg + Q den Stapel), **Mittelklick**
+  nimmt den angeschauten Block (Kreativ: neu, Überleben: aus dem Inventar). Kreativ-Liste: die 23 von vorher, alle
+  Holzblöcke aller Holzarten (Stämme, Holz, entrindet, Bretter, Treppen, Stufen, Zäune, Zauntore, Türen, Falltüren,
+  Knöpfe, Druckplatten) und Redstone (Staub, Fackel, Block, Hebel, Knöpfe, Kolben, klebriger Kolben, Lampe,
+  Verstärker, Komparator, Beobachter). Icons wie in Minecraft: flach (Redstone, Türen) oder 3D (auch Treppen, Zäune).
 - **Leben + Schaden wie Minecraft:** 20 HP = 10 Herzen über der Hotbar (Roblox' eigene Leiste ist aus).
   Fallschaden ab 4 Blöcken (1 pro Block über 3). **Linksklick auf einen Minecraft-Spieler** schlägt ihn (Minecraft
   macht den Schaden, mit Rückstoß von deinem Mannequin). Schlägt ein Minecraft-Spieler dein Mannequin, verlierst du
@@ -196,9 +212,12 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   die Pixel (`GetSkin`) und macht die Bilder.
 - **Bewegen wie Minecraft** (`MinecraftPlayer`, StarterPlayerScripts): Gehen 4,317 / Sprinten 5,612 / Schleichen
   1,295 Blöcke/s, Sprung 1,25 Blöcke, Gravitation 83,5 Studs/s² (ein Sprung dauert wie in Minecraft 12 Ticks, Stürze
-  gleich lang). W A S D relativ zur Blickrichtung, **Leertaste** halten = immer wieder springen (nur mit den Füßen
-  auf einem Block – Roblox' Humanoid würde sonst kurz vor der Landung schon springen), **Shift** halten =
-  schleichen (Augen tiefer, man fällt nicht von Kanten), **Strg** = sprinten nur solange gehalten und vorwärts.
+  gleich lang). Die Geschwindigkeit setzt das Script jedes Frame selbst mit Minecrafts Reibung (Boden × 0,546, Luft
+  × 0,91 pro Tick – in der Luft bleibt der Schwung), der Root-Part hat keine Reibung: man bleibt nirgends mehr
+  hängen und rutscht nicht weiter. Stufen bis 0,6 Blöcke (Stufen, Falltüren) läuft man hoch. Der Körper dreht sich mit
+  einem AlignOrientation statt per CFrame. W A S D relativ zur Blickrichtung, **Leertaste** halten = immer wieder
+  springen (nur mit den Füßen auf einem Block), Sprinten + Springen schiebt nach vorn, **Shift** halten = schleichen
+  (Augen tiefer, man fällt nicht von Kanten), **Strg** = sprinten nur solange gehalten und vorwärts.
 - **Kamera wie Minecraft:** Maus gefangen, kein Cursor, **F5** (oder **V**) wechselt Ego-Sicht → von hinten →
   von vorne. In Studio gehört F5 dem Studio („Play“) – dort ggf. File → Advanced → Customize Shortcuts den
   F5-Eintrag entfernen; im echten Spiel geht F5 so
@@ -211,7 +230,8 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Tempo = min(Blöcke pro Tick × 4, 1). Der Kopf folgt dem Blick (hoch/runter) bei allen.
 - **Chat:** **T** öffnet ihn. Was du schreibst, steht auch in Minecraft (`<Name · Roblox> …`), Minecrafts Chat
   (Spieler, `/say`, Beitritte, Tode …) kommt in den Roblox-Chat. **`/…`** ist ein Minecraft-Command: er läuft als
-  dein Mannequin (`@s`, `~ ~ ~`, `/tp @s …` bewegt dich mit), die Antwort siehst nur du. Rechte: Mod-Config
+  du (dein Stellvertreter in Minecraft: `@s`, `~ ~ ~`, `/tp @s …` bewegt dich mit, `/gamemode creative`, `/give @s …`,
+  `/clear`, `/kill`), die Antwort siehst nur du. Rechte: Mod-Config
   `robloxCommandLevel` (Standard 2 = OP-Commands wie `/time`, `/gamemode`, `/give`, `/tp`).
 - **Arm schwingen:** Schlägt oder baut jemand, schwingt der Arm (Minecrafts Schlag-Animation) – auch ein Schlag in
   die Luft (Remote `Swing`), in Roblox und in Minecraft (Mannequins der Roblox-Spieler). Getroffene werden kurz rot.
@@ -219,16 +239,14 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Quake Pro 110) und **Shader**: Aus (das Spiel wie es ist), Sanft (warmes Licht, weiche Schatten, Dunst, Wolken),
   Kräftig (satte Farben, Leuchten, Sonnenstrahlen, goldener Dunst) – `MinecraftShaders`. Nur Aussehen, nur auf dem
   eigenen Client, nichts geht über Bridge oder an andere. Gilt für die Sitzung.
-- **Falltür (Eichen-Falltür, Item 23):** genau wie Minecraft – 3 Pixel dick, Setzen wie Minecrafts
-  `getStateForPlacement` (seitlich angeklickt: hängt an der Seite, oben/unten nach Klickhöhe; oben/unten angeklickt:
-  zeigt zu dir), **Rechtsklick** öffnet/schließt (Minecrafts eigener Code mit Sound, Eisen nur mit Redstone),
-  Schleichen + Item setzt stattdessen einen Block. Kollision und Rahmen haben ihre echte Form. Der Zustand kommt mit
-  dem Namen: `minecraft:oak_trapdoor[facing=north,half=bottom,open=false]`; Redstone in Minecraft öffnet sie auch in
-  Roblox.
-- **Bauen:** **Linksklick** baut den Block ab, auf den du schaust (halten = weiter), **Rechtsklick** setzt das
-  gewählte Item. Gezielt wird wie in Minecraft von den Augen aus (auch von hinten/vorne). Reichweite 5 Blöcke, ein
-  schwarzer Rahmen zeigt den Block. Der Server prüft es, zeigt es sofort und schickt es über Bridge an Minecraft
-  (`mcworld.edit`); sagt Minecraft nein, lädt er den Chunk neu.
+- **Bauen:** gezielt wird wie in Minecraft von den Augen aus (auch von hinten/vorne), Reichweite 4,5 Blöcke (Kreativ
+  5), ein schwarzer Rahmen zeigt den Block bzw. seine Form. **Rechtsklick** = benutzen: Minecraft entscheidet mit
+  seinem eigenen Code – Tür/Falltür/Zauntor auf und zu, Hebel umlegen, Knopf drücken (Holz 1,5 s, Stein 1 s an),
+  sonst setzt es das Item in der Hand: der Stamm liegt wie geklickt, Treppen/Kolben schauen wie in Minecraft, Knöpfe
+  hängen an der geklickten Seite, Redstone verbindet sich; mit Shift wird immer gesetzt. **Linksklick** = abbauen
+  (Kreativ sofort, halten = alle 5 Ticks; Überleben mit Abbauzeit). Einfache Blöcke (Bretter, Stein …) zeigt der
+  Server sofort, alles andere sobald Minecraft geantwortet hat (dann aber gleich richtig gedreht). Alles, was in
+  Minecraft passiert (Kolben schieben, Redstone an/aus, Knopf geht aus), kommt sofort nach Roblox.
 
 So startest du es:
 
