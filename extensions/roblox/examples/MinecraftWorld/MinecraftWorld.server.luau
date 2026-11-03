@@ -1310,16 +1310,34 @@ local function setState(player, state)
 	inventoryRemote:FireClient(player, "state", state)
 end
 
--- where his feet are, in Minecraft blocks
-local function feetOf(player)
+--[[
+	Where his character is (studs). The client says where it was when he clicked: the server's copy is a moment behind
+	(while jumping up a pillar it is still in the block he builds below him - Minecraft would refuse the block, or it
+	came too late and pushed him off). Believed when it is close to the server's copy (CLIENT_SLACK blocks).
+]]
+local CLIENT_SLACK = 3
+local function rootOf(player, claimed)
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return nil
+	end
+	local scale = world.info and world.info.studsPerBlock or 3
+	if typeof(claimed) == "Vector3" and claimed.X == claimed.X and claimed.Y == claimed.Y and claimed.Z == claimed.Z
+		and (claimed - root.Position).Magnitude <= CLIENT_SLACK * scale then
+		return claimed
+	end
+	return root.Position
+end
+
+-- where his feet are, in Minecraft blocks (at = his root where the client had it, see rootOf)
+local function feetOf(player, at)
+	local position = at or rootOf(player)
 	local info = world.info
-	if not root or not info then
+	if not position or not info then
 		return nil
 	end
 	local scale = info.studsPerBlock
-	local position = root.Position
 	return { position.X / scale, (position.Y - Character.ROOT_HEIGHT) / scale + info.minY, position.Z / scale }
 end
 
@@ -1387,18 +1405,20 @@ end
 local FACE_NAMES = { up = Vector3.new(0, 1, 0), down = Vector3.new(0, -1, 0), north = Vector3.new(0, 0, -1),
 	south = Vector3.new(0, 0, 1), east = Vector3.new(1, 0, 0), west = Vector3.new(-1, 0, 0) }
 
--- Somebody's character stands in the block (Minecraft's hitbox: 0.6 x 1.8 blocks from the feet up)
-local function characterInBlock(center, scale)
+-- Somebody's character stands in the block (Minecraft's hitbox: 0.6 x 1.8 blocks from the feet up; touching is not
+-- standing in it, like Minecraft). The one who builds: where his client had him (placerRoot, see rootOf)
+local TOUCH = 0.01 -- studs
+local function characterInBlock(center, scale, placer, placerRoot)
 	for _, other in ipairs(Players:GetPlayers()) do
 		local character = other.Character
 		local root = character and character:FindFirstChild("HumanoidRootPart")
 		if root and character:GetAttribute("McGameMode") ~= "spectator" then
-			local p = root.Position
+			local p = if other == placer and placerRoot then placerRoot else root.Position
 			local half = scale / 2
 			local feet = p.Y - Character.ROOT_HEIGHT
 			local width = Character.HITBOX.X / 2
-			if math.abs(p.X - center.X) < half + width and math.abs(p.Z - center.Z) < half + width
-				and feet < center.Y + half and feet + Character.HITBOX.Y > center.Y - half then
+			if math.abs(p.X - center.X) < half + width - TOUCH and math.abs(p.Z - center.Z) < half + width - TOUCH
+				and feet < center.Y + half - TOUCH and feet + Character.HITBOX.Y > center.Y - half + TOUCH then
 				return true
 			end
 		end
@@ -1426,40 +1446,87 @@ end
 	A right click that will surely place a plain block (planks, stone, glass: no rotation, nothing to choose): shown at
 	once, Minecraft's answer confirms it. Everything else (logs, stairs, pistons - they turn; doors, levers - they
 	are used) waits for Minecraft (a moment), so nothing ever shows wrong.
+	Clicked: a cube Minecraft says a click does nothing on (look.use false: dirt, grass, logs, planks - not a crafting
+	table, a pumpkin); sneaking with something in the hand never uses the block (Minecraft). Looks from before "use"
+	existed: no state, not *_table / jukebox (the old guess).
+	Returns the cell it showed the block in.
 ]]
-local function guessPlacement(player, x, y, z, face, slot, sneaking)
+local function clickBuilds(clicked, look, sneaking)
+	if not look or look.cube ~= true or look.single or look.fluid then
+		return false
+	end
+	if look.use ~= nil then
+		return look.use ~= true or sneaking
+	end
+	return not string.find(clicked, "[", 1, true) and (sneaking or not string.find(baseName(clicked), "_table$"))
+		and baseName(clicked) ~= "minecraft:jukebox"
+end
+
+local function guessPlacement(player, x, y, z, face, slot, sneaking, root)
 	local mode = gameModeOf(player)
 	local state = states[player]
 	local normal = FACE_NAMES[face]
 	if (mode ~= "creative" and mode ~= "survival") or not state or not normal or not slot then
-		return
+		return nil
 	end
 	local stack = state.slots[37 + slot] -- hotbar slot 0-8 = menu slots 36-44
 	local item = type(stack) == "table" and itemInfo(stack.id)
 	local block = item and item.block
 	if type(block) ~= "string" or string.find(block, "[", 1, true) then
-		return
+		return nil
+	end
+	local blockLook = world.assets and world.assets.blocks[block]
+	if blockLook and (blockLook.cube ~= true or blockLook.single or blockLook.fluid) then
+		return nil -- (a flower, a torch: where they may stand, Minecraft decides)
 	end
 	local clicked = blockAt(x, y, z)
-	local look = world.assets and world.assets.blocks[clicked]
-	-- only on a plain cube that is not used by a click (a crafting table opens, a door opens ...)
-	if not look or look.cube ~= true or look.single or string.find(clicked, "[", 1, true)
-		or (string.find(baseName(clicked), "_table$") and not sneaking) or baseName(clicked) == "minecraft:jukebox" then
-		return
+	if not clickBuilds(clicked, world.assets and world.assets.blocks[clicked], sneaking) then
+		return nil
 	end
 	local px, py, pz = x + normal.X, y + normal.Y, z + normal.Z
 	local info = world.info
 	if not AIR[baseName(blockAt(px, py, pz))] or py < info.minY or py >= info.maxY then
-		return
+		return nil
 	end
 	local scale = info.studsPerBlock
-	if characterInBlock(Vector3.new((px + 0.5) * scale, (py - info.minY + 0.5) * scale, (pz + 0.5) * scale), scale) then
-		return
+	local center = Vector3.new((px + 0.5) * scale, (py - info.minY + 0.5) * scale, (pz + 0.5) * scale)
+	if characterInBlock(center, scale, player, root) then
+		return nil
 	end
 	applyBlocks({ { px, py, pz, block } })
+	return px .. "," .. py .. "," .. pz
 end
 
--- info = {face = "up" | ..., hit = Vector3 (studs), slot = 0..8, look = Vector3, ground = boolean}
+--[[
+	Clicks come quickly (jumping up a pillar: a click every 4 ticks), Minecraft answers each one a moment later. The
+	answer of an earlier click must not undo what a later click already showed (it was refused - the block below is
+	still air in its answer - while the next one is already standing): shownBy remembers which click showed what
+	where; answers of older clicks leave those blocks alone.
+]]
+local editCount = 0
+local shownBy = {} -- "x,y,z" -> number of the click that showed a block there before Minecraft answered
+
+local function answerBlocks(number, blocks)
+	local keep = {}
+	for _, entry in ipairs(blocks) do
+		if type(entry) == "table" and type(entry[1]) == "number" and type(entry[2]) == "number"
+			and type(entry[3]) == "number" then
+			local key = entry[1] .. "," .. entry[2] .. "," .. entry[3]
+			local by = shownBy[key]
+			if by and by > number then
+				continue -- (a later click showed something here: its answer says what Minecraft made of it)
+			end
+			if by then
+				shownBy[key] = nil
+			end
+			table.insert(keep, entry)
+		end
+	end
+	return keep
+end
+
+-- info = {face = "up" | ..., hit = Vector3 (studs), slot = 0..8, look = Vector3, ground = boolean, root = Vector3
+-- (where his client had him), id = number (the client's click: "answer" goes back to him when Minecraft answered)}
 local function onEdit(player, action, x, y, z, info)
 	if (action ~= "use" and action ~= "break") or not isWhole(x) or not isWhole(y) or not isWhole(z) then
 		return
@@ -1484,11 +1551,16 @@ local function onEdit(player, action, x, y, z, info)
 	if mode == "spectator" or (action == "break" and mode == "adventure") then
 		return
 	end
+	editCount += 1
+	local number = editCount
+	local clickId = if isWhole(info.id) then info.id else nil
+	local at = rootOf(player, info.root)
 	if action == "break" then
 		if AIR[baseName(blockAt(x, y, z))] then
 			return
 		end
 		applyBlocks({ { x, y, z, "minecraft:air" } }) -- shown at once; Minecraft confirms (or puts it back)
+		shownBy[x .. "," .. y .. "," .. z] = number
 	end
 	swingArm(player)
 	local hit = typeof(info.hit) == "Vector3" and info.hit or center
@@ -1496,7 +1568,11 @@ local function onEdit(player, action, x, y, z, info)
 	-- right click into the air (no block in reach): only the item is used - a bucket, a snowball (x, y, z = his eyes)
 	local air = action == "use" and info.air == true
 	if action == "use" and not air then
-		guessPlacement(player, x, y, z, info.face, slot, character ~= nil and character:GetAttribute("McSneak") == true)
+		local shown = guessPlacement(player, x, y, z, info.face, slot,
+			character ~= nil and character:GetAttribute("McSneak") == true, at)
+		if shown then
+			shownBy[shown] = number
+		end
 	end
 	task.spawn(function()
 		local ok, result = pcall(client.Call, client, EDIT, {
@@ -1509,7 +1585,7 @@ local function onEdit(player, action, x, y, z, info)
 			face = if FACE_NAMES[info.face] then info.face else "up",
 			hit = { hit.X / scale, hit.Y / scale + worldInfo.minY, hit.Z / scale },
 			look = vectorList(info.look),
-			feet = feetOf(player),
+			feet = feetOf(player, at),
 			slot = slot,
 			sneak = character ~= nil and character:GetAttribute("McSneak") == true,
 			ground = info.ground ~= false,
@@ -1517,7 +1593,7 @@ local function onEdit(player, action, x, y, z, info)
 		}, { Timeout = 10 })
 		if ok and type(result) == "table" then
 			if type(result.blocks) == "table" then
-				applyBlocks(result.blocks) -- what Minecraft made of it (also: not broken = back again)
+				applyBlocks(answerBlocks(number, result.blocks)) -- what Minecraft made of it (not broken = back again)
 			end
 			if result.state then
 				setState(player, result.state)
@@ -1527,7 +1603,15 @@ local function onEdit(player, action, x, y, z, info)
 			end
 		else
 			log(string.format("%s: %s at %d %d %d not possible (%s)", player.Name, action, x, y, z, tostring(result)))
+			for key, by in pairs(shownBy) do
+				if by == number then
+					shownBy[key] = nil
+				end
+			end
 			loadChunks({ { chunk.x, chunk.z } }, world.generation)
+		end
+		if clickId and player.Parent then
+			editRemote:FireClient(player, "answer", clickId) -- (his client's own block: Minecraft has spoken)
 		end
 	end)
 end

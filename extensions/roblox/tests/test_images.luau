@@ -94,5 +94,20 @@ check("model icon: a full box looks like the block icon (top bright, south side 
 check("model icon: a slab - nothing where a cube's top would be, its own top lower down", sa == 0 and sr == 200 and sg == 100,
 	sa .. "," .. sr)
 
+-- sun / moon (Minecraft adds them onto the sky): black -> see-through, dark -> faint, the colour kept
+local sky = { w = 3, h = 1, pixels = buffer.create(12) }
+for i, c in ipairs({ { 0, 0, 0, 255 }, { 255, 255, 128, 255 }, { 40, 20, 10, 255 } }) do
+	for k = 1, 4 do
+		buffer.writeu8(sky.pixels, (i - 1) * 4 + k - 1, c[k])
+	end
+end
+local glow = Images.additive(sky)
+local _, _, _, ba = pixel(glow, 0, 0)
+local yr, yg, yb, ya = pixel(glow, 1, 0)
+local dr, dg, db, da = pixel(glow, 2, 0)
+check("additive (sun, moon): black around them see-through (no box), bright opaque, dark faint in its own colour",
+	ba == 0 and yr == 255 and yg == 255 and yb == 128 and ya == 255 and da == 40 and dr == 255 and dg == 128 and db == 64,
+	string.format("%d | %d %d %d %d | %d %d %d %d", ba, yr, yg, yb, ya, dr, dg, db, da))
+
 print(string.format("\n%d ok, %d failed", results.ok, results.fail))
 process.exit(if results.fail > 0 then 1 else 0)

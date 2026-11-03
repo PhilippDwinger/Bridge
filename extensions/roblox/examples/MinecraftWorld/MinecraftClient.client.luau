@@ -227,6 +227,17 @@ local function guiPicture(key: string): Content?
 	end)
 end
 
+-- the sun and the moon: Minecraft adds them onto the sky (black = nothing) - see Images.additive
+local function glowPicture(key: string): Content?
+	local texture = assets and assets.textures and assets.textures[key]
+	if not texture then
+		return nil
+	end
+	return makeImage("glow:" .. key, buffer.tostring(texture.pixels), function()
+		return Images.additive(texture)
+	end)
+end
+
 -- An item's icon (like Minecraft's inventory): a flat picture (redstone, doors, tools) or its block / model in 3D
 local function iconContent(id: string?): Content?
 	local item = itemInfo(id)
@@ -1368,10 +1379,184 @@ local function onGround(): boolean
 	return player:GetAttribute("McGround") ~= false -- (MinecraftPlayer: the feet on a block)
 end
 
+local function myRoot(): Vector3?
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	return if root and root:IsA("BasePart") then root.Position else nil
+end
+
+-- every click has a number: the server says "answer" with it when Minecraft has answered (the block built here)
+local clickCount = 0
 local function editInfo(): { [string]: any }
 	local _, look = eyeAndLook()
-	return { face = target and target.face, hit = target and target.hit, slot = selected - 1, look = look, ground = onGround() }
+	clickCount = clickCount % 1000000 + 1
+	return { face = target and target.face, hit = target and target.hit, slot = selected - 1, look = look,
+		ground = onGround(), root = myRoot(), id = clickCount }
 end
+
+-- region building at once
+--[[
+	Like Minecraft's own client: a plain block (planks, stone, dirt) put on a plain block (one a click does nothing on:
+	not a crafting table, a door) is there at once - here, before the server and Minecraft have answered. Jumping up a
+	pillar you land on it (the server's copy of you is a moment behind; it came too late and pushed you off). Not
+	where somebody stands (Minecraft's hitbox; mine: where I am right now - the server gets the same position, so it
+	and Minecraft decide the same). The server's block takes its place; if Minecraft said no, it is gone again.
+]]
+local GHOST_AFTER_ANSWER = 0.5 -- s: Minecraft has answered, the server's block is still not there: it said no
+local GHOST_LONGEST = 3 -- s
+local TOUCH = 0.01 -- studs: standing on the block is not standing in it (Minecraft)
+local FACE_STEPS = { up = Vector3.new(0, 1, 0), down = Vector3.new(0, -1, 0), north = Vector3.new(0, 0, -1),
+	south = Vector3.new(0, 0, 1), east = Vector3.new(1, 0, 0), west = Vector3.new(-1, 0, 0) }
+local CUBE_FACES = { up = Enum.NormalId.Top, down = Enum.NormalId.Bottom, north = Enum.NormalId.Front,
+	south = Enum.NormalId.Back, east = Enum.NormalId.Right, west = Enum.NormalId.Left }
+local ghosts = {} -- "x,y,z" -> {part, id, center, madeAt, answeredAt}
+local overlapParams = OverlapParams.new()
+overlapParams.FilterType = Enum.RaycastFilterType.Include
+
+local function plainCube(look: any): boolean
+	return look ~= nil and look.cube == true and not look.single and not look.fluid and type(look.faces) == "table"
+end
+
+-- a click on this block builds (does nothing else): like the server's clickBuilds
+local function clickBuilds(name: string, look: any, sneaking: boolean): boolean
+	if not plainCube(look) then
+		return false
+	end
+	if look.use ~= nil then
+		return look.use ~= true or sneaking
+	end
+	return not string.find(name, "[", 1, true) and (sneaking or not string.find(name, "_table$"))
+		and name ~= "minecraft:jukebox"
+end
+
+local function bodyInBlock(center: Vector3, scale: number, mine: Vector3?): boolean
+	local Character = require(ReplicatedStorage:WaitForChild("MinecraftCharacter") :: any)
+	for _, other in ipairs(Players:GetPlayers()) do
+		local character = other.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root and root:IsA("BasePart") and character:GetAttribute("McGameMode") ~= "spectator" then
+			local p = if other == player and mine then mine else root.Position
+			local half = scale / 2
+			local feet = p.Y - Character.ROOT_HEIGHT
+			local width = Character.HITBOX.X / 2
+			if math.abs(p.X - center.X) < half + width - TOUCH and math.abs(p.Z - center.Z) < half + width - TOUCH
+				and feet < center.Y + half - TOUCH and feet + Character.HITBOX.Y > center.Y - half + TOUCH then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function cellTaken(worldFolder: Instance, center: Vector3, scale: number): boolean
+	overlapParams.FilterDescendantsInstances = { worldFolder }
+	return #workspace:GetPartBoundsInBox(CFrame.new(center), Vector3.one * (scale - 0.1), overlapParams) > 0
+end
+
+local function buildAtOnce(id: number)
+	local mode = gameMode()
+	local worldFolder = workspace:FindFirstChild("MinecraftWorld")
+	local character = player.Character
+	if not target or not assets or not worldFolder or (mode ~= "creative" and mode ~= "survival") then
+		return
+	end
+	local stack = hotbarStack(selected)
+	local item = stack and itemInfo(stack.id)
+	local block = item and item.block
+	if type(block) ~= "string" or string.find(block, "[", 1, true) then
+		return
+	end
+	local look = assets.blocks and assets.blocks[block]
+	local sneaking = character ~= nil and character:GetAttribute("McSneak") == true
+	if not plainCube(look) or not clickBuilds(target.name, assets.blocks[target.name], sneaking) or #target.parts > 0 then
+		return
+	end
+	local step = FACE_STEPS[target.face]
+	if not step then
+		return
+	end
+	local x, y, z = target.x + step.X, target.y + step.Y, target.z + step.Z
+	if y < assets.minY or y >= assets.maxY then
+		return
+	end
+	local scale = assets.scale
+	local center = blockCenter(x, y, z)
+	local key = x .. "," .. y .. "," .. z
+	if ghosts[key] or cellTaken(worldFolder, center, scale) or bodyInBlock(center, scale, myRoot()) then
+		return
+	end
+	local folder = worldFolder:FindFirstChild("McAtOnce")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "McAtOnce"
+		folder.Parent = worldFolder
+	end
+	local part = Instance.new("Part")
+	part.Name = block -- (aimed at like the server's blocks: the next one goes on top of it)
+	part.Anchored = true
+	part.CanCollide = true
+	part.Size = Vector3.one * scale
+	part.CFrame = CFrame.new(center)
+	part.Material = Enum.Material.SmoothPlastic
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.Color = if type(look.color) == "table" then Color3.fromRGB(look.color[1], look.color[2], look.color[3]) else part.Color
+	if look.transparent then
+		part.Transparency = 1
+		part.CastShadow = false
+	end
+	for faceName, normalId in pairs(CUBE_FACES) do
+		local picture = look.faces[faceName]
+		if picture then
+			local texture = Instance.new("Texture")
+			texture.Name = "McTexture"
+			texture.Face = normalId
+			texture.StudsPerTileU = scale
+			texture.StudsPerTileV = scale
+			texture:SetAttribute("McTexture", picture) -- (the picture: applyTexture, like the server's blocks)
+			texture.Parent = part
+		end
+	end
+	part.Parent = folder
+	ghosts[key] = { part = part, id = id, center = center, madeAt = os.clock(), answeredAt = nil }
+end
+
+editRemote.OnClientEvent:Connect(function(kind, id)
+	if kind == "answer" then
+		for _, ghost in pairs(ghosts) do
+			if ghost.id == id and not ghost.answeredAt then
+				ghost.answeredAt = os.clock()
+			end
+		end
+	end
+end)
+
+-- the server's block is there (it takes the place) - or Minecraft said no / nothing came: gone
+RunService.Heartbeat:Connect(function()
+	if next(ghosts) == nil then
+		return
+	end
+	local worldFolder = workspace:FindFirstChild("MinecraftWorld")
+	local now = os.clock()
+	for key, ghost in pairs(ghosts) do
+		local gone = not worldFolder or not ghost.part.Parent or now - ghost.madeAt > GHOST_LONGEST
+			or (ghost.answeredAt ~= nil and now - ghost.answeredAt > GHOST_AFTER_ANSWER)
+		if not gone and worldFolder then
+			overlapParams.FilterDescendantsInstances = { worldFolder }
+			for _, part in ipairs(workspace:GetPartBoundsInBox(CFrame.new(ghost.center), Vector3.one * 0.2, overlapParams)) do
+				if part ~= ghost.part and part.Parent and part.Parent.Name ~= "McAtOnce" then
+					gone = true -- (the server's block)
+					break
+				end
+			end
+		end
+		if gone then
+			ghosts[key] = nil
+			ghost.part:Destroy()
+		end
+	end
+end)
+-- endregion
 
 -- region breaking (survival: Minecraft's breaking time - the server asks Minecraft how fast for his item, this block)
 local mining = nil -- {x, y, z, name, progress, perTick, swungAt}
@@ -1461,13 +1646,16 @@ local function act(action: string, repeated: boolean?)
 		if hotbarStack(selected) and eye and look and assets then
 			swingArm()
 			local x, y, z = blockOf(eye)
-			editRemote:FireServer("use", x, y, z, { air = true, slot = selected - 1, look = look, ground = onGround() })
+			editRemote:FireServer("use", x, y, z, { air = true, slot = selected - 1, look = look, ground = onGround(),
+				root = myRoot() })
 		end
 		return
 	end
 	-- right click: Minecraft decides (open / press / pull - or place the item in the hand on that face)
 	swingArm()
-	editRemote:FireServer("use", target.x, target.y, target.z, editInfo())
+	local info = editInfo()
+	buildAtOnce(info.id)
+	editRemote:FireServer("use", target.x, target.y, target.z, info)
 end
 
 local held = {} -- "break" / "use" -> time of the last action while the button is held
@@ -2303,6 +2491,7 @@ local function useAssets(newAssets)
 		local ok, problem = pcall(function()
 			require(ReplicatedStorage:WaitForChild("MinecraftSky") :: any).start({
 				picture = guiPicture,
+				glow = glowPicture,
 				assets = function()
 					return assets
 				end,

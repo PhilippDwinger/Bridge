@@ -188,6 +188,7 @@ end
 
 -- one Roblox player already in the game when the server starts
 local paddy = newPlayer(4242, "RobloxPaddy")
+local originalRoot = nil -- where his character stood before an edit moved the server's copy (serverRoot)
 table.insert(testPlayers, paddy)
 startScript("../examples/MinecraftWorld/MinecraftWorld.server.luau", "MinecraftWorld")
 startScript("../examples/PlayerSync/PlayerSync.server.luau", "PlayerSync")
@@ -390,6 +391,10 @@ while os.clock() - started < scenario.seconds do
 			handlers.Inventory(paddy, event.op, event.a, event.b, event.c)
 		elseif event.action == "sneak" then
 			paddy.Character:SetAttribute("McSneak", event.value == true)
+		elseif event.action == "root" and originalRoot then
+			-- back where he stood (edit with serverRoot moved him)
+			paddy.rootPart.Position = originalRoot
+			paddy.rootPart.CFrame = CFrame.new(originalRoot)
 		elseif event.action == "chat" then
 			-- what the client sends when our player writes in the chat ("/..." = a Minecraft command)
 			handlers.Chat(paddy, event.text)
@@ -415,8 +420,16 @@ while os.clock() - started < scenario.seconds do
 				south = Vector3.new(0, 0, 1), east = Vector3.new(1, 0, 0), west = Vector3.new(-1, 0, 0) }
 			local center = Vector3.new((event.x + 0.5) * scale, (event.y + 64 + 0.5) * scale, (event.z + 0.5) * scale)
 			local look = if event.look then Vector3.new(event.look[1], event.look[2], event.look[3]) else Vector3.new(0, -1, 0)
+			if event.serverRoot then
+				-- the server's copy of his character (a moment behind the client: still where he jumped off)
+				originalRoot = originalRoot or paddy.rootPart.Position
+				local at = Vector3.new(event.serverRoot[1], event.serverRoot[2], event.serverRoot[3])
+				paddy.rootPart.Position = at
+				paddy.rootPart.CFrame = CFrame.new(at)
+			end
 			editHandler(paddy, event.what, event.x, event.y, event.z, { face = face, hit = center + normals[face] * scale / 2,
-				slot = event.slot or 0, look = look, ground = true })
+				slot = event.slot or 0, look = look, ground = true,
+				root = if event.root then Vector3.new(event.root[1], event.root[2], event.root[3]) else nil })
 			if event.wait then
 				task.wait(event.wait) -- (Minecraft's answer comes back first: a right click is not guessed in advance)
 			end

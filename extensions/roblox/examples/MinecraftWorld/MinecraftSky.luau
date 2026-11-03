@@ -12,12 +12,14 @@
 	- Atmosphere: the horizon in Minecraft's fog colour, the sky above in its sky colour; under water / in lava
 	  Minecraft's water / lava fog
 	- Minecraft's square sun and its moon (in the right phase) - BillboardGuis far away where Roblox' sun / moon are
+	  (their black made see-through: Minecraft adds them onto the sky, so no box around them)
 	- Minecraft's clouds: its cloud picture at cloud height, drifting east (0.6 blocks/s), in the cloud colour
 	- rain / snow like Minecraft's weather renderer: around the camera one falling picture per block column (radius 5),
 	  from the ground up, seen from every side, fading towards the edge
 	- stars at night (Roblox' stars, as many as Minecraft's star brightness)
 
-	    Sky.start({ picture = function(key) -> Content?, assets = function() -> assets?, shaderActive = function() -> bool })
+	    Sky.start({ picture = function(key) -> Content?, glow = function(key) -> Content?, assets = function() -> assets?,
+	        shaderActive = function() -> bool })
 
 	The pure helpers (tests): Sky.clockTime(sunAngle), Sky.brightness(skyLight).
 ]]
@@ -89,6 +91,7 @@ end
 
 type Options = {
 	picture: (key: string) -> Content?,
+	glow: ((key: string) -> Content?)?, -- sun / moon: their black made see-through (Minecraft adds them onto the sky)
 	assets: () -> any,
 	shaderActive: () -> boolean,
 }
@@ -304,7 +307,8 @@ function Sky.start(options: Options)
 			anchor.CFrame = CFrame.new(eye + direction * CELESTIAL_DISTANCE)
 			local studs = size * CELESTIAL_DISTANCE * 2
 			gui.Size = UDim2.fromScale(studs, studs)
-			local content = if key then options.picture(key) else nil
+			local glow: (string) -> Content? = options.glow or options.picture
+			local content = if key then glow(key) else nil
 			if content and image.ImageContent ~= content then
 				image.ImageContent = content
 			end

@@ -255,7 +255,8 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Regen/Gewitter, Regen oder Schnee hier) → Attribute `Mc…` an `Lighting`. Daraus: die Uhr (`/time set` in Minecraft
   stellt sie sofort), Helligkeit wie Minecrafts Lightmap (Tag hell, Nacht dunkelblau, Höhlen dunkel), keine
   Spiegelungen, der Horizont im Nebel- und der Himmel im Himmelsfarbton, Sonnenaufgang glüht, Minecrafts **eckige
-  Sonne** und sein **Mond in der richtigen Phase**, **Wolken** aus Minecrafts Wolkenbild auf Wolkenhöhe (ziehen nach
+  Sonne** und sein **Mond in der richtigen Phase** (ohne Kasten: Minecraft addiert sie auf den Himmel, ihr Schwarz
+  wird durchsichtig), **Wolken** aus Minecrafts Wolkenbild auf Wolkenhöhe (ziehen nach
   Osten), Sterne nachts, **Regen und Schnee** wie Minecrafts Wetter (pro Blocksäule um die Kamera ein fallendes Bild,
   am Boden endend). Unter Wasser Minecrafts Wassernebel, in Lava sein Lavanebel. **Licht:** Fackeln, Laternen,
   Glowstone, Lava … leuchten wie Minecrafts Blocklicht (PointLight, Reichweite = Lichtstufe in Blöcken, warmes
@@ -275,9 +276,15 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   seinem eigenen Code – Tür/Falltür/Zauntor auf und zu, Hebel umlegen, Knopf drücken (Holz 1,5 s, Stein 1 s an),
   sonst setzt es das Item in der Hand: der Stamm liegt wie geklickt, Treppen/Kolben schauen wie in Minecraft, Knöpfe
   hängen an der geklickten Seite, Redstone verbindet sich; mit Shift wird immer gesetzt. **Linksklick** = abbauen
-  (Kreativ sofort, halten = alle 5 Ticks; Überleben mit Abbauzeit). Einfache Blöcke (Bretter, Stein …) zeigt der
-  Server sofort, alles andere sobald Minecraft geantwortet hat (dann aber gleich richtig gedreht). Alles, was in
-  Minecraft passiert (Kolben schieben, Redstone an/aus, Knopf geht aus), kommt sofort nach Roblox.
+  (Kreativ sofort, halten = alle 5 Ticks; Überleben mit Abbauzeit). Einfache Blöcke (Bretter, Stein, Erde …) auf
+  einfache Blöcke (Gras, Stamm, Stein – nicht Werkbank, Tür, Kürbis: Minecrafts `use` im Look) stehen wie in
+  Minecrafts eigenem Client **sofort** da – erst bei dir (ein Teil in `MinecraftWorld/McAtOnce`, bis der Block des
+  Servers kommt; sagt Minecraft nein, ist er wieder weg), gleich danach beim Server für alle. **Hochbauen (springen +
+  Rechtsklick)** geht deshalb wie in Minecraft: entschieden wird mit der Position, die dein Client beim Klick hatte
+  (die Kopie des Servers hängt einen Moment hinterher – sie stand noch im Block), und die Antwort eines älteren
+  Klicks macht einen neueren Block nicht mehr kaputt. Alles andere kommt, sobald Minecraft geantwortet hat (dann
+  aber gleich richtig gedreht). Alles, was in Minecraft passiert (Kolben schieben, Redstone an/aus, Knopf geht
+  aus), kommt sofort nach Roblox.
 
 So startest du es:
 

@@ -66,6 +66,32 @@ function Images.solid(w: number, h: number, r: number, g: number, b: number, a: 
 	return { w = w, h = h, pixels = out }
 end
 
+--[[
+	Minecraft draws the sun and the moon added onto the sky: their pictures are opaque, black around them (black adds
+	nothing). Roblox lays pictures over the sky instead - the black became a box. Here black becomes see-through and the
+	brightest channel the opacity (the colour as bright as it can be at that opacity): over the sky it looks like
+	Minecraft's - bright where the picture is bright, the sky through the dark parts.
+]]
+function Images.additive(picture: Picture): Picture
+	local count = picture.w * picture.h
+	local source = picture.pixels
+	local out = buffer.create(count * 4)
+	for i = 0, count - 1 do
+		local offset = i * 4
+		local r, g, b = buffer.readu8(source, offset), buffer.readu8(source, offset + 1), buffer.readu8(source, offset + 2)
+		local alpha = buffer.readu8(source, offset + 3)
+		local brightest = math.max(r, g, b)
+		local opacity = math.floor(brightest * alpha / 255 + 0.5)
+		if opacity > 0 then
+			buffer.writeu8(out, offset, math.min(255, math.floor(r * 255 / brightest + 0.5)))
+			buffer.writeu8(out, offset + 1, math.min(255, math.floor(g * 255 / brightest + 0.5)))
+			buffer.writeu8(out, offset + 2, math.min(255, math.floor(b * 255 / brightest + 0.5)))
+			buffer.writeu8(out, offset + 3, opacity)
+		end -- (else all 0: see-through)
+	end
+	return { w = picture.w, h = picture.h, pixels = out }
+end
+
 --- A part of a picture (x, y, w, h in pixels; outside the picture = transparent) - e.g. one face out of a skin.
 function Images.crop(picture: Picture, x: number, y: number, w: number, h: number): Picture
 	local out = buffer.create(w * h * 4)
