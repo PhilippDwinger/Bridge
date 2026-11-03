@@ -5,7 +5,9 @@
 	  third person from behind -> from the front (4 blocks away, pulled closer by walls). Crosshair in first person.
 	- Walking like Minecraft (Roblox's own controls are off): W A S D relative to where you look - also in the front
 	  view -, Space (hold = jump again), Shift = sneak (slower, eyes lower, you do not fall off edges), Ctrl = sprint
-	  only while it is held and you walk forward (jumping while sprinting pushes forward). Minecraft's own movement:
+	  only while it is held and you walk forward, or W twice quickly (like Minecraft: sprinting until you let go of W
+	  - in Studio this is the way: Studio takes Ctrl + W for itself when Ctrl is pressed first; jumping while
+	  sprinting pushes forward). Minecraft's own movement:
 	  the speed is set every frame with Minecraft's friction (ground: quick, air: momentum), steps up to 0.6 blocks
 	  are walked up. Speeds, jump height, gravity: MinecraftCharacter.
 	- Game modes (player attribute McGameMode from the server): creative = Space twice to fly (Space up, Shift down,
@@ -284,6 +286,22 @@ local function stepUp(root: BasePart, horizontal: Vector3, dt: number)
 	end
 end
 
+-- W twice quickly: sprinting until W is let go (Minecraft: twice within 7 ticks)
+local lastForwardTap = -math.huge
+local tapSprint = false
+UserInputService.InputBegan:Connect(function(input, processed)
+	if input.KeyCode ~= Enum.KeyCode.W or processed or chatFocused() then
+		return
+	end
+	local now = os.clock()
+	if now - lastForwardTap < DOUBLE_TAP then
+		tapSprint = true
+		lastForwardTap = -math.huge
+	else
+		lastForwardTap = now
+	end
+end)
+
 -- Space twice quickly: fly (creative) - like Minecraft
 UserInputService.InputBegan:Connect(function(input, processed)
 	if input.KeyCode ~= Enum.KeyCode.Space or processed or chatFocused() then
@@ -338,8 +356,12 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 		flying = false -- landed: Minecraft stops flying
 	end
 	sneaking = shift and not flying
-	-- sprinting: only while Ctrl is held and you walk forward (and not while sneaking)
-	sprinting = not free and keyDown(Enum.KeyCode.LeftControl) and ahead > 0 and not sneaking
+	-- sprinting: while Ctrl is held or after W twice, only walking forward (and not while sneaking)
+	if ahead <= 0 or sneaking or free then
+		tapSprint = false
+	end
+	sprinting = not free and (keyDown(Enum.KeyCode.LeftControl, Enum.KeyCode.RightControl) or tapSprint) and ahead > 0
+		and not sneaking
 	humanoid.AutoRotate = false
 	pcall(function()
 		humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false) -- Minecraft climbs only ladders

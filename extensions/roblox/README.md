@@ -225,7 +225,9 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   hängen und rutscht nicht weiter. Stufen bis 0,6 Blöcke (Stufen, Falltüren) läuft man hoch. Der Körper dreht sich mit
   einem AlignOrientation statt per CFrame. W A S D relativ zur Blickrichtung, **Leertaste** halten = immer wieder
   springen (nur mit den Füßen auf einem Block), Sprinten + Springen schiebt nach vorn, **Shift** halten = schleichen
-  (Augen tiefer, man fällt nicht von Kanten), **Strg** = sprinten nur solange gehalten und vorwärts.
+  (Augen tiefer, man fällt nicht von Kanten), **Strg** = sprinten nur solange gehalten und vorwärts, oder **2× W**
+  schnell = sprinten bis W losgelassen wird (wie Minecraft). In Studio Strg erst *nach* W drücken oder 2× W nehmen:
+  Studio schnappt sich Strg + W, wenn Strg zuerst gedrückt ist (im echten Roblox-Spiel geht beides).
 - **Kamera wie Minecraft:** Maus gefangen, kein Cursor, **F5** (oder **V**) wechselt Ego-Sicht → von hinten →
   von vorne. In Studio gehört F5 dem Studio („Play“) – dort ggf. File → Advanced → Customize Shortcuts den
   F5-Eintrag entfernen; im echten Spiel geht F5 so
