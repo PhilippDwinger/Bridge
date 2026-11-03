@@ -387,7 +387,11 @@ end
 function Animation:swing()
 	local track = self.tracks[if self.sneaking then "sneak_swing" else "swing"]
 	if track and not self.dead then
-		track:Play(0.02)
+		if track.IsPlaying then
+			track.TimePosition = 0 -- swinging again (breaking a block: Minecraft starts the swing anew every 3 ticks)
+		else
+			track:Play(0.02)
+		end
 	end
 end
 

@@ -15,7 +15,7 @@
 	  5. every Roblox player is a Minecraft player there (game mode + inventory in Minecraft, command mcworld.player):
 	     building (RemoteEvent Edit -> command mcworld.edit) goes through Minecraft's own code - right click "use"
 	     (doors, levers, buttons, or placing: logs lie the way you click, pistons face you), left click "break"
-	     (survival: after the breaking time, drops into the inventory); the inventory (RemoteEvent Inventory: clicks,
+	     (survival: after the breaking time, the drops lie there for whoever is first); the inventory (Inventory: clicks,
 	     crafting, creative items); block looks for every state ("minecraft:oak_log[axis=x]": cubes and models)
 	  6. health like Minecraft (20 = 10 hearts, not in creative / spectator): fall damage (Fall), hitting a Minecraft
 	     player's NPC (Attack -> command mcworld.hurt), Minecraft players hitting our mannequins (direct message
@@ -27,6 +27,8 @@
 	  8. chat both ways (RemoteEvent Chat): Roblox messages -> command mcworld.chat, "/..." -> command mcworld.command
 	     (the Minecraft command runs as the player's mannequin, the answer comes back into his chat), Minecraft's chat
 	     (topic mcworld.chat) -> everybody's chat
+	  9. items lying around (topic mcworld.items): an invisible part per item in workspace.MinecraftItems (attributes
+	     McItem, McCount), the clients draw it like Minecraft; picked up in Minecraft by whoever is first
 
 	Needs in ServerStorage: Bridge, MinecraftWorldConfig, MinecraftWorldClient (shared Bridge client), PlayerSyncConfig.
 ]]
@@ -56,6 +58,7 @@ local SKIN = Config.WorldPrefix .. ".skin"
 local CHAT = Config.WorldPrefix .. ".chat"
 local COMMAND = Config.WorldPrefix .. ".command"
 local PLAYER = Config.WorldPrefix .. ".player"
+local ITEMS = Config.WorldPrefix .. ".items"
 local CHAT_PER_5S = 6 -- messages / commands per player in 5 seconds
 local MAX_CHAT = 256 -- characters, like Minecraft
 local MAX_HEALTH = 20 -- Minecraft: 10 hearts
@@ -486,6 +489,7 @@ local askQueue = { blocks = {}, items = {} }
 local askScheduled = false
 local mergeBlocks -- below (adds an assets answer)
 local afterNewPictures -- below (re-render + tell the clients)
+local loadItemIcons -- below
 local noticeItems -- below
 
 local function askLater()
@@ -801,6 +805,40 @@ local function loadAssets(generation)
 	assetsChanged:FireAllClients(clientAssets())
 end
 
+-- The icons + looks of all items of the creative inventory, in a few calls; the clients get them all together
+function loadItemIcons(generation)
+	local assets = world.assets
+	if not assets or not assets.available then
+		return
+	end
+	local ids = {}
+	for _, item in ipairs(assets.items) do
+		if not assets.itemsById[item.id] then
+			assets.asked["item " .. item.id] = true
+			table.insert(ids, item.id)
+		end
+	end
+	for first = 1, #ids, MAX_ASK do
+		local batch = {}
+		for index = first, math.min(first + MAX_ASK - 1, #ids) do
+			table.insert(batch, ids[index])
+		end
+		local ok, result = pcall(client.Call, client, ASSETS, { items = batch }, { Timeout = 30 })
+		if generation ~= world.generation or world.assets ~= assets then
+			return
+		end
+		if ok and type(result) == "table" then
+			mergeBlocks(assets, result)
+		else
+			for _, id in ipairs(batch) do
+				assets.asked["item " .. id] = nil -- (asked again when it shows up in an inventory)
+			end
+		end
+	end
+	log(string.format("item icons from Minecraft: %d", count(assets.itemsById)))
+	afterNewPictures()
+end
+
 function afterNewPictures()
 	renderAll(false) -- only blocks that were grey so far change
 	assetsChanged:FireAllClients(clientAssets())
@@ -960,6 +998,7 @@ local function loadWorld()
 	local list = areaChunks(info)
 	-- The pictures first (small): the chunks are then built with textures right away
 	loadAssets(generation)
+	task.spawn(loadItemIcons, generation) -- all item icons at the same time as the world (the clients get them at once)
 	if generation ~= world.generation then
 		return
 	end
@@ -971,12 +1010,6 @@ local function loadWorld()
 		end
 		log(string.format("Minecraft world loaded: %d chunks, %d parts, %.1f s", #list, parts, os.clock() - started))
 		onWorldReady()
-		-- now the icons of the creative inventory (in the background, a few calls)
-		local ids = {}
-		for _, item in ipairs(world.assets and world.assets.items or {}) do
-			table.insert(ids, item.id)
-		end
-		noticeItems(ids)
 	else
 		task.delay(3, function()
 			if generation == world.generation then
@@ -1684,6 +1717,54 @@ task.spawn(function()
 	channels.ChildAdded:Connect(guard)
 end)
 -- endregion
+-- endregion
+
+-- region items lying in the world (Minecraft's item entities: everybody sees them, whoever touches one first gets it -
+-- a Minecraft player or a Roblox player, decided in Minecraft: there is only one of each)
+local itemFolder = workspace:FindFirstChild("MinecraftItems") or Instance.new("Folder")
+itemFolder.Name = "MinecraftItems"
+itemFolder.Parent = workspace
+local itemAnchors = {} -- entity id (text) -> invisible Part where it lies; the clients draw the item there
+
+client:Subscribe(nil, ITEMS, function(data)
+	local info = world.info
+	if type(data) ~= "table" or type(data.items) ~= "table" or not info then
+		return
+	end
+	local scale, minY = info.studsPerBlock, info.minY
+	local seen, newIds = {}, {}
+	for _, entry in ipairs(data.items) do
+		if type(entry) == "table" and type(entry[1]) == "number" and type(entry[2]) == "string" then
+			local key = tostring(entry[1])
+			seen[key] = true
+			local anchor = itemAnchors[key]
+			if not anchor then
+				anchor = Instance.new("Part")
+				anchor.Name = key
+				anchor.Anchored = true
+				anchor.CanCollide = false
+				anchor.CanQuery = false
+				anchor.CanTouch = false
+				anchor.Transparency = 1
+				anchor.Size = Vector3.one * 0.2
+				itemAnchors[key] = anchor
+				table.insert(newIds, entry[2])
+			end
+			anchor:SetAttribute("McItem", entry[2])
+			anchor:SetAttribute("McCount", math.max(1, math.floor(tonumber(entry[3]) or 1)))
+			anchor.CFrame = CFrame.new((tonumber(entry[4]) or 0) * scale, ((tonumber(entry[5]) or 0) - minY) * scale,
+				(tonumber(entry[6]) or 0) * scale)
+			anchor.Parent = itemFolder
+		end
+	end
+	for key, anchor in pairs(itemAnchors) do
+		if not seen[key] then
+			anchor:Destroy() -- picked up (by anybody), merged or gone
+			itemAnchors[key] = nil
+		end
+	end
+	noticeItems(newIds)
+end, { Latest = true })
 -- endregion
 
 client:Subscribe(nil, CHANGES, function(data)

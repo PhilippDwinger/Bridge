@@ -177,13 +177,21 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   auf dem Client).
 - **Spielmodi wie Minecraft** (Spielmodus + Inventar leben in Minecraft, `/gamemode` im Chat ändert ihn, neue Spieler
   bekommen den Standard der Welt): **Überleben** – Items werden verbraucht, Abbauen dauert Minecrafts Abbauzeit (mit
-  Rissen; Minecraft sagt, wie schnell – Hand, Werkzeug, in der Luft 5× langsamer), die Drops landen im Inventar,
-  Items am Boden werden aufgehoben, Fallschaden, beim Tod fällt das Inventar raus (Todesnachricht in Minecraft).
+  Rissen; Minecraft sagt, wie schnell – Hand, Werkzeug, in der Luft 5× langsamer), Fallschaden, beim Tod fällt das
+  Inventar raus (Todesnachricht in Minecraft).
   **Kreativ** – Items gehen nie aus, Abbauen sofort, **2× Leertaste = fliegen** (Leertaste hoch, Shift runter, Strg
   doppelt so schnell, Landen beendet es), kein Schaden, keine Herzen. **Abenteuer** – nichts abbauen/setzen, aber
   Türen, Hebel, Knöpfe benutzen. **Zuschauer** – immer fliegen, durch Blöcke, unsichtbar für alle außer anderen
   Zuschauern (die sehen einen durchsichtigen Kopf), kein Inventar, keine Hotbar, nichts anklicken; in Minecraft kein
   Mannequin. Minecraft-Spieler im Zuschauermodus sehen auch nur Zuschauer.
+- **Items am Boden – ganz synchron:** Was abgebaut, mit Q weggeworfen oder beim Tod verloren wird, liegt als Item in
+  der Welt, genau wie in Minecraft (es gibt jedes nur einmal: das Item-Entity in Minecraft). Topic `mcworld.items` →
+  pro Item ein unsichtbarer Part in `workspace.MinecraftItems` (Attribute `McItem`, `McCount`), jeder Client zeichnet
+  es wie Minecraft: Blöcke als kleiner Würfel bzw. Modell (¼ Block), flache Items als Bild (½ Block), dreht sich,
+  wippt, mehr Kopien bei größeren Stapeln. Wer zuerst nah genug ist, bekommt es – ein Minecraft-Spieler oder ein
+  Roblox-Spieler, **das entscheidet Minecraft, also immer nur einer**; das Item fliegt dann zu ihm und ist weg.
+- **Alle Icons sofort:** Nach dem Laden der Welt holt der Server die Icons aller Items im Hintergrund, der Client
+  macht daraus gleich alle Bilder (ein paar pro Frame) – Hotbar und Kreativ-Inventar sind von Anfang an voll.
 - **Hotbar + Inventar** mit Minecrafts eigener GUI-Grafik: Hotbar unten (Tasten **1–9**, Mausrad) mit Anzahl und
   Haltbarkeit, **E** = Inventar: Überleben/Abenteuer Minecrafts Inventar mit Minecrafts eigenen Klicks (links =
   aufnehmen/ablegen/tauschen, rechts = Hälfte/einzeln, Shift = verschieben, **2×2-Werkbank**, Klick daneben = wegwerfen),

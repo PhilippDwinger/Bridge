@@ -357,6 +357,7 @@ local function onSnapshot(data, event)
 			-- the player swings his arm (hits / builds): once per swing
 			local swing = player.sw == true
 			if swing and not npc.swung then
+				npc.swungAt = os.clock()
 				if npc.controller then
 					npc.controller:swing()
 				elseif npc.tracks.slash then
@@ -407,6 +408,11 @@ end
 local function animate(npc, dt)
 	if npc.controller then
 		npc.controller:update(dt, { speed = npc.speed, sneak = npc.crouch })
+		-- still swinging (a Minecraft player keeps breaking a block): again every 6 ticks, like Minecraft shows it
+		if npc.swung and os.clock() - (npc.swungAt or 0) >= 0.3 then
+			npc.swungAt = os.clock()
+			npc.controller:swing()
+		end
 		return
 	end
 	local want = if npc.air then "fall"

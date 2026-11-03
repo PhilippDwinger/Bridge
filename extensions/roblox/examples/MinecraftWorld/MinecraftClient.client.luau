@@ -45,7 +45,7 @@ local player = Players.LocalPlayer
 local REPEAT_BREAK = 0.25 -- creative: 5 ticks between two blocks while the button is held (also after a block broke)
 local REPEAT_USE = 0.2 -- 4 ticks between two right clicks while the button is held
 local TEXTURE_SCALE = 8 -- world textures: every Minecraft pixel becomes 8x8 (sharp also where Roblox smooths)
-local ICON_SIZE = 128
+local ICON_SIZE = 64 -- (a slot is 16 Minecraft pixels, 48 screen pixels at the biggest GUI scale)
 local HOTBAR_KEYS = {
 	[Enum.KeyCode.One] = 1, [Enum.KeyCode.Two] = 2, [Enum.KeyCode.Three] = 3, [Enum.KeyCode.Four] = 4,
 	[Enum.KeyCode.Five] = 5, [Enum.KeyCode.Six] = 6, [Enum.KeyCode.Seven] = 7, [Enum.KeyCode.Eight] = 8,
@@ -1109,7 +1109,9 @@ local function selectionBox(index: number): SelectionBox
 	return box
 end
 
--- the cracks while breaking (survival): a box around the block with Minecraft's destroy_stage pictures
+-- the cracks while breaking (survival): a box around the block with Minecraft's destroy_stage pictures. It stays in
+-- the world for good (hidden = see-through): a part that leaves the world and comes back loses its pictures in Roblox
+-- (the cracks showed only on the first block), and every new stage binds its picture anew.
 local crackPart = Instance.new("Part")
 crackPart.Name = "Cracks"
 crackPart.Anchored = true
@@ -1118,39 +1120,52 @@ crackPart.CanQuery = false
 crackPart.CanTouch = false
 crackPart.Transparency = 1
 crackPart.CastShadow = false
+crackPart.Size = Vector3.one
+crackPart.CFrame = CFrame.new(0, -1000, 0)
 local crackTextures = {}
 for _, normal in ipairs(Enum.NormalId:GetEnumItems()) do
 	local texture = Instance.new("Texture")
 	texture.Face = normal
+	texture.Transparency = 1
 	texture.Parent = crackPart
 	crackTextures[normal] = texture
 end
+crackPart.Parent = workspace.CurrentCamera or workspace -- (only on this client)
 local shownStage = -1
 
 local function showCracks(target, stage: number)
 	if stage < 0 or not target then
-		crackPart.Parent = nil
-		shownStage = -1
+		if shownStage ~= -1 then
+			shownStage = -1
+			for _, texture in pairs(crackTextures) do
+				texture.Transparency = 1
+			end
+			crackPart.CFrame = CFrame.new(0, -1000, 0)
+		end
 		return
 	end
-	local key = assets and assets.gui and assets.gui["destroy_" .. stage]
-	local content = if key then worldContent(key) else nil
+	if crackPart.Parent == nil then
+		crackPart.Parent = workspace.CurrentCamera or workspace
+	end
 	local box = target.box
 	crackPart.Size = box.Size + Vector3.one * 0.04
 	crackPart.CFrame = box.CFrame
 	if stage ~= shownStage then
 		shownStage = stage
+		local key = assets and assets.gui and assets.gui["destroy_" .. stage]
+		local content = if key then worldContent(key) else nil
 		local scale = assets.scale
 		for _, texture in pairs(crackTextures) do
 			texture.StudsPerTileU = scale
 			texture.StudsPerTileV = scale
+			texture.TextureContent = Content.none -- (the same picture again would not be drawn anew)
 			texture.TextureContent = content or Content.none
+			texture.Transparency = 0
 			pcall(function()
 				texture.ResampleMode = Enum.ResamplerMode.Pixelated
 			end)
 		end
 	end
-	crackPart.Parent = workspace
 end
 
 local rayParams = RaycastParams.new()
@@ -1343,7 +1358,7 @@ local function startMining()
 	end
 	local stack = hotbarStack(selected)
 	local key = target.name .. "|" .. (if stack then stack.id else "") .. "|" .. tostring(onGround())
-	mining = { x = target.x, y = target.y, z = target.z, name = target.name, progress = 0,
+	mining = { x = target.x, y = target.y, z = target.z, name = target.name, progress = 0, toldAt = -math.huge,
 		perTick = speeds[key] or guessSpeed(target.name), swungAt = -math.huge }
 	if speeds[key] == nil then
 		local wanted = mining
@@ -1495,9 +1510,14 @@ RunService.RenderStepped:Connect(function(dt)
 			end
 			if mining then
 				mining.progress += mining.perTick * 20 * dt
-				if now - mining.swungAt > 0.25 then
+				if now - mining.swungAt >= 0.15 then
+					-- Minecraft swings anew every 3 ticks while breaking; the mannequin in Minecraft swings along
 					mining.swungAt = now
 					swingArm()
+					if now - (mining.toldAt or -math.huge) >= 0.25 then
+						mining.toldAt = now
+						swingRemote:FireServer()
+					end
 				end
 				if mining.progress >= 1 then
 					editRemote:FireServer("break", mining.x, mining.y, mining.z, editInfo())
@@ -1538,6 +1558,257 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 -- endregion
 
+
+-- region items lying in the world (Minecraft's item entities - the server puts an invisible part where each lies)
+--[[
+	Drawn like Minecraft: blocks as small cubes / models (a quarter of a block), flat items (redstone, sticks, tools)
+	as a picture half a block big; turning slowly (1 radian per second), bobbing (0.1 blocks), more copies for bigger
+	stacks (2-16: 2, up to 32: 3, up to 48: 4, more: 5). Picked up (by anybody - Minecraft decides who, once): the
+	item flies to whoever is closest and is gone.
+]]
+local FACE_NORMALS = { up = Enum.NormalId.Top, down = Enum.NormalId.Bottom, north = Enum.NormalId.Front,
+	south = Enum.NormalId.Back, east = Enum.NormalId.Right, west = Enum.NormalId.Left }
+local COPY_OFFSETS = { Vector3.new(0, 0, 0), Vector3.new(0.09, 0.05, -0.07), Vector3.new(-0.08, 0.1, 0.06),
+	Vector3.new(0.06, 0.15, 0.09), Vector3.new(-0.07, 0.2, -0.08) } -- (blocks)
+
+local itemVisuals = {} -- anchor part -> visual
+local visualHolder = Instance.new("Folder")
+visualHolder.Name = "MinecraftItemVisuals"
+visualHolder.Parent = workspace.CurrentCamera or workspace -- only on this client; the pictures come like the world's
+
+local function pieceFaceSize(size: Vector3, normal: Enum.NormalId): (number, number)
+	if normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom then
+		return size.X, size.Z
+	elseif normal == Enum.NormalId.Left or normal == Enum.NormalId.Right then
+		return size.Z, size.Y
+	end
+	return size.X, size.Y
+end
+
+local function itemPiece(parent: Instance, size: Vector3, cframe: CFrame, faces: { [string]: string })
+	local part = Instance.new("Part")
+	part.Name = "ItemPiece"
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Transparency = 1
+	part.Size = Vector3.new(math.max(size.X, 0.02), math.max(size.Y, 0.02), math.max(size.Z, 0.02))
+	part.CFrame = cframe
+	for direction, key in pairs(faces) do
+		local normal = FACE_NORMALS[direction]
+		if normal then
+			local texture = Instance.new("Texture")
+			texture.Face = normal
+			local u, v = pieceFaceSize(part.Size, normal)
+			texture.StudsPerTileU = u
+			texture.StudsPerTileV = v
+			texture:SetAttribute("McTexture", key) -- (the picture comes like the world's: applyTexture)
+			texture.Parent = part
+		end
+	end
+	part.Parent = parent
+end
+
+-- one copy of the item around the origin; returns whether it is flat
+local function buildItemShape(parent: Instance, id: string, offset: Vector3): boolean
+	local scale = assets and assets.scale or 3
+	local item = itemInfo(id)
+	local look = item and assets and assets.blocks and (assets.blocks[item.look or ""] or assets.blocks[item.block or ""])
+	if look and look.cube and type(look.faces) == "table" then
+		itemPiece(parent, Vector3.one * scale * 0.25, CFrame.new(offset * scale), look.faces)
+		return false
+	elseif look and look.model and type(look.parts) == "table" then
+		local unit = scale / 16 * 0.25
+		for _, piece in ipairs(look.parts) do
+			if type(piece.b) == "table" then
+				local b = piece.b
+				local center = Vector3.new((b[1] + b[4]) / 2 - 8, (b[2] + b[5]) / 2 - 8, (b[3] + b[6]) / 2 - 8) * unit
+				itemPiece(parent, Vector3.new(b[4] - b[1], b[5] - b[2], b[6] - b[3]) * unit,
+					CFrame.new(center + offset * scale), piece.f or {})
+			elseif type(piece.c) == "table" and type(piece.s) == "table" and type(piece.r) == "table" then
+				local c, size, r = piece.c, piece.s, piece.r
+				itemPiece(parent, Vector3.new(size[1], size[2], size[3]) * unit,
+					CFrame.new(Vector3.new(c[1] - 8, c[2] - 8, c[3] - 8) * unit + offset * scale)
+						* CFrame.new(0, 0, 0, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]), piece.f or {})
+			end
+		end
+		return false
+	elseif item and type(item.icon) == "string" then
+		itemPiece(parent, Vector3.new(scale * 0.5, scale * 0.5, 0.02), CFrame.new(Vector3.new(0, 0, offset.Z) * scale),
+			{ north = item.icon, south = item.icon })
+		return true
+	end
+	-- not known yet (its picture is on the way): a small grey cube
+	local part = Instance.new("Part")
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Size = Vector3.one * scale * 0.25
+	part.Color = Color3.fromRGB(150, 150, 150)
+	part.CFrame = CFrame.new(offset * scale)
+	part.Parent = parent
+	return false
+end
+
+local function renderedCopies(count: number): number
+	return if count <= 1 then 1 elseif count <= 16 then 2 elseif count <= 32 then 3 elseif count <= 48 then 4 else 5
+end
+
+local function buildItemVisual(anchor: BasePart)
+	local old = itemVisuals[anchor]
+	local id = anchor:GetAttribute("McItem")
+	local count = tonumber(anchor:GetAttribute("McCount")) or 1
+	if type(id) ~= "string" then
+		return
+	end
+	local model = Instance.new("Model")
+	model.Name = id
+	local flat = false
+	for copy = 1, renderedCopies(count) do
+		flat = buildItemShape(model, id, COPY_OFFSETS[copy])
+	end
+	model.WorldPivot = CFrame.new()
+	model.Parent = visualHolder
+	local visual = {
+		model = model, id = id, count = count, flat = flat, known = itemInfo(id) ~= nil,
+		position = if old then old.position else anchor.Position,
+		born = if old then old.born else os.clock(),
+		bob = if old then old.bob else math.random() * math.pi * 2,
+	}
+	if old then
+		old.model:Destroy()
+	end
+	itemVisuals[anchor] = visual
+end
+
+-- picked up: it flies to the nearest player (Roblox character or Minecraft player) within 3 blocks, then it is gone
+local flying = {}
+local function itemGone(anchor: Instance)
+	local visual = itemVisuals[anchor]
+	itemVisuals[anchor] = nil
+	if not visual then
+		return
+	end
+	local scale = assets and assets.scale or 3
+	local best, bestDistance = nil, 3 * scale
+	local function consider(model: Instance)
+		local root = model:FindFirstChild("HumanoidRootPart")
+		if root and root:IsA("BasePart") then
+			local distance = (root.Position - visual.position).Magnitude
+			if distance < bestDistance then
+				best, bestDistance = root, distance
+			end
+		end
+	end
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other.Character then
+			consider(other.Character)
+		end
+	end
+	local npcs = workspace:FindFirstChild("BridgeRemotePlayers")
+	for _, folder in ipairs(npcs and npcs:GetChildren() or {}) do
+		for _, model in ipairs(folder:GetChildren()) do
+			consider(model)
+		end
+	end
+	if best then
+		table.insert(flying, { visual = visual, from = visual.position, to = best, started = os.clock() })
+	else
+		visual.model:Destroy()
+	end
+end
+
+local function watchItems(folder: Instance)
+	local function added(anchor: Instance)
+		if anchor:IsA("BasePart") then
+			buildItemVisual(anchor)
+			anchor:GetAttributeChangedSignal("McCount"):Connect(function()
+				local visual = itemVisuals[anchor]
+				local count = tonumber(anchor:GetAttribute("McCount")) or 1
+				if visual and renderedCopies(count) ~= renderedCopies(visual.count) then
+					buildItemVisual(anchor)
+				elseif visual then
+					visual.count = count
+				end
+			end)
+		end
+	end
+	folder.ChildAdded:Connect(added)
+	folder.ChildRemoved:Connect(itemGone)
+	for _, anchor in ipairs(folder:GetChildren()) do
+		added(anchor)
+	end
+end
+task.spawn(function()
+	watchItems(workspace:WaitForChild("MinecraftItems"))
+end)
+
+-- items whose picture came later get drawn again
+local function rebuildUnknownItems()
+	for anchor, visual in pairs(itemVisuals) do
+		if not visual.known and itemInfo(visual.id) then
+			buildItemVisual(anchor)
+		end
+	end
+end
+
+RunService.RenderStepped:Connect(function(dt)
+	local scale = assets and assets.scale or 3
+	local now = os.clock()
+	local follow = 1 - math.exp(-dt * 12)
+	for anchor, visual in pairs(itemVisuals) do
+		visual.position = visual.position:Lerp(anchor.Position, follow)
+		local age = now - visual.born
+		local bob = (math.sin(age * 2 + visual.bob) * 0.1 + 0.1) * scale -- Minecraft: sin(age / 10 ticks) * 0.1 + 0.1
+		local lift = (if visual.flat then 0.25 else 0.125) * scale
+		visual.model:PivotTo(CFrame.new(visual.position + Vector3.new(0, bob + lift, 0)) * CFrame.Angles(0, age + visual.bob, 0))
+	end
+	for index = #flying, 1, -1 do
+		local entry = flying[index]
+		local alpha = math.min(1, (now - entry.started) / 0.15) -- Minecraft: 3 ticks
+		local target = if entry.to.Parent then entry.to.Position else entry.from
+		entry.visual.model:PivotTo(CFrame.new(entry.from:Lerp(target, alpha)))
+		if alpha >= 1 then
+			entry.visual.model:Destroy()
+			table.remove(flying, index)
+		end
+	end
+end)
+-- endregion
+
+-- region preparing the icons: all at once in the background (the inventory then shows every icon right away)
+local preloading, preloadAgain = false, false
+local function preloadIcons()
+	if preloading then
+		preloadAgain = true -- (more items came while making them: once more at the end)
+		return
+	end
+	if not assets then
+		return
+	end
+	preloading = true
+	task.spawn(function()
+		repeat
+			preloadAgain = false
+			local started = os.clock()
+			for _, item in ipairs(assets and assets.items or {}) do
+				if type(item) == "table" and itemInfo(item.id) then
+					iconContent(item.id)
+				end
+				if os.clock() - started > 0.004 then
+					task.wait() -- (at most 4 ms per frame - no stutter)
+					started = os.clock()
+				end
+			end
+		until not preloadAgain
+		preloading = false
+		refresh()
+	end)
+end
+-- endregion
 
 -- region settings (M): field of view + shaders - only for this player, nothing goes to Minecraft or the others
 local refreshMenu -- below
@@ -1897,6 +2168,8 @@ local function useAssets(newAssets)
 	assets = newAssets
 	applyAllTextures()
 	refresh()
+	rebuildUnknownItems()
+	preloadIcons()
 	if first then
 		showItemName()
 		inventoryRemote:FireServer("state") -- (the server sends it when the character comes too)

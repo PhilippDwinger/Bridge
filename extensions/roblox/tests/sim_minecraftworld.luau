@@ -280,6 +280,16 @@ local function observe()
 			end
 		end
 	end
+	-- items lying in the world (Minecraft's item entities): one invisible part each, the clients draw them
+	result.items = {}
+	local itemFolder = find(workspaceRoot, "MinecraftItems")
+	for _, anchor in ipairs(itemFolder and itemFolder:GetChildren() or {}) do
+		if anchor:IsA("BasePart") then
+			local p = anchor.CFrame.Position
+			table.insert(result.items, { id = anchor.Name, item = anchor:GetAttribute("McItem"), count = anchor:GetAttribute("McCount"),
+				pos = { p.X, p.Y, p.Z }, collide = anchor.CanCollide, query = anchor.CanQuery })
+		end
+	end
 	result.mode = paddy.Character and paddy.Character:GetAttribute("McGameMode")
 	result.starterCharacter = starterPlayer:FindFirstChild("StarterCharacter") ~= nil
 	result.animateBlocked = starterScripts:FindFirstChild("Animate") ~= nil
