@@ -2289,11 +2289,43 @@ local function applyGameMode(player)
 	end
 end
 
+-- Asleep in a bed (state.sleep = {bed = {x, y, z}, dir = head end}): where his body lies - his client holds him there
+local BED_DIRECTIONS = { north = Vector3.new(0, 0, -1), south = Vector3.new(0, 0, 1), east = Vector3.new(1, 0, 0),
+	west = Vector3.new(-1, 0, 0) }
+local function sleepFrame(sleep): CFrame?
+	local worldInfo = world.info
+	if type(sleep) ~= "table" or type(sleep.bed) ~= "table" or not worldInfo then
+		return nil
+	end
+	local x, y, z = tonumber(sleep.bed[1]), tonumber(sleep.bed[2]), tonumber(sleep.bed[3])
+	if not x or not y or not z then
+		return nil
+	end
+	local scale = worldInfo.studsPerBlock
+	local towardHead = BED_DIRECTIONS[sleep.dir] or BED_DIRECTIONS.north
+	-- the head on the pillow (the bed's head block, mattress 9/16 high), the body toward the foot, lying on the back
+	local pillow = Vector3.new((x + 0.5) * scale, (y - worldInfo.minY + 0.5625) * scale, (z + 0.5) * scale)
+	local centre = pillow - towardHead * (0.45 * scale) + Vector3.new(0, 0.3 * scale, 0)
+	local back = Vector3.new(0, -1, 0) -- (the face looks up)
+	return CFrame.fromMatrix(centre, towardHead:Cross(back), towardHead, back)
+end
+
 local function setState(player, state)
 	if type(state) ~= "table" or type(state.slots) ~= "table" then
 		return
 	end
 	states[player] = state
+	player:SetAttribute("McSleepAt", sleepFrame(state.sleep)) -- (nil = awake)
+	-- riding (state.ride = {mob, kind, mode, seat, speed, jump}): his client steers / follows it, everybody seats him
+	local ride = if type(state.ride) == "table" then state.ride else nil
+	player:SetAttribute("McRideMob", if ride then tonumber(ride.mob) else nil)
+	player:SetAttribute("McRideMode", if ride and type(ride.mode) == "string" then ride.mode else nil)
+	player:SetAttribute("McRideSpeed", if ride then tonumber(ride.speed) or 0 else nil)
+	player:SetAttribute("McRideJump", if ride then tonumber(ride.jump) or 0 else nil)
+	player:SetAttribute("McRideSeat", if ride then tonumber(ride.seat) or 0 else nil)
+	if player.Character then
+		player.Character:SetAttribute("McRideSeat", if ride then tonumber(ride.seat) or 0 else nil)
+	end
 	applyGameMode(player)
 	local ids = {}
 	for _, stack in ipairs(state.slots) do
@@ -2555,6 +2587,9 @@ local function onEdit(player, action, x, y, z, info)
 	if not world.loaded or not worldInfo or not insideWorld(y) or not allowEdit(player) then
 		return
 	end
+	if states[player] and states[player].sleep then
+		return -- (asleep: Minecraft lets nobody build from his bed)
+	end
 	local scale = worldInfo.studsPerBlock
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -2693,6 +2728,16 @@ inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c, d)
 		inOrder(player, function()
 			callPlayer(player, "release", { slot = a, ticks = math.floor(math.clamp(b, 0, 3600) * 20),
 				feet = feetOf(player), look = if look then { look.X, look.Y, look.Z } else nil })
+		end)
+	elseif op == "dismount" then
+		-- Shift while riding: Minecraft puts him down next to it (a teleport)
+		inOrder(player, function()
+			callPlayer(player, "dismount", { feet = feetOf(player) })
+		end)
+	elseif op == "wake" then
+		-- "Leave Bed": Minecraft gets him up (next to the bed - the answer's state no longer has "sleep")
+		inOrder(player, function()
+			callPlayer(player, "wake", { feet = feetOf(player) })
 		end)
 	elseif op == "eat" and isWhole(a) and a >= 0 and a <= 8 then
 		-- eaten / drunk (his client counted Minecraft's time): Minecraft does the item (effects, bowl ...), the food
@@ -3309,6 +3354,13 @@ client.MessageReceived:Connect(function(message)
 				setState(player, content.state)
 			end
 		end
+	elseif content.type == "mc.sound" and type(content.s) == "table" then
+		-- a sound only for him (/playsound @s, his level-up): his client plays it
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.UserId == content.u then
+				remote("RemoteEvent", "Sounds"):FireClient(player, content.s)
+			end
+		end
 	elseif content.type == "mc.title" then
 		-- what Minecraft shows only to him (/title @s, /tellraw @s ...): chat lines into his chat, the rest on screen
 		for _, player in ipairs(Players:GetPlayers()) do
@@ -3404,12 +3456,21 @@ ReplicatedStorage:SetAttribute("McTopTurn", tonumber(Config.TopTurn) or 0)
 ReplicatedStorage:SetAttribute("McBottomTurn", tonumber(Config.BottomTurn) or 0)
 
 turnFaces = function(player, rest)
+	if string.lower(rest) == "test" then
+		-- a test board in front of him: four blocks per row, each turned differently - the right number is the one
+		-- whose arrow points where it says (MinecraftClient builds it, only for him)
+		chatRemote:FireClient(player, "calibrate")
+		reply(player, { "Testbrett vor dir: OBEN (auf dem Boden) die Zahl, deren Pfeil zum roten N-Mast zeigt -> /drehen oben <Zahl>.",
+			"UNTEN (die schwebende Reihe, von unten ansehen) die Zahl, deren Pfeil VOM N-Mast weg zeigt -> /drehen unten <Zahl>.",
+			"Dann die Zahlen in MinecraftWorldConfig (TopTurn / BottomTurn) eintragen. /drehen test nochmal = Brett weg." })
+		return
+	end
 	local which, amount = string.match(string.lower(rest), "^(%S+)%s+(%-?%d+)$")
 	amount = tonumber(amount)
 	local attribute = if which == "oben" or which == "top" then "McTopTurn"
 		elseif which == "unten" or which == "bottom" then "McBottomTurn" else nil
 	if not attribute or not amount or amount % 90 ~= 0 then
-		reply(player, { "/drehen oben <0|90|180|270>  oder  /drehen unten <0|90|180|270>",
+		reply(player, { "/drehen oben <0|90|180|270>  oder  /drehen unten <0|90|180|270>  (/drehen test: Testbrett)",
 			string.format("jetzt: oben %d, unten %d", ReplicatedStorage:GetAttribute("McTopTurn") or 0,
 				ReplicatedStorage:GetAttribute("McBottomTurn") or 0) })
 		return
@@ -3528,6 +3589,39 @@ local itemFolder = workspace:FindFirstChild("MinecraftItems") or Instance.new("F
 itemFolder.Name = "MinecraftItems"
 itemFolder.Parent = workspace
 local itemAnchors = {} -- entity id (text) -> invisible Part where it lies; the clients draw the item there
+
+-- region sounds (topic mcworld.sounds: Minecraft's sounds near the Roblox players -> each client that can hear them;
+-- the clients play their uploaded copies - MinecraftSoundIds, tools/upload_sounds.py)
+do -- (a block: its locals do not count towards the script's 200)
+	local soundsRemote = remote("RemoteEvent", "Sounds") -- server -> client: ({{id, x, y, z (blocks, Roblox y), volume, pitch}})
+	client:Subscribe(nil, Config.WorldPrefix .. ".sounds", function(data)
+		local worldInfo = world.info
+		if type(data) ~= "table" or type(data.s) ~= "table" or not worldInfo then
+			return
+		end
+		local scale = worldInfo.studsPerBlock
+		for _, player in ipairs(Players:GetPlayers()) do
+			local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if root then
+				local heard = {}
+				for _, sound in ipairs(data.s) do
+					if type(sound) == "table" and type(sound[1]) == "string" then
+						local at = Vector3.new((tonumber(sound[2]) or 0) * scale, ((tonumber(sound[3]) or 0) - worldInfo.minY) * scale,
+							(tonumber(sound[4]) or 0) * scale)
+						-- (Minecraft: heard up to 16 blocks x volume)
+						if (at - root.Position).Magnitude < 16 * math.max(1, tonumber(sound[5]) or 1) * scale then
+							table.insert(heard, sound)
+						end
+					end
+				end
+				if #heard > 0 then
+					soundsRemote:FireClient(player, heard)
+				end
+			end
+		end
+	end)
+end
+-- endregion
 
 -- region mobs (topic mcworld.mobs -> every client; their looks once per kind from Minecraft: mcworld.mob {id})
 do -- (a block: its locals do not count towards the script's 200)

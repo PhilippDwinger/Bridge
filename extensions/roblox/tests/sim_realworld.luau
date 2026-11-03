@@ -718,6 +718,44 @@ do
 	inventory.handler(paddy, "close")
 	frames(0.5)
 	check(playerCalls.close == 1, "chest: closed")
+	-- asleep in a bed (state.sleep from Minecraft): his body lies there (McSleepAt), "Leave Bed" asks Minecraft
+	local function pushState(extra)
+		local slots = table.create(46, false)
+		local state = { gm = "survival", sel = 0, slots = slots, carried = false }
+		for key, value in pairs(extra) do
+			state[key] = value
+		end
+		for _, handler in ipairs(messageHandlers) do
+			pcall(handler, { Content = { type = "mc.player", u = 4242, state = state } })
+		end
+		frames(0.2)
+	end
+	pushState({ sleep = { bed = { 3, 70, -2 }, dir = "east" } })
+	local lying = paddy:GetAttribute("McSleepAt")
+	check(typeof(lying) == "CFrame", "bed: he lies in it (McSleepAt " .. typeof(lying) .. ")")
+	if typeof(lying) == "CFrame" then
+		-- head end east: the body's up = +x, the face looks up, the middle 0.45 blocks toward the foot, on the mattress
+		local expected = Vector3.new((3 + 0.5 - 0.45) * SCALE, (70 - MIN_Y + 0.5625 + 0.3) * SCALE, (-2 + 0.5) * SCALE)
+		check((lying.Position - expected).Magnitude < 0.01 and lying.UpVector.X > 0.99 and lying.LookVector.Y > 0.99,
+			"bed: lying along the bed, face up, on the mattress (" .. tostring(lying.Position) .. ")")
+	end
+	inventory.handler(paddy, "wake")
+	frames(0.5)
+	check(playerCalls.wake == 1, "bed: Leave Bed went to Minecraft (op wake)")
+	pushState({})
+	check(paddy:GetAttribute("McSleepAt") == nil, "bed: awake again (no McSleepAt)")
+	-- riding (state.ride): his client steers with the horse's speed, everybody sees him sit, Shift = dismount
+	pushState({ ride = { mob = 77, kind = "minecraft:horse", mode = "drive", seat = 0.85, speed = 9.5, jump = 2.4 } })
+	check(paddy:GetAttribute("McRideMode") == "drive" and paddy:GetAttribute("McRideMob") == 77
+		and paddy:GetAttribute("McRideSpeed") == 9.5 and paddy:GetAttribute("McRideJump") == 2.4,
+		"riding: mode / mob / speed / jump for his client")
+	check(paddy.Character ~= nil and paddy.Character:GetAttribute("McRideSeat") == 0.85, "riding: the seat for everybody (character)")
+	inventory.handler(paddy, "dismount")
+	frames(0.5)
+	check(playerCalls.dismount == 1, "riding: Shift went to Minecraft (op dismount)")
+	pushState({})
+	check(paddy:GetAttribute("McRideMode") == nil and (paddy.Character == nil or paddy.Character:GetAttribute("McRideSeat") == nil),
+		"riding: off again (no attributes)")
 end
 
 -- through a nether portal: Minecraft sends mc.teleport (Roblox y of the Nether: + 1024 blocks) - the character waits

@@ -171,6 +171,46 @@ check("swim: in the middle of a stroke (tick 18 of 26) the arm comes round past 
 	midDown and midDown.Y < 0.5, tostring(midDown))
 check("swimming head pitch: -45 degrees (Minecraft: head.xRot -pi/4)", near(Character.SWIM_HEAD_PITCH, -math.pi / 4))
 
+-- riding: Minecraft's riding pose (legs forward + apart, arms a little forward), the body on the seat
+do
+	local rider = Character.build({ name = "Rider" })
+	local rootJoint = rider.HumanoidRootPart:FindFirstChild("Root")
+	local hip = rider:FindFirstChild("RightLeg"):FindFirstChild("RightHip")
+	local hipBefore = hip.C0
+	Character.ride(rider, 2.4)
+	check("riding: the body sits 2.4 studs higher (Root joint)", near(rootJoint.C0.Position.Y, -Character.ROOT_HEIGHT + 2.4),
+		rootJoint.C0.Position.Y)
+	-- the right leg hangs down (-y from the hip): riding, it points forward (-z) and a little to the right (+x)
+	local down = (hip.C0 - hip.C0.Position):VectorToWorldSpace(Vector3.new(0, -1, 0))
+	check("riding: the right leg points forward and outward (Minecraft: xRot -1.41, yRot 0.31)",
+		down.Z < -0.9 and down.X > 0.2 and math.abs(down.Y) < 0.2, down)
+	check("riding: the hip stays where it was (only turned)", near((hip.C0.Position - hipBefore.Position).Magnitude, 0))
+	Character.ride(rider, nil)
+	check("riding: off again - joints back", near(rootJoint.C0.Position.Y, -Character.ROOT_HEIGHT)
+		and near((hip.C0.LookVector - hipBefore.LookVector).Magnitude, 0))
+end
+
+-- MinecraftSounds: Minecraft's block sound groups + the fallbacks for sounds that are not uploaded
+do
+	shim.services.ReplicatedStorage = { FindFirstChild = function()
+		return nil
+	end }
+	local Sounds = luau.load(fs.readFile("../examples/MinecraftWorld/MinecraftSounds.luau"), { environment = env })()
+	check("sounds: block groups like Minecraft (sandstone = stone, oak_leaves = grass, oak_planks = wood, white_wool = wool)",
+		Sounds.groupOf("minecraft:sandstone") == "stone" and Sounds.groupOf("minecraft:oak_leaves") == "grass"
+			and Sounds.groupOf("minecraft:oak_planks") == "wood" and Sounds.groupOf("minecraft:white_wool") == "wool"
+			and Sounds.groupOf("minecraft:sand") == "sand" and Sounds.groupOf("minecraft:iron_block") == "metal"
+			and Sounds.groupOf("minecraft:air") == nil and Sounds.groupOf("minecraft:deepslate") == "stone")
+	Sounds.ids["block.grass.step"] = 11
+	Sounds.ids["block.stone.step"] = 22
+	Sounds.ids["block.stone.break"] = 33
+	Sounds.ids["entity.generic.hurt"] = 44
+	check("sounds: fallbacks (grass hit -> grass step, wood place -> stone break, zombie hurt -> generic hurt, unknown -> none)",
+		Sounds.idFor("block.grass.hit") == 11 and Sounds.idFor("block.wood.place") == 33 and Sounds.idFor("block.wood.fall") == 22
+			and Sounds.idFor("entity.zombie.hurt") == 44 and Sounds.idFor("entity.zombie.ambient") == nil
+			and Sounds.idFor("ui.button.click") == nil)
+end
+
 -- MinecraftSky: Minecraft's light map and clock
 shim.services.Lighting = {}
 shim.services.Players = { LocalPlayer = nil }

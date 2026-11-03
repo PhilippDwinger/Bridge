@@ -352,6 +352,7 @@ local function onSnapshot(data, event)
 			npc.yaw = tonumber(player.r) or 0
 			npc.crouch = player.c == true
 			npc.swim = player.sm == true -- swimming (sprinting under water: lying in the water)
+			npc.ride = player.rd == true -- riding (a horse, a boat, a minecart: sitting)
 			-- (Minecraft only) the item in his hand, the colour of his status effects, invisible
 			if npc.model then
 				local held = if type(player.hi) == "string" and player.hi ~= "" then player.hi else nil
@@ -397,6 +398,7 @@ local function onSnapshot(data, event)
 				npc.model:SetAttribute("McSneak", npc.crouch)
 				npc.model:SetAttribute("McSprint", npc.sprint)
 				npc.model:SetAttribute("McSwimming", npc.swim)
+				npc.model:SetAttribute("McRideSeat", if npc.ride then 0 else nil) -- (his feet are already on the seat)
 				npc.model:SetAttribute("McPitch", npc.pitch)
 				-- his game mode (Minecraft: spectators are only seen by spectators - the game's clients decide)
 				npc.model:SetAttribute("McGameMode", if type(player.gm) == "string" then player.gm else nil)

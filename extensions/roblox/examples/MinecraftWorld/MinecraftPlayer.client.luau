@@ -39,6 +39,7 @@ end
 local Character = require(characterModule :: any)
 local remotes = ReplicatedStorage:WaitForChild("MinecraftWorld")
 local moveRemote = remotes:WaitForChild("Move") :: RemoteEvent
+local inventoryRemote = remotes:WaitForChild("Inventory", 10) :: RemoteEvent?
 local chatRemote = remotes:WaitForChild("Chat") :: RemoteEvent
 
 local player = Players.LocalPlayer
@@ -457,6 +458,83 @@ local function canJumpOut(root: BasePart, move: Vector3): boolean
 	return ok and blocked ~= nil and free == nil
 end
 
+--[[
+	Riding (the server sets McRideMode / McRideSpeed / McRideJump from Minecraft: what he rides and how fast it goes):
+	"drive" - a horse / pig / strider / camel: he walks with ITS speed (blocks/s, 0 = it cannot be steered: no saddle,
+	a pig without a carrot on a stick) and jumps its height; "boat" - floats on the water (feet at the surface), slow on
+	land; "cart" - a minecart: Minecraft moves it, he sits in it (MinecraftClient says where: McCartAt).
+	Shift gets him off (Minecraft: sneaking).
+]]
+local dismountAsked = 0
+local function ride(humanoid: Humanoid, root: BasePart, move: Vector3, shift: boolean, space: boolean, mode: string, dt: number)
+	sneaking, sprinting, swimming, flying = false, false, false, false
+	tapSprint = false
+	if shift and inventoryRemote and os.clock() - dismountAsked > 0.5 then
+		dismountAsked = os.clock()
+		inventoryRemote:FireServer("dismount")
+	end
+	humanoid.AutoRotate = false
+	local speed = (tonumber(player:GetAttribute("McRideSpeed")) or 0) * BLOCK
+	if mode == "cart" then
+		humanoid.PlatformStand = true
+		if antiGravity then
+			antiGravity.Force = Vector3.new(0, root.AssemblyMass * workspace.Gravity, 0)
+			antiGravity.Enabled = true
+		end
+		local cart = player:GetAttribute("McCartAt")
+		if typeof(cart) == "CFrame" then
+			root.CFrame = CFrame.new(cart.Position + Vector3.new(0, Character.ROOT_HEIGHT, 0)) * CFrame.Angles(0, yaw, 0)
+		end
+		root.AssemblyLinearVelocity = Vector3.zero
+		humanoid:Move(Vector3.zero, false)
+		humanoid.Jump = false
+		return
+	end
+	local grounded = onGround(root)
+	if mode == "boat" then
+		local feet = root.Position - Vector3.new(0, Character.ROOT_HEIGHT, 0)
+		local under = Character.fluidAt(feet + Vector3.new(0, 0.3 * BLOCK, 0)) == "water"
+		local afloat = under or Character.fluidAt(feet - Vector3.new(0, 0.15 * BLOCK, 0)) == "water"
+		-- (Minecraft's boat: ~8 blocks/s on water, hardly moves on land)
+		local horizontal = steer(root, move * (if afloat then speed else 0.6 * BLOCK),
+			(if afloat then 0.9 elseif grounded then GROUND_KEEP else AIR_KEEP) ^ (TICKS * dt))
+		humanoid.PlatformStand = afloat
+		if antiGravity then
+			antiGravity.Force = Vector3.new(0, root.AssemblyMass * workspace.Gravity, 0)
+			antiGravity.Enabled = afloat
+		end
+		local vy = if under then 0.08 * TICKS * BLOCK elseif afloat then 0 else root.AssemblyLinearVelocity.Y
+		root.AssemblyLinearVelocity = Vector3.new(horizontal.X, vy, horizontal.Z)
+		humanoid.WalkSpeed = horizontal.Magnitude
+		humanoid:Move(if not afloat and horizontal.Magnitude > 0.01 then horizontal.Unit else Vector3.zero, false)
+		humanoid.Jump = false
+		return
+	end
+	humanoid.PlatformStand = false
+	if antiGravity then
+		antiGravity.Enabled = false
+	end
+	local horizontal = steer(root, move * speed, (if grounded then GROUND_KEEP else AIR_KEEP) ^ (TICKS * dt))
+	humanoid.WalkSpeed = horizontal.Magnitude
+	humanoid:Move(if horizontal.Magnitude > 0.01 then horizontal.Unit else Vector3.zero, false)
+	if grounded then
+		stepUp(root, horizontal, dt)
+	end
+	local jump = (tonumber(player:GetAttribute("McRideJump")) or 0) * BLOCK
+	if not space then
+		lastJump = -math.huge
+	end
+	if space and jump > 0 and grounded and os.clock() - lastJump >= 0.5 then
+		lastJump = os.clock()
+		pcall(function()
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end)
+		local velocity = root.AssemblyLinearVelocity
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X, math.sqrt(2 * workspace.Gravity * jump), velocity.Z)
+	end
+	humanoid.Jump = false
+end
+
 local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: number)
 	local mode = gameMode()
 	local spectator = mode == "spectator"
@@ -478,6 +556,11 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 	end
 	local shift = not free and keyDown(Enum.KeyCode.LeftShift, Enum.KeyCode.RightShift)
 	local space = not free and keyDown(Enum.KeyCode.Space)
+	local rideMode = player:GetAttribute("McRideMode")
+	if type(rideMode) == "string" and humanoid.Health > 0 and not spectator then
+		ride(humanoid, root, move, shift, space, rideMode, dt)
+		return
+	end
 	local grounded = not spectator and onGround(root)
 	if player:GetAttribute("McGround") ~= grounded then
 		player:SetAttribute("McGround", grounded) -- (MinecraftClient: breaking is 5 x slower in the air)
@@ -711,6 +794,9 @@ local function lookAll(dt: number)
 	for _, other in ipairs(Players:GetPlayers()) do
 		local character = other.Character
 		if character then
+			-- riding: sitting on it (the server sets McRideSeat = blocks above the feet)
+			local seat = tonumber(if other == player then player:GetAttribute("McRideSeat") else character:GetAttribute("McRideSeat"))
+			Character.ride(character, if seat then seat * Character.STUDS_PER_BLOCK else nil)
 			local swims = if other == player then swimming else character:GetAttribute("McSwimming") == true
 			apply(character, if swims then Character.SWIM_HEAD_PITCH
 				elseif other == player then pitch else tonumber(character:GetAttribute("McPitch")) or 0)
@@ -721,6 +807,8 @@ local function lookAll(dt: number)
 		for _, folder in ipairs(npcs:GetChildren()) do
 			for _, model in ipairs(folder:GetChildren()) do
 				if model:IsA("Model") then
+					local seat = tonumber(model:GetAttribute("McRideSeat")) -- (a Minecraft player on a horse / in a boat)
+					Character.ride(model, if seat then seat * Character.STUDS_PER_BLOCK else nil)
 					apply(model, if model:GetAttribute("McSwimming") == true then Character.SWIM_HEAD_PITCH
 						else tonumber(model:GetAttribute("McPitch")) or 0)
 				end
@@ -779,9 +867,107 @@ if player.Character then
 	task.spawn(onCharacter, player.Character)
 end
 
+-- region sleeping in a bed (Minecraft lays him down: the server sets McSleepAt = where his body lies)
+local sleepState = { on = false, since = 0, gui = nil :: ScreenGui?, dark = nil :: Frame?, collide = true, asked = 0 }
+
+local function leaveBed()
+	-- "Leave Bed" (Minecraft's button): Minecraft gets him up next to the bed
+	if sleepState.on and inventoryRemote and os.clock() - sleepState.asked > 0.5 then
+		sleepState.asked = os.clock()
+		inventoryRemote:FireServer("wake")
+	end
+end
+
+local function sleepOverlay(show: boolean)
+	if show and not sleepState.gui then
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "McSleep"
+		gui.IgnoreGuiInset = true
+		gui.ResetOnSpawn = false
+		gui.DisplayOrder = 4
+		-- Minecraft darkens the screen while falling asleep (100 ticks, up to 220/255)
+		local dark = Instance.new("Frame")
+		dark.Name = "Dark"
+		dark.Size = UDim2.fromScale(1, 1)
+		dark.BackgroundColor3 = Color3.fromRGB(16, 16, 32)
+		dark.BackgroundTransparency = 1
+		dark.BorderSizePixel = 0
+		dark.Parent = gui
+		local button = Instance.new("TextButton")
+		button.Name = "LeaveBed"
+		button.AnchorPoint = Vector2.new(0.5, 1)
+		button.Position = UDim2.new(0.5, 0, 1, -48)
+		button.Size = UDim2.fromOffset(400, 40)
+		button.BackgroundColor3 = Color3.fromRGB(111, 111, 111)
+		button.BorderColor3 = Color3.new(0, 0, 0)
+		button.BorderSizePixel = 2
+		button.TextColor3 = Color3.new(1, 1, 1)
+		button.Font = Enum.Font.Arcade
+		button.TextSize = 22
+		button.Text = "Leave Bed"
+		button.Parent = gui
+		button.Activated:Connect(leaveBed)
+		gui.Parent = player:WaitForChild("PlayerGui")
+		sleepState.gui = gui
+		sleepState.dark = dark
+	elseif not show and sleepState.gui then
+		sleepState.gui:Destroy()
+		sleepState.gui = nil
+		sleepState.dark = nil
+	end
+end
+
+-- every frame while asleep: the body lies in the bed (unanchored, so the others see it too), the view from the
+-- pillow along the bed (Minecraft: toward its foot), the screen darkens
+local function holdInBed(humanoid: Humanoid, root: BasePart, at: CFrame, camera: Camera)
+	if not sleepState.on then
+		sleepState.on = true
+		sleepState.since = os.clock()
+		sleepState.collide = root.CanCollide
+		humanoid.PlatformStand = true
+		root.CanCollide = false
+		if yawAlign then
+			yawAlign.Enabled = false
+		end
+		sleepOverlay(true)
+	end
+	if antiGravity then
+		antiGravity.Force = Vector3.new(0, root.AssemblyMass * workspace.Gravity, 0)
+		antiGravity.Enabled = true
+	end
+	root.CFrame = at
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	local head = at.Position + at.UpVector * (Character.STUDS_PER_BLOCK * 0.6) + Vector3.new(0, 0.6, 0)
+	camera.CFrame = CFrame.lookAt(head, head - at.UpVector)
+	if sleepState.dark then
+		sleepState.dark.BackgroundTransparency = 1 - 220 / 255 * math.clamp((os.clock() - sleepState.since) / 5, 0, 1)
+	end
+end
+
+local function getUp(humanoid: Humanoid, root: BasePart)
+	sleepState.on = false
+	humanoid.PlatformStand = false
+	root.CanCollide = sleepState.collide
+	if yawAlign then
+		yawAlign.Enabled = true
+	end
+	-- upright again, standing on the bed (Minecraft's place next to the bed comes as a teleport)
+	root.CFrame = CFrame.new(root.Position + Vector3.new(0, Character.STUDS_PER_BLOCK * 0.7, 0)) * CFrame.Angles(0, yaw, 0)
+	root.AssemblyLinearVelocity = Vector3.zero
+	sleepOverlay(false)
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if not processed and sleepState.on and input.KeyCode == Enum.KeyCode.Space then
+		leaveBed()
+	end
+end)
+-- endregion
+
 RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value, function(dt)
 	pollF5()
-	local free = guiOpen()
+	local free = guiOpen() or sleepState.on
 	if free then
 		if player:GetAttribute("McGuiOpen") ~= true and player:GetAttribute("McMenuOpen") ~= true then -- (they do it)
 			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
@@ -803,6 +989,14 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 		return
 	end
 	camera.CameraType = Enum.CameraType.Scriptable
+	local sleepAt = player:GetAttribute("McSleepAt")
+	if typeof(sleepAt) == "CFrame" and humanoid.Health > 0 then
+		holdInBed(humanoid, root, sleepAt, camera)
+		lookAll(dt)
+		return -- (asleep: no walking, no turning)
+	elseif sleepState.on then
+		getUp(humanoid, root)
+	end
 	senseFluids(root, eyeHeight)
 	walk(humanoid, root, free, dt)
 	if yawAlign and yawAlign.Parent == root and humanoid.Health > 0 then

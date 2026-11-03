@@ -460,6 +460,37 @@ function Animation:destroy()
 end
 -- endregion
 
+-- region riding: Minecraft's riding pose (PlayerModel: legs forward 81 degrees and a little apart, arms 36 degrees
+-- forward), the body raised to the seat of what he rides - the root (his hitbox) stays where it is
+local RIDE_POSE: { [string]: CFrame } = {
+	RightHip = CFrame.fromEulerAnglesYXZ(1.4137, -0.3142, 0),
+	LeftHip = CFrame.fromEulerAnglesYXZ(1.4137, 0.3142, 0),
+	RightShoulder = CFrame.Angles(0.6283, 0, 0),
+	LeftShoulder = CFrame.Angles(0.6283, 0, 0),
+}
+
+--- seat = studs the body sits above the feet (nil = standing again). Cheap to call every frame.
+function Character.ride(model: Model, seat: number?)
+	if model:GetAttribute("McPosedSeat") == seat then
+		return
+	end
+	model:SetAttribute("McPosedSeat", seat)
+	local root = model:FindFirstChild("HumanoidRootPart")
+	local rootJoint = root and root:FindFirstChild("Root") :: Motor6D?
+	if rootJoint then
+		rootJoint.C0 = CFrame.new(0, -Character.ROOT_HEIGHT + (seat or 0), 0)
+	end
+	for _, spec in ipairs(PARTS) do
+		local part = model:FindFirstChild(spec.name)
+		local motor = part and part:FindFirstChild(spec.joint) :: Motor6D?
+		if motor and spec.joint ~= "Neck" then -- (the neck: Character.look)
+			local pivot = toRoblox(spec.pivot[1], spec.pivot[2], spec.pivot[3])
+			motor.C0 = CFrame.new(pivot) * (if seat then RIDE_POSE[spec.joint] or CFrame.identity else CFrame.identity)
+		end
+	end
+end
+-- endregion
+
 -- region getting hurt
 --- Minecraft tints a hurt player red for half a second - everybody sees it.
 function Character.flashRed(model: Model)

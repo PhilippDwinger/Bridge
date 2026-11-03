@@ -3871,6 +3871,8 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 		parts with Minecraft's pictures, moved every frame between two lists), not touchable.
 	]]
 	local mobsRemoteClient = remotes:WaitForChild("Mobs", 10) :: RemoteEvent?
+	-- (riding: the height of the root part's middle above the feet - MinecraftCharacter)
+	local ROOT_HEIGHT = (require(ReplicatedStorage:WaitForChild("MinecraftCharacter") :: any) :: any).ROOT_HEIGHT or 2.75
 	local mobModelRemote = remotes:WaitForChild("MobModel", 10) :: RemoteFunction?
 	local mobFolder = Instance.new("Folder")
 	mobFolder.Name = "MinecraftMobs"
@@ -4284,6 +4286,20 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 				frame = frame * CFrame.new(0, math.sin(now * 6 + (b[1] % 7)) * 0.08 * scale, 0)
 			elseif string.find(kind, "minecart", 1, true) or string.find(kind, "boat", 1, true) or string.find(kind, "raft", 1, true) then
 				frame = frame * CFrame.Angles(0, math.rad(-(tonumber(b[6]) or 0)), 0)
+				if b[1] == player:GetAttribute("McRideMob") then
+					local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+					local half = (tonumber(b[9]) or 0) * scale / 2
+					if player:GetAttribute("McRideMode") == "cart" then
+						-- his minecart (Minecraft moves it): he sits in it (MinecraftPlayer holds him there)
+						player:SetAttribute("McCartAt", CFrame.new(middle - Vector3.new(0, half, 0)))
+					elseif root then
+						-- his boat (he steers it): right under him, now - not where Minecraft had it a moment ago
+						local look = root.CFrame.LookVector
+						local feet = root.Position - Vector3.new(0, ROOT_HEIGHT, 0)
+						-- (the same turn as above: -Minecraft's yaw, his yaw = atan2(-look.X, look.Z))
+						frame = CFrame.new(feet + Vector3.new(0, half, 0)) * CFrame.Angles(0, math.atan2(look.X, look.Z), 0)
+					end
+				end
 			elseif kind == "minecraft:ender_dragon" then
 				-- Minecraft's dragon yaw: 180 - yaw like the mobs, its head at -z of the model
 				frame = frame * CFrame.Angles(0, math.rad(180 - (tonumber(b[6]) or 0)), 0)
@@ -4323,6 +4339,8 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 		local scale = assets.scale or 3
 		local now = os.clock()
 		local moveParts, moveFrames = {}, {}
+		local ridden = player:GetAttribute("McRideMob")
+		local riderRoot = if ridden and player.Character then player.Character:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
 		for id, mob in pairs(mobs) do
 			local look = mobLooks[mob.kind]
 			if type(look) ~= "table" then
@@ -4383,6 +4401,13 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 			local baby = b[12] == true
 			local hidden = b[13] == true
 			local feet = Vector3.new(mix(3) * scale, (mix(4) - assets.minY) * scale, mix(5) * scale)
+			if id == ridden and riderRoot then
+				-- the horse / pig he rides (he steers it): right under him, turned like him - not a moment behind
+				local look = riderRoot.CFrame.LookVector
+				feet = riderRoot.Position - Vector3.new(0, ROOT_HEIGHT, 0)
+				bodyYaw = math.deg(math.atan2(-look.X, look.Z))
+				headYaw = bodyYaw
+			end
 			-- Minecraft: rotate (180 - body yaw), the model hangs 1.5 blocks above the feet (babies half as big)
 			local size = if baby then 0.5 else 1
 			local origin = CFrame.new(feet) * CFrame.Angles(0, math.rad(180 - bodyYaw), 0) * CFrame.new(0, 24 * MOB_PIXEL * size, 0)
@@ -4429,6 +4454,104 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 end
 -- endregion
 
+-- region sounds: what Minecraft plays near him (remote Sounds, from the topic mcworld.sounds) + the footsteps of
+-- everybody (Minecraft's clients make those themselves: one step per 1.67 blocks walked, the block's sound group)
+do -- (its own block: these locals do not count towards the 200 of the script)
+	local soundsOk, Sounds = pcall(function()
+		return require(ReplicatedStorage:WaitForChild("MinecraftSounds", 10) :: any) :: any
+	end)
+	local soundsRemoteClient = remotes:WaitForChild("Sounds", 10) :: RemoteEvent?
+	if soundsOk and Sounds and soundsRemoteClient then
+		(soundsRemoteClient :: RemoteEvent).OnClientEvent:Connect(function(list)
+			if type(list) ~= "table" or not assets or not assets.minY or not Sounds.available() then
+				return
+			end
+			local scale = assets.scale or 3
+			for _, entry in ipairs(list) do
+				if type(entry) == "table" and type(entry[1]) == "string" then
+					Sounds.play(entry[1], Vector3.new((tonumber(entry[2]) or 0) * scale, ((tonumber(entry[3]) or 0) - assets.minY) * scale,
+						(tonumber(entry[4]) or 0) * scale), tonumber(entry[5]), tonumber(entry[6]))
+				end
+			end
+		end)
+		local stepParams = RaycastParams.new()
+		stepParams.FilterType = Enum.RaycastFilterType.Include
+		local walked = setmetatable({}, { __mode = "k" }) -- model -> {last, dist, nextStep}
+		local function stepsOf(model: Model, scale: number)
+			local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+			if not root or model:GetAttribute("McPosedSeat") ~= nil then
+				return -- (riding: no steps)
+			end
+			local state = walked[model]
+			if not state then
+				state = { last = root.Position, dist = 0, nextStep = 1 }
+				walked[model] = state
+			end
+			local delta = root.Position - state.last
+			state.last = root.Position
+			local flat = Vector3.new(delta.X, 0, delta.Z).Magnitude / scale
+			if flat > 2 or math.abs(delta.Y) > 0.25 * scale then
+				return -- (a teleport, a jump, falling: no steps)
+			end
+			state.dist += flat * 0.6 -- (Minecraft: moveDist += horizontal distance x 0.6, a step at every whole number)
+			if state.dist <= state.nextStep then
+				return
+			end
+			state.nextStep = state.dist + 1
+			local world = workspace:FindFirstChild("MinecraftWorld")
+			if not world then
+				return
+			end
+			stepParams.FilterDescendantsInstances = { world }
+			local bottom = root.Position - Vector3.new(0, root.Size.Y / 2, 0)
+			local hit = workspace:Raycast(bottom + Vector3.new(0, 0.2, 0), Vector3.new(0, -0.35 * scale - 0.2, 0), stepParams)
+			if not hit then
+				return
+			end
+			local name = hit.Instance.Name
+			if not string.find(name, ":", 1, true) and hit.Instance.Parent then
+				name = hit.Instance.Parent.Name
+			end
+			local event = Sounds.stepSound(name)
+			if event then
+				Sounds.play(event, hit.Position, 0.15, 1) -- (Minecraft: a step at 0.15 of the group's volume)
+			end
+		end
+		RunService.Heartbeat:Connect(function()
+			if not assets or not Sounds.available() then
+				return
+			end
+			local scale = assets.scale or 3
+			for _, other in ipairs(Players:GetPlayers()) do
+				if other.Character then
+					stepsOf(other.Character, scale)
+				end
+			end
+			local npcs = workspace:FindFirstChild("BridgeRemotePlayers")
+			if npcs then
+				for _, folder in ipairs(npcs:GetChildren()) do
+					for _, model in ipairs(folder:GetChildren()) do
+						if model:IsA("Model") then
+							stepsOf(model, scale)
+						end
+					end
+				end
+			end
+		end)
+		-- his own hurt sound (Minecraft: the hurt player hears himself)
+		local hurtSoundRemote = remotes:FindFirstChild("Hurt") :: RemoteEvent?
+		if hurtSoundRemote then
+			hurtSoundRemote.OnClientEvent:Connect(function()
+				local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+				if root then
+					Sounds.play("entity.player.hurt", root.Position, 1, 0.9 + math.random() * 0.2)
+				end
+			end)
+		end
+	end
+end
+-- endregion
+
 -- region crosshair + attack indicator (Minecraft: the charge of the next hit under the crosshair)
 do -- (its own block: these locals do not count towards the 200 of the script)
 	local crosshair = image(screen, "Crosshair", 0, 0, 15, 15, 5)
@@ -4472,6 +4595,119 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 	end)
 end
 -- endregion
+
+-- "/drehen test": a board in front of him to find TopTurn / BottomTurn without comparing with Minecraft. Each block
+-- has an arrow on its top (bottom) - drawn pointing to the top of the picture, then turned by 0 / 90 / 180 / 270 like
+-- the world's pictures are turned. Minecraft's pictures: on an up face the top of the picture is north, on a down face
+-- south (Models.FRAME). So: the top arrow that points north (to the red N pole) = TopTurn, the bottom arrow that points
+-- south = BottomTurn. Only on this client; the same command again takes it away.
+do -- (its own block: these locals do not count towards the 200 of the script)
+	local calibrateRemote = remotes:WaitForChild("Chat", 10) :: RemoteEvent?
+	local board: Model? = nil
+	local function arrowPicture(): any
+		local size = 16
+		local pixels = buffer.create(size * size * 4)
+		for y = 0, size - 1 do
+			for x = 0, size - 1 do
+				-- white ground, a black arrow pointing up (head: rows 1-6, shaft: rows 7-14), a red dot on its right side
+				local inHead = y >= 1 and y <= 6 and math.abs(x - 7.5) <= (y - 0.5)
+				local inShaft = y >= 7 and y <= 14 and x >= 6 and x <= 9
+				local dot = y >= 10 and y <= 12 and x >= 12 and x <= 14
+				local r, g, b = 240, 240, 240
+				if inHead or inShaft then
+					r, g, b = 20, 20, 20
+				elseif dot then
+					r, g, b = 220, 30, 30
+				end
+				buffer.writeu32(pixels, (y * size + x) * 4, bit32.bor(r, bit32.lshift(g, 8), bit32.lshift(b, 16), bit32.lshift(255, 24)))
+			end
+		end
+		return { w = size, h = size, pixels = pixels }
+	end
+	local function label(part: BasePart, text: string, color: Color3)
+		local billboard = Instance.new("BillboardGui")
+		billboard.Size = UDim2.fromOffset(120, 36)
+		billboard.StudsOffsetWorldSpace = Vector3.new(0, 2.5, 0)
+		billboard.AlwaysOnTop = true
+		billboard.LightInfluence = 0
+		local text_ = Instance.new("TextLabel")
+		text_.BackgroundTransparency = 0.3
+		text_.BackgroundColor3 = Color3.new(0, 0, 0)
+		text_.Size = UDim2.fromScale(1, 1)
+		text_.Font = Enum.Font.Arcade
+		text_.TextScaled = true
+		text_.TextColor3 = color
+		text_.Text = text
+		text_.Parent = billboard
+		billboard.Parent = part
+	end
+	local function build()
+		local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not root then
+			return
+		end
+		local scale = (assets and assets.scale) or 3
+		local model = Instance.new("Model")
+		model.Name = "McTurnTest"
+		local base = root.Position - Vector3.new(0, root.Size.Y / 2, 0)
+		local arrow = arrowPicture()
+		for row = 0, 1 do
+			local face = if row == 0 then Enum.NormalId.Top else Enum.NormalId.Bottom
+			for k = 0, 3 do
+				local part = Instance.new("Part")
+				part.Anchored = true
+				part.CanCollide = false
+				part.CanQuery = false
+				part.Size = Vector3.one * scale
+				part.Color = Color3.fromRGB(90, 90, 90)
+				-- a row east-west in front (north) of him: top row on the ground, bottom row floating above head height
+				part.CFrame = CFrame.new(base + Vector3.new((k - 1.5) * scale * 1.6, if row == 0 then scale * 0.5 else scale * 3.2, -3 * scale))
+				local ok, image = pcall(function()
+					return AssetService:CreateEditableImage({ Size = Vector2.new(128, 128) })
+				end)
+				if ok and image then
+					local turned = Images.upscale(Images.turn(arrow, k * 90), 8)
+					image:WritePixelsBuffer(Vector2.zero, Vector2.new(128, 128), turned.pixels)
+					local texture = Instance.new("Texture")
+					texture.Face = face
+					texture.StudsPerTileU = scale
+					texture.StudsPerTileV = scale
+					texture.TextureContent = Content.fromObject(image)
+					texture.Parent = part
+				end
+				label(part, (if row == 0 then "oben " else "unten ") .. tostring(k * 90), if row == 0 then Color3.new(1, 1, 0.4)
+					else Color3.new(0.5, 0.9, 1))
+				part.Parent = model
+			end
+		end
+		-- the red pole in the north (Minecraft: -z), far enough to see where the arrows should point
+		local pole = Instance.new("Part")
+		pole.Anchored = true
+		pole.CanCollide = false
+		pole.CanQuery = false
+		pole.Size = Vector3.new(0.6, scale * 4, 0.6)
+		pole.Color = Color3.fromRGB(220, 30, 30)
+		pole.Material = Enum.Material.Neon
+		pole.CFrame = CFrame.new(base + Vector3.new(0, scale * 2, -9 * scale))
+		label(pole, "N (Norden)", Color3.new(1, 0.3, 0.3))
+		pole.Parent = model
+		model.Parent = workspace
+		board = model
+	end
+	if calibrateRemote then
+		(calibrateRemote :: RemoteEvent).OnClientEvent:Connect(function(kind)
+			if kind ~= "calibrate" then
+				return
+			end
+			if board then
+				board:Destroy()
+				board = nil
+			else
+				build()
+			end
+		end)
+	end
+end
 
 -- "/drehen oben 90": every Top / Bottom picture again, turned
 for _, name in ipairs({ "McTopTurn", "McBottomTurn" }) do

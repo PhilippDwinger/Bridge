@@ -56,6 +56,12 @@
       "MinecraftAnimationIds": {
         "$path": "examples/MinecraftWorld/MinecraftAnimationIds.luau"
       },
+      "MinecraftSounds": {
+        "$path": "examples/MinecraftWorld/MinecraftSounds.luau"
+      },
+      "MinecraftSoundIds": {
+        "$path": "examples/MinecraftWorld/MinecraftSoundIds.luau"
+      },
       "MinecraftAnimations": {
         "$path": "examples/MinecraftWorld/animations"
       },
