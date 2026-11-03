@@ -45,6 +45,10 @@ local drownRemote = remotes:WaitForChild("Drown") :: RemoteEvent
 local player = Players.LocalPlayer
 local REPEAT_BREAK = 0.25 -- creative: 5 ticks between two blocks while the button is held (also after a block broke)
 local REPEAT_USE = 0.2 -- 4 ticks between two right clicks while the button is held
+local eating: any -- {id, use, started, duration, crumbsAt} while eating / drinking (region eating, below)
+local startEating: () -> boolean
+local stopEating: () -> ()
+local spawnParticle: any -- region particles (below)
 local TEXTURE_SCALE = 8 -- world textures: every Minecraft pixel becomes 8x8 (sharp also where Roblox smooths)
 local ANIMATED_SCALE = 4 -- moving pictures (water, lava: up to 32 frames each) a bit smaller
 local ICON_SIZE = 64 -- (a slot is 16 Minecraft pixels, 48 screen pixels at the biggest GUI scale)
@@ -664,6 +668,8 @@ end
 
 local window, windowBack = newWindow("Window", 176, 166) -- Minecraft's inventory (survival / adventure)
 local creative, creativeBack = newWindow("Creative", 195, 136) -- Minecraft's creative inventory, items tab
+-- an open chest / furnace / crafting table ...: Minecraft's own menu (its slots where Minecraft draws them)
+local container, containerBack = newWindow("Container", 176, 166)
 
 local preview = Instance.new("ViewportFrame") -- the player in the black box, like in Minecraft
 preview.Name = "Player"
@@ -1003,6 +1009,113 @@ cursor.icon.Position = UDim2.fromOffset(0, 0)
 cursor.count.Position = UDim2.fromOffset(0, 1)
 cursor.bar.Position = UDim2.fromOffset(2, 13)
 
+-- region container window (state.menu from Minecraft: {type, title, slots = {{x, y, stack}}, burn?, cook?})
+local containerSlots = {} -- index -> {view, button, index}
+local containerTitle = Instance.new("TextLabel")
+containerTitle.Name = "Title"
+containerTitle.BackgroundTransparency = 1
+containerTitle.Position = UDim2.fromOffset(8, 5)
+containerTitle.Size = UDim2.fromOffset(160, 9)
+containerTitle.Font = Enum.Font.Arcade
+containerTitle.TextSize = 8
+containerTitle.TextColor3 = Color3.fromRGB(64, 64, 64)
+containerTitle.TextXAlignment = Enum.TextXAlignment.Left
+containerTitle.ZIndex = 13
+containerTitle.Parent = container
+local furnaceFire = Instance.new("Frame") -- the fire fills from the bottom, the arrow from the left
+furnaceFire.Name = "Fire"
+furnaceFire.BackgroundTransparency = 1
+furnaceFire.ClipsDescendants = true
+furnaceFire.ZIndex = 13
+furnaceFire.Parent = container
+local furnaceFireImage = image(furnaceFire, "Image", 0, 0, 14, 14, 13)
+local furnaceArrow = Instance.new("Frame")
+furnaceArrow.Name = "Arrow"
+furnaceArrow.BackgroundTransparency = 1
+furnaceArrow.ClipsDescendants = true
+furnaceArrow.ZIndex = 13
+furnaceArrow.Parent = container
+local furnaceArrowImage = image(furnaceArrow, "Image", 0, 0, 24, 16, 13)
+local CONTAINER_SIZES = { hopper = { 176, 133 }, beacon = { 230, 219 }, merchant = { 276, 166 } }
+
+local function containerSize(menu: any): (number, number)
+	local rows = string.match(tostring(menu.type), "^generic_9x(%d)$")
+	if rows then
+		return 176, 114 + tonumber(rows) :: number * 18
+	end
+	local size = CONTAINER_SIZES[menu.type]
+	return if size then size[1] else 176, if size then size[2] else 166
+end
+
+local function clickContainer(index: number, button: number)
+	if gameMode() == "spectator" then
+		return
+	end
+	local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+	inventoryRemote:FireServer("click", index, button, shift, true)
+end
+
+local function refreshContainer()
+	local menu = state.menu
+	if type(menu) ~= "table" or type(menu.slots) ~= "table" then
+		return
+	end
+	local width, height = containerSize(menu)
+	container.Size = UDim2.fromOffset(width, height)
+	containerBack.Size = UDim2.fromOffset(width, height)
+	local picture = gui("container_" .. tostring(menu.type))
+	setPicture(containerBack, picture)
+	containerBack.BackgroundTransparency = if picture then 1 else 0
+	containerBack.BackgroundColor3 = Color3.fromRGB(198, 198, 198)
+	containerTitle.Text = tostring(menu.title or "")
+	for index, slot in ipairs(menu.slots) do
+		local entry = containerSlots[index]
+		local x, y = tonumber(slot[1]) or 0, tonumber(slot[2]) or 0
+		if not entry then
+			local view = slotView(container, "Slot" .. index, x, y, 14)
+			local button = slotButton(container, "Click" .. index, x, y)
+			local menuIndex = index - 1
+			button.MouseButton1Click:Connect(function()
+				clickContainer(menuIndex, 0)
+			end)
+			button.MouseButton2Click:Connect(function()
+				clickContainer(menuIndex, 1)
+			end)
+			entry = { view = view, button = button }
+			hoverable(button, container, x, y, function()
+				local current = state.menu
+				local stack = type(current) == "table" and type(current.slots) == "table" and current.slots[index]
+				return if type(stack) == "table" and type(stack[3]) == "table" then stack[3] else nil
+			end)
+			containerSlots[index] = entry
+		end
+		entry.view.icon.Position = UDim2.fromOffset(x, y)
+		entry.button.Position = UDim2.fromOffset(x - 1, y - 1)
+		entry.button.Visible = true
+		showStack(entry.view, if type(slot[3]) == "table" then slot[3] else nil)
+	end
+	for index = #menu.slots + 1, #containerSlots do
+		containerSlots[index].button.Visible = false
+		showStack(containerSlots[index].view, nil)
+	end
+	-- the furnace: the fire (burn time left) and the arrow (cooking)
+	local isFurnace = menu.burn ~= nil
+	furnaceFire.Visible = isFurnace
+	furnaceArrow.Visible = isFurnace
+	if isFurnace then
+		local burn, cook = math.clamp(tonumber(menu.burn) or 0, 0, 1), math.clamp(tonumber(menu.cook) or 0, 0, 1)
+		local fire = math.ceil(burn * 13) + (if burn > 0 then 1 else 0)
+		furnaceFire.Position = UDim2.fromOffset(56, 36 + 14 - fire)
+		furnaceFire.Size = UDim2.fromOffset(14, fire)
+		furnaceFireImage.Position = UDim2.fromOffset(0, -(14 - fire))
+		setPicture(furnaceFireImage, gui("furnace_lit"))
+		furnaceArrow.Position = UDim2.fromOffset(79, 34)
+		furnaceArrow.Size = UDim2.fromOffset(math.ceil(cook * 24), 16)
+		setPicture(furnaceArrowImage, gui("furnace_burn"))
+	end
+end
+-- endregion
+
 local function creativeRows(): number
 	local count = #creativeList()
 	return math.max(0, math.ceil(count / 9) - CREATIVE_ROWS)
@@ -1043,6 +1156,10 @@ function refresh()
 	scroller.Position = UDim2.fromOffset(175, 18 + (if rows > 0 then math.floor(creativeScroll / rows * (112 - 15) + 0.5) else 0))
 	window.Visible = inventoryView == "survival"
 	creative.Visible = inventoryView == "creative"
+	container.Visible = inventoryView == "container"
+	if inventoryView == "container" then
+		refreshContainer()
+	end
 	local isCreative = gameMode() == "creative"
 	local scale = guiScale()
 	local searching = inventoryView == "creative" and creativeTab == "search"
@@ -1055,7 +1172,7 @@ function refresh()
 	end
 	tabTitle.Text = ""
 	for _, tab in ipairs(tabs) do
-		tab.frame.Visible = inventoryOpen and isCreative
+		tab.frame.Visible = inventoryOpen and isCreative and inventoryView ~= "container"
 		local chosen = if tab.view == "survival" then inventoryView == "survival"
 			else inventoryView == "creative" and (tab.tab == creativeTab)
 		if chosen and tab.name ~= "" and tab.tab ~= "search" then
@@ -1247,6 +1364,8 @@ local function clickOutside(button: number)
 		refresh()
 	elseif inventoryView == "survival" and type(state.carried) == "table" then
 		clickSurvival(-999, button)
+	elseif inventoryView == "container" and type(state.carried) == "table" then
+		inventoryRemote:FireServer("click", -999, button, false, true)
 	end
 end
 dim.MouseButton1Click:Connect(function()
@@ -1331,6 +1450,18 @@ inventoryRemote.OnClientEvent:Connect(function(kind, newState)
 	lastServerSel = if type(newState.sel) == "number" then newState.sel else lastServerSel
 	if inventoryOpen and (newState.gm == "spectator" or (oldMode ~= newState.gm)) then
 		setInventory(false) -- the game mode changed: the window that fits comes with the next E
+	end
+	-- a chest / furnace opened (his right click) - or closed by Minecraft (broken, too far)
+	if type(newState.menu) == "table" and inventoryView ~= "container" then
+		if not inventoryOpen then
+			setInventory(true)
+		end
+		inventoryView = "container"
+	elseif type(newState.menu) ~= "table" and inventoryView == "container" then
+		inventoryView = if gameMode() == "creative" then "creative" else "survival"
+		if inventoryOpen then
+			setInventory(false)
+		end
 	end
 	refresh()
 	if first then
@@ -1809,6 +1940,35 @@ local function stopMining()
 end
 -- endregion
 
+-- eating / drinking (right button held with food / a potion): Minecraft's time (1.6 s for most food), then "eat"
+eating = nil
+function startEating(): boolean
+	local stack = hotbarStack(selected)
+	local info = stack and itemInfo(stack.id)
+	local mode = gameMode()
+	if not info or (info.use ~= "eat" and info.use ~= "drink") or mode == "spectator" then
+		return false
+	end
+	-- a block that does something on a right click (chest, door, crafting table) goes first (Minecraft)
+	if target and assets and assets.blocks then
+		local look = assets.blocks[target.name or ""]
+		if look and look.use then
+			return false
+		end
+	end
+	local food = tonumber(player:GetAttribute("McFood")) or 20
+	if info.use == "eat" and info.always ~= true and food >= 20 and mode ~= "creative" then
+		return false -- (Minecraft: full - no eating, the item is used normally)
+	end
+	eating = { id = stack.id, use = info.use, started = os.clock(), duration = tonumber(info.useTime) or 1.6, crumbsAt = 0 }
+	player:SetAttribute("McEating", info.use)
+	return true
+end
+function stopEating()
+	eating = nil
+	player:SetAttribute("McEating", nil)
+end
+
 local function act(action: string, repeated: boolean?)
 	local mode = gameMode()
 	if mode == "spectator" then
@@ -1905,8 +2065,11 @@ UserInputService.InputBegan:Connect(function(input, processed)
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 		-- the mouse is always caught like in Minecraft (MinecraftPlayer): the right button only builds
 		findTarget()
-		act("use")
 		held.use = os.clock()
+		if startEating() then
+			return -- (food / a potion in the hand: held = eat / drink, like Minecraft)
+		end
+		act("use")
 	elseif input.UserInputType == Enum.UserInputType.MouseButton3 then
 		pickBlock()
 	end
@@ -1917,6 +2080,7 @@ UserInputService.InputEnded:Connect(function(input)
 		stopMining()
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 		held.use = nil
+		stopEating()
 	end
 end)
 -- the mouse wheel goes through the hotbar (like Minecraft) - in the creative inventory it scrolls the items
@@ -1980,9 +2144,30 @@ RunService.RenderStepped:Connect(function(dt)
 		held["break"] = now
 		act("break", true)
 	end
-	if held.use and now - held.use >= REPEAT_USE then
+	if eating then
+		if not held.use or not hotbarStack(selected) or hotbarStack(selected).id ~= eating.id then
+			stopEating()
+		elseif now - eating.started >= eating.duration then
+			-- done: Minecraft eats it (food, effects, bowl / bottle); holding on eats the next one
+			inventoryRemote:FireServer("eat", selected - 1)
+			stopEating()
+			held.use = now + 0.2
+		elseif now - eating.crumbsAt >= 0.2 then
+			eating.crumbsAt = now
+			local eye, look = eyeAndLook()
+			local icon = iconContent(eating.id)
+			if eye and look and icon and eating.use == "eat" then
+				for _ = 1, 3 do
+					spawnParticle("", eye + look * 1.2 - Vector3.new(0, 0.6, 0), Vector3.new(math.random() - 0.5, 1, math.random() - 0.5) * 3,
+						0.5, 0.15, nil, 25, icon)
+				end
+			end
+		end
+	elseif held.use and now - held.use >= REPEAT_USE then
 		held.use = now
-		act("use", true)
+		if not startEating() then
+			act("use", true)
+		end
 	end
 	if inventoryOpen then
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
@@ -2509,12 +2694,48 @@ flash.Size = UDim2.fromScale(1, 1)
 flash.ZIndex = 0
 flash.Parent = screen
 
+-- the drumsticks on the right above the hotbar (Minecraft: food 20 = 10 drumsticks; they shake with no saturation)
+local foods = {}
+for index = 1, 10 do
+	local x = 182 - (index - 1) * 8 - 9
+	local container = image(hotbar, "Food" .. index, x, -17, 9, 9, 4)
+	local fill = image(container, "Fill", 0, 0, 9, 9, 5)
+	foods[index] = { container = container, fill = fill, x = x }
+end
+local function updateFood(survival: boolean)
+	for _, food in ipairs(foods) do
+		food.container.Visible = survival
+	end
+	if not survival then
+		return
+	end
+	local level = tonumber(player:GetAttribute("McFood")) or 20
+	local saturation = tonumber(player:GetAttribute("McSaturation")) or 5
+	local hungry = string.find(tostring(player:GetAttribute("McEffects") or ""), '"hunger"', 1, true) ~= nil
+	local empty = gui(if hungry then "food_empty_hunger" else "food_empty")
+	local full = gui(if hungry then "food_full_hunger" else "food_full")
+	local half = gui(if hungry then "food_half_hunger" else "food_half")
+	local tick = math.floor(os.clock() * 20)
+	for index, food in ipairs(foods) do
+		local points = level - (index - 1) * 2
+		setPicture(food.container, empty)
+		setPicture(food.fill, if points >= 2 then full elseif points == 1 then half else nil)
+		local shake = if saturation <= 0 and tick % (level * 3 + 1) == 0 then math.random(-1, 1) else 0
+		food.container.Position = UDim2.fromOffset(food.x, -17 + shake)
+		food.container.BackgroundTransparency = if empty then 1 else 0.6
+		food.container.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		food.fill.BackgroundTransparency = if full or points < 1 then 1 else 0
+		food.fill.BackgroundColor3 = Color3.fromRGB(190, 120, 50)
+	end
+end
+
 local function updateHearts()
 	local mode = gameMode()
 	local survival = mode == "survival" or mode == "adventure" -- (creative / spectator: no hearts, like Minecraft)
 	for _, heart in ipairs(hearts) do
 		heart.container.Visible = survival
 	end
+	updateFood(survival)
 	if not survival then
 		return
 	end
@@ -2705,7 +2926,7 @@ local particles = {} -- {gui, image, pos, vel, born, life, gravity, size}
 local MAX_PARTICLES = 200
 local particleRandom = Random.new()
 
-local function spawnParticle(key: string, position: Vector3, velocity: Vector3, life: number, size: number,
+spawnParticle = function(key: string, position: Vector3, velocity: Vector3, life: number, size: number,
 	colour: Color3?, gravity: number?, picture: Content?)
 	local content = picture or gui(key)
 	if not content or #particles >= MAX_PARTICLES then
@@ -3071,8 +3292,15 @@ RunService.RenderStepped:Connect(function()
 			local block = assets and assets.scale or 3
 			local since = os.clock() - (tonumber(player:GetAttribute("McSwingAt")) or -100)
 			local swing = if since < 0.3 then math.sin(since / 0.3 * math.pi) else 0
-			part.CFrame = camera.CFrame * CFrame.new(0.56 * block, (-0.52 - 0.25 * swing) * block, (-0.9 + 0.2 * swing) * block)
-				* CFrame.Angles(math.rad(-20 - 60 * swing), math.rad(-35), 0)
+			if player:GetAttribute("McEating") then
+				-- eating / drinking: the item at the mouth, bobbing (Minecraft's applyEatTransform)
+				local bob = math.abs(math.sin(os.clock() * 16)) * 0.06
+				part.CFrame = camera.CFrame * CFrame.new(0.15 * block, (-0.32 + bob) * block, -0.75 * block)
+					* CFrame.Angles(math.rad(10), math.rad(-60), math.rad(-20))
+			else
+				part.CFrame = camera.CFrame * CFrame.new(0.56 * block, (-0.52 - 0.25 * swing) * block, (-0.9 + 0.2 * swing) * block)
+					* CFrame.Angles(math.rad(-20 - 60 * swing), math.rad(-35), 0)
+			end
 		end
 	end
 	-- third person: everybody's item at the arm (new characters / NPCs get watched); mine not in first person

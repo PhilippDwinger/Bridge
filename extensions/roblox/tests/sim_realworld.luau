@@ -274,7 +274,13 @@ local Players = {
 shim.services.Players = Players
 local requireModule
 local function newPlayer(userId, name)
-	local player = { UserId = userId, Name = name, DisplayName = name, Character = nil, Parent = Players }
+	local player = { UserId = userId, Name = name, DisplayName = name, Character = nil, Parent = Players, attributes = {} }
+	function player.GetAttribute(self, key)
+		return self.attributes[key]
+	end
+	function player.SetAttribute(self, key, value)
+		self.attributes[key] = value
+	end
 	function player.LoadCharacter(self)
 		local model = Instance.new("Model")
 		model.Name = name
@@ -284,7 +290,11 @@ local function newPlayer(userId, name)
 		local spawn = workspaceRoot:FindFirstChild("MinecraftSpawn")
 		root.CFrame = if spawn then spawn.CFrame + Vector3.new(0, 3, 0) else CFrame.new(0, 300, 0)
 		root.Position = root.CFrame.Position
-		Instance.new("Humanoid").Parent = model
+		root.AssemblyLinearVelocity = Vector3.zero
+		local humanoid = Instance.new("Humanoid")
+		humanoid.MaxHealth = 20
+		humanoid.Health = 20
+		humanoid.Parent = model
 		model.PrimaryPart = root
 		model.Parent = workspaceRoot
 		self.Character = model

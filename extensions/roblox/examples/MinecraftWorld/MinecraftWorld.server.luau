@@ -1,3 +1,5 @@
+--!native
+-- (Luau native code: the meshing of thousands of sections in real worlds runs much faster)
 --[[
 	MinecraftWorld - the Minecraft world in Roblox (Script in ServerScriptService)
 
@@ -152,6 +154,8 @@ local drownRemote = remote("RemoteEvent", "Drown") -- client: the air under wate
 -- server -> clients: (kind, position, extra) Minecraft's particles: "crit", "magic", "effect" (colour), "smoke" ...
 local particlesRemote = remote("RemoteEvent", "Particles")
 local lastSwing = {} -- player -> os.clock() of his last swing (Minecraft: every swing starts the attack charge again)
+local hunger = {} -- player -> {food, sat, exhaustion, timer, peaceful, last, rising} (region hunger)
+local hungerOf, showHunger -- below (region hunger)
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -1486,12 +1490,25 @@ function afterNewPictures()
 	if next(newLooks) ~= nil then
 		local names = newLooks
 		newLooks = {}
+		local function again(chunk, sectionY)
+			local section = chunk and chunk.sections[sectionY]
+			if section and (section.built or section.queued) then
+				queueSection(chunk, sectionY, false)
+			end
+		end
 		for _, chunk in pairs(world.chunks) do
 			for sectionY, section in pairs(chunk.sections) do
 				if section.built or section.queued then
 					for _, name in ipairs(section.palette) do
 						if names[name] then
-							queueSection(chunk, sectionY, false)
+							-- this section, and its neighbours (a grey placeholder hid their faces toward it)
+							again(chunk, sectionY)
+							again(chunk, sectionY + 1)
+							again(chunk, sectionY - 1)
+							again(world.chunks[chunkKey(chunk.x + 1, chunk.z)], sectionY)
+							again(world.chunks[chunkKey(chunk.x - 1, chunk.z)], sectionY)
+							again(world.chunks[chunkKey(chunk.x, chunk.z + 1)], sectionY)
+							again(world.chunks[chunkKey(chunk.x, chunk.z - 1)], sectionY)
 							break
 						end
 					end
@@ -1740,7 +1757,8 @@ local function placeReady(cx, cz, sy)
 	end
 	for y = sy - 1, sy + 1 do
 		local section = chunk.sections[y]
-		if section and (section.queued or (y >= chunk.renderFrom and not section.built)) then
+		-- (a built section that only waits to be built again - a new look came - is ground enough)
+		if section and not section.built and (section.queued or y >= chunk.renderFrom) then
 			return false
 		end
 	end
@@ -1903,6 +1921,7 @@ local function loadWorld()
 	task.spawn(loadSkyPictures, generation)
 	task.spawn(loadPictureSet, generation, { hud = true }, "HUD")
 	task.spawn(loadPictureSet, generation, { effects = true }, "effect")
+	task.spawn(loadPictureSet, generation, { containers = true }, "container")
 	if generation ~= world.generation then
 		return
 	end
@@ -2408,13 +2427,15 @@ end
 editRemote.OnServerEvent:Connect(onEdit)
 
 -- The inventory (E): Minecraft's own clicks, creative items, middle click, Q
-inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c)
+inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c, d)
 	if type(op) ~= "string" or not allowEdit(player) then
 		return
 	end
-	if op == "click" and isWhole(a) and (a == -999 or (a >= 0 and a <= 45)) then
+	if op == "click" and isWhole(a) and (a == -999 or (a >= 0 and a <= (if d == true then 90 else 45))) then
 		inOrder(player, function()
-			callPlayer(player, "click", { slot = a, button = if b == 1 then 1 else 0, shift = c == true, feet = feetOf(player) })
+			-- d = true: a slot of the open chest / furnace window (its own numbers, up to 90)
+			callPlayer(player, "click", { slot = a, button = if b == 1 then 1 else 0, shift = c == true, feet = feetOf(player),
+				container = d == true })
 		end)
 	elseif op == "close" then
 		inOrder(player, function()
@@ -2436,6 +2457,18 @@ inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c)
 	elseif op == "state" then
 		inOrder(player, function()
 			callPlayer(player, "state")
+		end)
+	elseif op == "eat" and isWhole(a) and a >= 0 and a <= 8 then
+		-- eaten / drunk (his client counted Minecraft's time): Minecraft does the item (effects, bowl ...), the food
+		-- goes into his hunger here (FoodData.eat: food + nutrition, saturation + its saturation, at most the food)
+		inOrder(player, function()
+			local result = callPlayer(player, "eat", { slot = a, feet = feetOf(player) })
+			if result and result.ok and type(result.food) == "number" then
+				local state = hungerOf(player)
+				state.food = math.clamp(state.food + result.food, 0, 20)
+				state.sat = math.clamp(state.sat + (tonumber(result.sat) or 0), 0, state.food)
+				showHunger(player, state)
+			end
 		end)
 	end
 end)
@@ -2486,6 +2519,7 @@ end)
 
 -- region health + damage
 local function onDied(player)
+	hunger[player] = nil -- (Minecraft: after dying the food is full again)
 	if killedByCommand[player] then
 		killedByCommand[player] = nil -- Minecraft did it already
 		return
@@ -2532,6 +2566,7 @@ for _, player in ipairs(Players:GetPlayers()) do
 end
 
 -- Creative and spectator players cannot be hurt (Minecraft)
+local exhaustNext = {} -- player -> exhaustion to add (hurt() comes before the hunger region)
 local function hurt(player, amount, from, cause)
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -2540,10 +2575,148 @@ local function hurt(player, amount, from, cause)
 		return
 	end
 	lastHurt[player] = { cause = cause, at = os.clock() }
+	if cause == "attack" then
+		exhaustNext[player] = (exhaustNext[player] or 0) + 0.1 -- (Minecraft: being hit makes hungry)
+	end
 	humanoid:TakeDamage(amount)
 	Character.flashRed(character)
 	hurtRemote:FireClient(player, amount, from)
 end
+
+-- region hunger: Minecraft's FoodData counted here (food 20, saturation, exhaustion), the food comes from Minecraft's items
+--[[
+	Exhaustion like Minecraft: sprinting 0.1 per block, swimming 0.01 per block, a jump 0.05 (sprinting 0.2), a hit 0.1,
+	a broken block 0.005, being hurt 0.1. Every 4 exhaustion: 1 saturation, without saturation 1 food. Healing: full food
+	+ saturation = fast (every 10 ticks), 18+ food = every 80 ticks (costs 6 exhaustion), 0 food = starving (every
+	80 ticks 1 damage: easy down to 10, normal down to 1, hard to death). Peaceful: food and health come back.
+	Shown with the player attributes McFood / McSaturation (the client draws the drumsticks).
+]]
+function hungerOf(player)
+	local state = hunger[player]
+	if not state then
+		state = { food = 20, sat = 5, exhaustion = 0, timer = 0, peaceful = 0, last = nil, rising = false }
+		hunger[player] = state
+	end
+	return state
+end
+local function exhaust(player, amount)
+	local state = hungerOf(player)
+	state.exhaustion = math.min(40, state.exhaustion + amount)
+end
+function showHunger(player, state)
+	if player:GetAttribute("McFood") ~= state.food then
+		player:SetAttribute("McFood", state.food)
+	end
+	local saturation = math.floor(state.sat * 10 + 0.5) / 10
+	if player:GetAttribute("McSaturation") ~= saturation then
+		player:SetAttribute("McSaturation", saturation)
+	end
+end
+local function heal(humanoid, amount)
+	humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + amount)
+end
+
+local function hungerTick(player, state, humanoid, root, difficulty)
+	-- what he did this tick
+	local position = root.Position
+	local scale = world.info and world.info.studsPerBlock or 3
+	if state.last then
+		local moved = Vector3.new(position.X - state.last.X, 0, position.Z - state.last.Z).Magnitude / scale
+		if moved < 2 then -- (a teleport is no walk)
+			local character = player.Character
+			if character and character:GetAttribute("McSwimming") == true or player:GetAttribute("McFluid") ~= nil then
+				exhaust(player, 0.01 * moved)
+			elseif character and character:GetAttribute("McSprint") == true then
+				exhaust(player, 0.1 * moved)
+			end
+		end
+	end
+	state.last = position
+	local rising = root.AssemblyLinearVelocity.Y > Character.JUMP_VELOCITY * 0.7
+	if rising and not state.rising and player:GetAttribute("McFluid") == nil
+		and not (player.Character and player.Character:GetAttribute("McFlying") == true) then
+		exhaust(player, if player.Character and player.Character:GetAttribute("McSprint") == true then 0.2 else 0.05)
+	end
+	state.rising = rising
+	-- Minecraft's FoodData.tick
+	if state.exhaustion > 4 then
+		state.exhaustion -= 4
+		if state.sat > 0 then
+			state.sat = math.max(state.sat - 1, 0)
+		elseif difficulty ~= "peaceful" then
+			state.food = math.max(state.food - 1, 0)
+		end
+	end
+	local hurtable = humanoid.Health < humanoid.MaxHealth
+	if difficulty == "peaceful" then
+		-- Player.aiStep: peaceful gives health every 20 ticks and food every 10 ticks back
+		state.peaceful += 1
+		if state.peaceful % 20 == 0 and hurtable then
+			heal(humanoid, 1)
+		end
+		if state.peaceful % 10 == 0 and state.food < 20 then
+			state.food += 1
+		end
+	end
+	if state.sat > 0 and hurtable and state.food >= 20 then
+		state.timer += 1
+		if state.timer >= 10 then
+			local amount = math.min(state.sat, 6)
+			heal(humanoid, amount / 6)
+			exhaust(player, amount)
+			state.timer = 0
+		end
+	elseif state.food >= 18 and hurtable then
+		state.timer += 1
+		if state.timer >= 80 then
+			heal(humanoid, 1)
+			exhaust(player, 6)
+			state.timer = 0
+		end
+	elseif state.food <= 0 then
+		state.timer += 1
+		if state.timer >= 80 then
+			if humanoid.Health > 10 or difficulty == "hard" or (humanoid.Health > 1 and difficulty == "normal") then
+				hurt(player, 1, nil, "starve")
+			end
+			state.timer = 0
+		end
+	else
+		state.timer = 0
+	end
+end
+
+local hungerClock = 0
+RunService.Heartbeat:Connect(function(dt)
+	hungerClock += dt
+	if hungerClock < 0.05 then
+		return
+	end
+	local ticks = math.min(10, math.floor(hungerClock / 0.05))
+	hungerClock -= ticks * 0.05
+	local difficulty = world.info and world.info.difficulty or "normal"
+	for _, player in ipairs(Players:GetPlayers()) do
+		local mode = gameModeOf(player)
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if (mode == "survival" or mode == "adventure") and humanoid and humanoid.Health > 0 and root then
+			local state = hungerOf(player)
+			if exhaustNext[player] then
+				exhaust(player, exhaustNext[player])
+				exhaustNext[player] = nil
+			end
+			for _ = 1, ticks do
+				hungerTick(player, state, humanoid, root, difficulty)
+			end
+			showHunger(player, state)
+		end
+	end
+end)
+Players.PlayerRemoving:Connect(function(player)
+	hunger[player] = nil
+end)
+-- endregion
 
 -- Minecraft: falling more than 3 blocks hurts 1 per block more (not while flying)
 fallRemote.OnServerEvent:Connect(function(player, blocks)
@@ -2604,6 +2777,7 @@ attackRemote.OnServerEvent:Connect(function(player, model, how)
 	lastSwing[player] = now
 	local falling = type(how) == "table" and how.falling == true and root.AssemblyLinearVelocity.Y < 2
 	local sprint = type(how) == "table" and how.sprint == true
+	exhaustNext[player] = (exhaustNext[player] or 0) + 0.1 -- (Minecraft: a hit makes hungry)
 	swingArm(player)
 	task.spawn(function()
 		local ok, result = pcall(client.Call, client, HURT, { target = target, amount = 1, attacker = player.UserId,

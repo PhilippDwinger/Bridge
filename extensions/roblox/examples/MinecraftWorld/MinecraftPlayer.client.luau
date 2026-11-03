@@ -462,6 +462,12 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 	end
 	sprinting = not free and (keyDown(Enum.KeyCode.LeftControl, Enum.KeyCode.RightControl) or tapSprint) and ahead > 0
 		and not sneaking
+	-- Minecraft: no sprinting with 3 drumsticks or less (survival / adventure; flying always)
+	local playMode = gameMode()
+	if sprinting and not flying and (playMode == "survival" or playMode == "adventure") and (tonumber(player:GetAttribute("McFood")) or 20) <= 6 then
+		sprinting = false
+		tapSprint = false
+	end
 	-- swimming (Minecraft's updateSwimming): starts sprinting with the eyes under water, goes on while sprinting in
 	-- water (also at the surface); not in creative flight, not as a spectator
 	if swimming then
