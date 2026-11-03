@@ -71,20 +71,22 @@ end
 --[[
 	A block as an item icon: the cube seen from above at an angle (like Minecraft draws blocks in the inventory) -
 	top face full bright, left face (Minecraft: north) a bit darker, right face (east) darker still. size x size
-	pixels, transparent around. Transparent pixels of a texture (glass, leaves) stay transparent.
+	pixels, transparent around. Transparent pixels of a texture (glass, leaves) stay transparent. thickness < 1 = a
+	thin block lying at the bottom (a closed trapdoor: 3/16), its sides show the whole side picture.
 
 	Projection of the unit cube: top corner V0, x axis to the right-down (a, b), z axis to the left-down (-a, b),
 	y axis up (0, -h). For every pixel the face and its texture position are found by solving that backwards.
 ]]
-function Images.blockIcon(top: Picture, left: Picture, right: Picture, size: number): Picture
+function Images.blockIcon(top: Picture, left: Picture, right: Picture, size: number, thickness: number?): Picture
 	local out = buffer.create(size * size * 4) -- all 0 = transparent
 	local edge = size * 0.6
 	local a = edge * 0.70710678 -- cos 45
 	local b = edge * 0.35355339 -- sin 45 * sin 30
-	local h = edge * 0.8660254 -- cos 30
-	local height = 2 * b + h
+	local full = edge * 0.8660254 -- cos 30
+	local h = full * (thickness or 1) -- a thin block (trapdoor: 3/16) lies at the bottom of the cube's place
+	local height = 2 * b + full
 	local cx = size / 2
-	local topY = (size - height) / 2
+	local topY = (size - height) / 2 + (full - h)
 	for py = 0, size - 1 do
 		for px = 0, size - 1 do
 			local qx, qy = px + 0.5 - cx, py + 0.5 - topY

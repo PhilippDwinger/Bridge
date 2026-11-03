@@ -127,7 +127,8 @@ local attackRemote = remote("RemoteEvent", "Attack") -- client: (NPC model) hits
 local fallRemote = remote("RemoteEvent", "Fall") -- client: (blocks fallen) - Minecraft's fall damage
 local hurtRemote = remote("RemoteEvent", "Hurt") -- server -> client: (amount, from position or nil) red flash, knockback
 local getSkin = remote("RemoteFunction", "GetSkin") -- client asks: (skin key) -> {w, h, pixels} (64 x 64)
-local chatRemote = remote("RemoteEvent", "Chat") -- client: (text) / server -> client: ("mc", kind, text, from) | ("reply", lines)
+local chatRemote = remote("RemoteEvent", "Chat")
+local swingRemote = remote("RemoteEvent", "Swing") -- client: hit into the air (the arm swings, Minecraft sees it) -- client: (text) / server -> client: ("mc", kind, text, from) | ("reply", lines)
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -140,15 +141,77 @@ end
 -- region blocks -> parts
 -- One place that decides how a Minecraft block looks: every full-cube block with pictures from Minecraft gets its own
 -- parts with textures, all other blocks (slabs, flowers, ...) are the same grey cube.
+-- Blocks with a shape of their own (trapdoors) come with their state: "minecraft:oak_trapdoor[facing=north,half=bottom,open=false]"
+local function baseName(name)
+	return string.match(name, "^([^%[]+)") or name
+end
+
+local function blockState(name)
+	local props = {}
+	local inner = string.match(name, "%[(.*)%]")
+	for key, value in string.gmatch(inner or "", "([%w_]+)=([%w_]+)") do
+		props[key] = value
+	end
+	return props
+end
+
+local function stateName(base, props) -- always in this order (the mod writes it the same way)
+	return string.format("%s[facing=%s,half=%s,open=%s]", base, props.facing, props.half, props.open)
+end
+
 local function renderKey(name)
 	if name == nil or AIR[name] then
 		return nil
 	end
 	local assets = world.assets
-	if assets and assets.blocks[name] then
-		return name
+	local look = assets and assets.blocks[baseName(name)]
+	if look then
+		return if look.shape then name else baseName(name) -- a shape: every state looks different
 	end
 	return "placeholder"
+end
+
+-- A trapdoor in its block (Minecraft's TrapDoorBlock shapes): size + offset of its middle in blocks, the thin axis
+local THIN = 3 / 16
+local function trapdoorBox(props)
+	if props.open ~= "true" then
+		local y = if props.half == "top" then 0.5 - THIN / 2 else -0.5 + THIN / 2
+		return Vector3.new(1, THIN, 1), Vector3.new(0, y, 0), "Y"
+	end
+	local facing = props.facing
+	if facing == "north" or facing == "south" then
+		return Vector3.new(1, 1, THIN), Vector3.new(0, 0, if facing == "north" then 0.5 - THIN / 2 else -0.5 + THIN / 2), "Z"
+	end
+	return Vector3.new(THIN, 1, 1), Vector3.new(if facing == "west" then 0.5 - THIN / 2 else -0.5 + THIN / 2, 0, 0), "X"
+end
+
+-- the big sides get the whole picture, the thin ones the 3 pixel strip (lying or standing)
+local function shapeTrapdoor(part, key, look, scale, center)
+	local size, offset, thin = trapdoorBox(blockState(key))
+	part.Size = size * scale
+	part.CFrame = CFrame.new(center + offset * scale)
+	for _, face in ipairs(FACES) do
+		local normal = face[1]
+		local faceSize = if normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom then Vector2.new(part.Size.X, part.Size.Z)
+			elseif normal == Enum.NormalId.Left or normal == Enum.NormalId.Right then Vector2.new(part.Size.Z, part.Size.Y)
+			else Vector2.new(part.Size.X, part.Size.Y)
+		local big = (thin == "Y" and (normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom))
+			or (thin == "Z" and (normal == Enum.NormalId.Front or normal == Enum.NormalId.Back))
+			or (thin == "X" and (normal == Enum.NormalId.Left or normal == Enum.NormalId.Right))
+		local texture = Instance.new("Texture")
+		texture.Name = "McTexture"
+		texture.Face = normal
+		if big then
+			texture.StudsPerTileU = scale
+			texture.StudsPerTileV = scale
+			texture:SetAttribute("McTexture", look.full)
+		else
+			texture.StudsPerTileU = faceSize.X
+			texture.StudsPerTileV = faceSize.Y
+			texture:SetAttribute("McTexture", if faceSize.X < faceSize.Y then look.edgeV else look.edge)
+		end
+		texture.Parent = part
+	end
 end
 
 local function cellIndex(x, y, z) -- 1-based, order y, z, x (as the mod sends it)
@@ -169,9 +232,10 @@ local function meshSection(section)
 				local start = cellIndex(x, y, z)
 				local key = keys[start]
 				if key and not done[start] then
+					local single = string.find(key, "[", 1, true) ~= nil -- a shape (trapdoor): never merged
 					local function same(cx, cy, cz)
 						local i = cellIndex(cx, cy, cz)
-						return keys[i] == key and not done[i]
+						return not single and keys[i] == key and not done[i]
 					end
 					local w = 1
 					while x + w < 16 and same(x + w, y, z) do
@@ -265,8 +329,14 @@ local function renderSection(chunk, sectionY, section, force)
 			(blockY - minY + box.h / 2) * scale,
 			(blockZ + box.d / 2) * scale
 		)
-		local look = world.assets and world.assets.blocks[box.key]
-		if look then
+		local look = world.assets and world.assets.blocks[baseName(box.key)]
+		if look and look.shape == "trapdoor" then
+			part.Name = box.key
+			part.Color = Color3.fromRGB(look.color[1], look.color[2], look.color[3])
+			part.Transparency = 1 -- (it has holes: only the pictures show)
+			part.CastShadow = false
+			shapeTrapdoor(part, box.key, look, scale, part.CFrame.Position)
+		elseif look then
 			-- Textured block: the colour shows until the client has made the pictures; one tile = one block.
 			-- Glass / leaves: the part is invisible, only the pictures (with their holes) show.
 			part.Name = box.key
@@ -330,9 +400,9 @@ local function noticeBlocks(names)
 	if not assets or not assets.available then
 		return
 	end
-	for _, name in ipairs(names) do
-		if type(name) == "string" and not AIR[name] and not assets.blocks[name] and not assets.other[name]
-			and not assets.asked[name] then
+	for _, fullName in ipairs(names) do
+		local name = if type(fullName) == "string" then baseName(fullName) else nil
+		if name and not AIR[name] and not assets.blocks[name] and not assets.other[name] and not assets.asked[name] then
 			assets.asked[name] = true
 			table.insert(askQueue, name)
 		end
@@ -531,7 +601,11 @@ function mergeBlocks(assets, result)
 	end
 	for name, look in pairs(result.blocks or {}) do
 		local complete = type(look) == "table" and look.cube == true and type(look.faces) == "table"
-		if complete then
+		if type(look) == "table" and look.shape == "trapdoor" then
+			-- a trapdoor: its whole picture + the two edge strips
+			complete = assets.textures[look.full] ~= nil and assets.textures[look.edge] ~= nil
+				and assets.textures[look.edgeV] ~= nil and type(look.faces) == "table"
+		elseif complete then
 			for _, face in ipairs(FACES) do
 				if not assets.textures[look.faces[face[2]]] then
 					complete = false
@@ -883,8 +957,11 @@ local function swingArm(player)
 	end
 end
 
-local function onEdit(player, action, x, y, z, itemId)
-	if (action ~= "place" and action ~= "break") or not isWhole(x) or not isWhole(y) or not isWhole(z) then
+local HORIZONTAL = { north = true, south = true, east = true, west = true }
+
+local function onEdit(player, action, x, y, z, itemId, placement)
+	if (action ~= "place" and action ~= "break" and action ~= "use") or not isWhole(x) or not isWhole(y)
+		or not isWhole(z) then
 		return
 	end
 	local info = world.info
@@ -904,7 +981,17 @@ local function onEdit(player, action, x, y, z, itemId)
 	end
 	local current = blockAt(x, y, z)
 	local name
-	if action == "break" then
+	local extra = {}
+	if action == "use" then
+		-- open / close a wooden trapdoor (iron ones only with redstone, like Minecraft)
+		local base = baseName(current)
+		if not string.find(base, "_trapdoor", 1, true) or base == "minecraft:iron_trapdoor" then
+			return
+		end
+		local props = blockState(current)
+		props.open = if props.open == "true" then "false" else "true"
+		name = stateName(base, props)
+	elseif action == "break" then
 		if AIR[current] then
 			return
 		end
@@ -915,6 +1002,13 @@ local function onEdit(player, action, x, y, z, itemId)
 			return
 		end
 		name = item.block
+		if string.find(name, "_trapdoor", 1, true) then
+			-- the client did Minecraft's placement: which side it hangs on, up or down
+			local facing = if type(placement) == "table" and HORIZONTAL[placement.facing] then placement.facing else "north"
+			local half = if type(placement) == "table" and placement.half == "top" then "top" else "bottom"
+			extra = { facing = facing, half = half }
+			name = stateName(name, { facing = facing, half = half, open = "false" })
+		end
 	end
 	-- Shown at once; Minecraft confirms it over mcworld.changes (the same block again)
 	applyBlocks({ { x, y, z, name } })
@@ -925,7 +1019,9 @@ local function onEdit(player, action, x, y, z, itemId)
 			x = x,
 			y = y,
 			z = z,
-			block = if action == "place" then name else nil,
+			block = if action == "place" then baseName(name) else nil,
+			facing = extra.facing,
+			half = extra.half,
 			player = player.Name,
 		}, { Timeout = 10 })
 		if not ok or type(result) ~= "table" or result.ok ~= true then
@@ -938,6 +1034,19 @@ local function onEdit(player, action, x, y, z, itemId)
 end
 
 editRemote.OnServerEvent:Connect(onEdit)
+
+-- A hit into the air: no block, nobody - Minecraft still swings the arm (the mannequin too)
+local swingTokens = {}
+swingRemote.OnServerEvent:Connect(function(player)
+	local now = os.clock()
+	if now - (swingTokens[player] or 0) >= 0.1 then
+		swingTokens[player] = now
+		swingArm(player)
+	end
+end)
+Players.PlayerRemoving:Connect(function(player)
+	swingTokens[player] = nil
+end)
 
 -- region health + damage
 local function setupHealth(character)

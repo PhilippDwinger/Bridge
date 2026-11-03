@@ -83,7 +83,8 @@ local function chatFocused(): boolean
 end
 
 local function guiOpen(): boolean
-	return player:GetAttribute("McGuiOpen") == true or GuiService.MenuIsOpen or chatFocused()
+	return player:GetAttribute("McGuiOpen") == true or player:GetAttribute("McMenuOpen") == true or GuiService.MenuIsOpen
+		or chatFocused()
 end
 
 local function keyDown(...): boolean
@@ -174,8 +175,8 @@ end
 
 -- Minecraft only jumps standing on something. Roblox's humanoid feels the floor a bit before it touches it (and
 -- would jump out of the air): here the feet must really be on a block.
-local function onGround(humanoid: Humanoid, root: BasePart): boolean
-	if humanoid.FloorMaterial == Enum.Material.Air or root.AssemblyLinearVelocity.Y < -1 then
+local function onGround(root: BasePart): boolean
+	if root.AssemblyLinearVelocity.Y < -1 then
 		return false
 	end
 	groundParams.FilterDescendantsInstances = { root.Parent :: Instance }
@@ -207,6 +208,7 @@ local function stayOnEdge(root: BasePart, move: Vector3, speed: number): Vector3
 	return Vector3.new(x, 0, z)
 end
 
+local lastJump = -math.huge
 local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: number)
 	local forward = Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
 	local right = Vector3.new(math.cos(yaw), 0, -math.sin(yaw))
@@ -229,7 +231,23 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 		move = stayOnEdge(root, move, speed)
 	end
 	humanoid:Move(move, false)
-	humanoid.Jump = not free and keyDown(Enum.KeyCode.Space) and onGround(humanoid, root)
+	-- Jumping like Minecraft: only with the feet on a block, held = again after landing, at most every 10 ticks
+	local space = not free and keyDown(Enum.KeyCode.Space)
+	if not space then
+		lastJump = -math.huge
+	end
+	if space and humanoid.Health > 0 and os.clock() - lastJump >= 0.5 and onGround(root) then
+		lastJump = os.clock()
+		if humanoid:GetState() == Enum.HumanoidStateType.Freefall then
+			-- on the very edge of a block Roblox's humanoid thinks it falls (it only looks under its middle): jump anyway
+			local velocity = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = Vector3.new(velocity.X, Character.JUMP_VELOCITY, velocity.Z)
+		else
+			humanoid.Jump = true
+		end
+	else
+		humanoid.Jump = false
+	end
 	humanoid.AutoRotate = false
 	if humanoid.Health > 0 then
 		root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0) -- the body turns with the view
@@ -316,7 +334,7 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 	pollF5()
 	local free = guiOpen()
 	if free then
-		if player:GetAttribute("McGuiOpen") ~= true then -- (the inventory handles the mouse itself)
+		if player:GetAttribute("McGuiOpen") ~= true and player:GetAttribute("McMenuOpen") ~= true then -- (they do it)
 			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 			UserInputService.MouseIconEnabled = true
 		end
@@ -360,7 +378,8 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 	end
 	hideCharacter(character, view == 1)
 	crosshair.Visible = view == 1 and not free
-	fov += ((if sprinting then FOV * SPRINT_FOV else FOV) - fov) * (1 - math.exp(-dt * 10))
+	local baseFov = tonumber(player:GetAttribute("McFov")) or FOV -- (the settings menu, M)
+	fov += ((if sprinting then baseFov * SPRINT_FOV else baseFov) - fov) * (1 - math.exp(-dt * 10))
 	camera.FieldOfView = fov
 	player:SetAttribute("McEye", eye)
 	player:SetAttribute("McLook", look)

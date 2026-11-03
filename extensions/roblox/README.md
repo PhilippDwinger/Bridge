@@ -174,8 +174,8 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Bilder macht das Client-Script `MinecraftClient` (EditableImage gibt es nur auf dem Client).
 - **Hotbar + Inventar** mit Minecrafts eigener GUI-Grafik: Hotbar unten (Tasten **1–9**), Inventar mit **E**
   (Item anklicken = aufnehmen, anderes Feld anklicken = ablegen oder tauschen). Kreativmodus: Items gehen nie aus.
-  22 Blöcke: Gras, Erde, Stein, Bruchstein, Eichenstamm, -bretter, -laub, Glas, Sand, Kies, Sandstein, Ziegel,
-  Steinziegel, Werkbank, Bücherregal, weiße Wolle, Schnee, Kohle-, Eisen-, Gold-, Diamanterz, Obsidian (die ersten 9
+  23 Blöcke: Gras, Erde, Stein, Bruchstein, Eichenstamm, -bretter, -laub, Glas, Sand, Kies, Sandstein, Ziegel,
+  Steinziegel, Werkbank, Bücherregal, weiße Wolle, Schnee, Kohle-, Eisen-, Gold-, Diamanterz, Obsidian, Eichen-Falltür (die ersten 9
   in der Hotbar). Icons als kleine 3D-Würfel.
 - **Leben + Schaden wie Minecraft:** 20 HP = 10 Herzen über der Hotbar (Roblox' eigene Leiste ist aus).
   Fallschaden ab 4 Blöcken (1 pro Block über 3). **Linksklick auf einen Minecraft-Spieler** schlägt ihn (Minecraft
@@ -184,7 +184,9 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Minecraft-Spielers zeigt sich über seinem NPC, wenn er nicht voll ist.
 - **Alle sind Minecraft-Spieler** (`MinecraftCharacter`, ReplicatedStorage): kein Roblox-Rig mehr, sondern
   Minecrafts Spielermodell (Kopf 8×8×8 Pixel, Körper 8×12×4, Arme 4 bzw. 3 „slim“, Beine, zweite Skin-Schicht),
-  Maßstab wie Minecraft (1 Skin-Pixel = 0,176 Studs), Hitbox 0,6 × 1,8 Blöcke. Gelenke wie in Minecraft: jedes Teil
+  Maßstab wie Minecraft (1 Skin-Pixel = 0,176 Studs). Der Root-Part **ist** Minecrafts Hitbox (0,6 × 1,8 Blöcke) von
+  den Füßen an (Hüfthöhe 0, ohne Reibung): man steht auf einem Block, solange irgendein Teil der Hitbox darüber ist –
+  an Kanten sinken die Beine nicht mehr in den Block. Gelenke wie in Minecraft: jedes Teil
   hängt einzeln am `ModelRoot` (den Füßen). Der Server legt den `StarterCharacter` an und schaltet Roblox' `Animate` ab.
 - **Skins** (Command `mcworld.skin`): Minecraft-Spieler tragen ihren eigenen Skin, Roblox-Spieler einen der 18
   Minecraft-Standardskins (fest nach UserId, wie Minecraft es mit UUIDs macht) – in Roblox und an ihrem Mannequin.
@@ -210,8 +212,18 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   (Spieler, `/say`, Beitritte, Tode …) kommt in den Roblox-Chat. **`/…`** ist ein Minecraft-Command: er läuft als
   dein Mannequin (`@s`, `~ ~ ~`, `/tp @s …` bewegt dich mit), die Antwort siehst nur du. Rechte: Mod-Config
   `robloxCommandLevel` (Standard 2 = OP-Commands wie `/time`, `/gamemode`, `/give`, `/tp`).
-- **Arm schwingen:** Schlägt oder baut jemand, schwingt der Arm (Minecrafts Schlag-Animation) – in Roblox und in
-  Minecraft (Mannequins der Roblox-Spieler). Getroffene werden kurz rot wie in Minecraft.
+- **Arm schwingen:** Schlägt oder baut jemand, schwingt der Arm (Minecrafts Schlag-Animation) – auch ein Schlag in
+  die Luft (Remote `Swing`), in Roblox und in Minecraft (Mannequins der Roblox-Spieler). Getroffene werden kurz rot.
+- **Einstellungen (M)** im Minecraft-Look (Minecrafts Buttons/Slider aus dem Spiel): Sichtfeld 30–110 (Normal 70,
+  Quake Pro 110) und **Shader**: Aus (das Spiel wie es ist), Sanft (warmes Licht, weiche Schatten, Dunst, Wolken),
+  Kräftig (satte Farben, Leuchten, Sonnenstrahlen, goldener Dunst) – `MinecraftShaders`. Nur Aussehen, nur auf dem
+  eigenen Client, nichts geht über Bridge oder an andere. Gilt für die Sitzung.
+- **Falltür (Eichen-Falltür, Item 23):** genau wie Minecraft – 3 Pixel dick, Setzen wie Minecrafts
+  `getStateForPlacement` (seitlich angeklickt: hängt an der Seite, oben/unten nach Klickhöhe; oben/unten angeklickt:
+  zeigt zu dir), **Rechtsklick** öffnet/schließt (Minecrafts eigener Code mit Sound, Eisen nur mit Redstone),
+  Schleichen + Item setzt stattdessen einen Block. Kollision und Rahmen haben ihre echte Form. Der Zustand kommt mit
+  dem Namen: `minecraft:oak_trapdoor[facing=north,half=bottom,open=false]`; Redstone in Minecraft öffnet sie auch in
+  Roblox.
 - **Bauen:** **Linksklick** baut den Block ab, auf den du schaust (halten = weiter), **Rechtsklick** setzt das
   gewählte Item. Gezielt wird wie in Minecraft von den Augen aus (auch von hinten/vorne). Reichweite 5 Blöcke, ein
   schwarzer Rahmen zeigt den Block. Der Server prüft es, zeigt es sofort und schickt es über Bridge an Minecraft

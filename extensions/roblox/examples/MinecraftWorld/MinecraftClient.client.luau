@@ -31,6 +31,7 @@ local editRemote = remotes:WaitForChild("Edit") :: RemoteEvent
 local attackRemote = remotes:WaitForChild("Attack") :: RemoteEvent
 local fallRemote = remotes:WaitForChild("Fall") :: RemoteEvent
 local hurtRemote = remotes:WaitForChild("Hurt") :: RemoteEvent
+local swingRemote = remotes:WaitForChild("Swing") :: RemoteEvent
 local getSkin = remotes:WaitForChild("GetSkin") :: RemoteFunction
 
 local player = Players.LocalPlayer
@@ -134,8 +135,9 @@ local function iconContent(item): Content?
 	local top, north, east = textures[faces.up], textures[faces.north], textures[faces.east]
 	if top and north and east then
 		local source = buffer.tostring(top.pixels) .. buffer.tostring(north.pixels) .. buffer.tostring(east.pixels)
+		local thickness = if look.shape == "trapdoor" then 3 / 16 else 1
 		return makeImage("icon:" .. item.id, source, function()
-			return Images.blockIcon(top, north, east, ICON_SIZE)
+			return Images.blockIcon(top, north, east, ICON_SIZE, thickness)
 		end)
 	end
 	return makeImage("icon:" .. item.id, "plain", function()
@@ -703,7 +705,8 @@ local function findTarget()
 		return
 	end
 	local normal = Vector3.new(math.round(result.Normal.X), math.round(result.Normal.Y), math.round(result.Normal.Z))
-	target = { x = x, y = y, z = z, normal = normal }
+	target = { x = x, y = y, z = z, normal = normal, hit = result.Position, name = result.Instance.Name,
+		part = result.Instance }
 end
 
 -- Would a block at x, y, z stand in my own character?
@@ -726,8 +729,55 @@ local function swingArm()
 	player:SetAttribute("McSwingAt", os.clock())
 end
 
-local function act(action: string)
-	if (action == "break" and (targetNpc or target)) or (action == "place" and target and slots[selected]) then
+-- Blocks you can use with the right mouse button (Minecraft: wooden trapdoors open / close by hand, iron ones not)
+local function usable(name: string?): boolean
+	return type(name) == "string" and string.find(name, "_trapdoor[", 1, true) ~= nil
+		and string.find(name, "iron_trapdoor", 1, true) == nil
+end
+
+local DIRECTIONS = { -- normal -> Minecraft direction
+	{ Vector3.new(0, 0, -1), "north" }, { Vector3.new(0, 0, 1), "south" }, { Vector3.new(1, 0, 0), "east" },
+	{ Vector3.new(-1, 0, 0), "west" }, { Vector3.new(0, 1, 0), "up" }, { Vector3.new(0, -1, 0), "down" },
+}
+local OPPOSITE = { north = "south", south = "north", east = "west", west = "east" }
+local function direction(normal: Vector3): string
+	for _, entry in ipairs(DIRECTIONS) do
+		if (entry[1] - normal).Magnitude < 0.01 then
+			return entry[2]
+		end
+	end
+	return "up"
+end
+
+-- How a block is placed (Minecraft's getStateForPlacement) - for now the trapdoor: clicked on the side of a block =
+-- it hangs on that side, up or down after where you clicked; clicked on top / below = it faces you.
+local function placementState(item, x: number, y: number): { [string]: string }?
+	if type(item.block) ~= "string" or not string.find(item.block, "_trapdoor", 1, true) or not target then
+		return nil
+	end
+	local face = direction(target.normal)
+	if face ~= "up" and face ~= "down" then
+		local inBlock = (target.hit.Y / assets.scale + assets.minY) - y -- 0 .. 1 inside the new block
+		return { facing = face, half = if inBlock > 0.5 then "top" else "bottom" }
+	end
+	local look = player:GetAttribute("McLook")
+	local lookVector = if typeof(look) == "Vector3" then look else Vector3.new(0, 0, -1)
+	local horizontal = if math.abs(lookVector.X) > math.abs(lookVector.Z)
+		then (if lookVector.X > 0 then "east" else "west")
+		else (if lookVector.Z > 0 then "south" else "north")
+	return { facing = OPPOSITE[horizontal], half = if face == "up" then "bottom" else "top" }
+end
+
+local function act(action: string, repeated: boolean?)
+	if action == "break" and not targetNpc and not target then
+		-- a hit into the air: Minecraft swings the arm anyway (not again while the button is only held)
+		if not repeated then
+			swingArm()
+			swingRemote:FireServer()
+		end
+		return
+	end
+	if action == "break" then
 		swingArm()
 	end
 	if action == "break" and targetNpc then
@@ -739,25 +789,37 @@ local function act(action: string)
 	end
 	if action == "break" then
 		editRemote:FireServer("break", target.x, target.y, target.z)
-	else
-		local item = slots[selected]
-		if not item or not item.block then
-			return
-		end
-		local x, y, z = target.x + target.normal.X, target.y + target.normal.Y, target.z + target.normal.Z
-		if inMyCharacter(x, y, z) then
-			return
-		end
-		editRemote:FireServer("place", x, y, z, item.id)
+		return
 	end
+	local item = slots[selected]
+	local character = player.Character
+	local sneaking = character and character:GetAttribute("McSneak") == true
+	if usable(target.name) and not (sneaking and item) then
+		-- right click on a trapdoor: open / close it (Minecraft does it, with its sound)
+		swingArm()
+		editRemote:FireServer("use", target.x, target.y, target.z)
+		return
+	end
+	if not item or not item.block then
+		return
+	end
+	local x, y, z = target.x + target.normal.X, target.y + target.normal.Y, target.z + target.normal.Z
+	if inMyCharacter(x, y, z) then
+		return
+	end
+	swingArm()
+	editRemote:FireServer("place", x, y, z, item.id, placementState(item, x, y))
 end
 
 local held = {} -- "break" / "place" -> time of the last action while the button is held
 
 UserInputService.InputBegan:Connect(function(input, processed)
-	if input.KeyCode == Enum.KeyCode.E and not processed then
+	if input.KeyCode == Enum.KeyCode.E and not processed and player:GetAttribute("McMenuOpen") ~= true then
 		setInventory(not inventoryOpen)
 		return
+	end
+	if player:GetAttribute("McMenuOpen") == true then
+		return -- (the settings menu is open)
 	end
 	if processed or inventoryOpen then
 		return
@@ -797,8 +859,14 @@ end)
 RunService.RenderStepped:Connect(function()
 	findTarget()
 	if target then
-		selectionPart.Size = Vector3.one * (assets.scale + 0.04)
-		selectionPart.CFrame = CFrame.new(blockCenter(target.x, target.y, target.z))
+		if string.find(target.name, "[", 1, true) and target.part:IsA("BasePart") then
+			-- a block with its own shape (trapdoor): the outline of that shape, like Minecraft
+			selectionPart.Size = target.part.Size + Vector3.one * 0.04
+			selectionPart.CFrame = target.part.CFrame
+		else
+			selectionPart.Size = Vector3.one * (assets.scale + 0.04)
+			selectionPart.CFrame = CFrame.new(blockCenter(target.x, target.y, target.z))
+		end
 		selectionBox.Visible = true
 	else
 		selectionBox.Visible = false
@@ -807,7 +875,7 @@ RunService.RenderStepped:Connect(function()
 	for action, at in pairs(held) do
 		if now - at >= REPEAT then
 			held[action] = now
-			act(action)
+			act(action, true)
 		end
 	end
 	if inventoryOpen then
@@ -824,6 +892,241 @@ RunService.RenderStepped:Connect(function()
 end)
 -- endregion
 
+
+-- region settings (M): field of view + shaders - only for this player, nothing goes to Minecraft or the others
+local refreshMenu -- below
+local Shaders = require(ReplicatedStorage:WaitForChild("MinecraftShaders") :: any)
+local settings = { fov = 70, shader = "off" }
+local menuOpen = false
+local menuPage = "main"
+
+local menu = Instance.new("Frame")
+menu.Name = "Settings"
+menu.BackgroundColor3 = Color3.new(0, 0, 0)
+menu.BackgroundTransparency = 0.35
+menu.Size = UDim2.fromScale(1, 1)
+menu.Visible = false
+menu.ZIndex = 40
+menu.Parent = screen
+local panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.AnchorPoint = Vector2.new(0.5, 0.5)
+panel.Position = UDim2.fromScale(0.5, 0.5)
+panel.Size = UDim2.fromOffset(310, 200)
+panel.BackgroundTransparency = 1
+panel.ZIndex = 41
+panel.Parent = menu
+scaled(panel)
+
+local function label(parent: Instance, text: string, y: number, color: Color3?): TextLabel
+	local item = Instance.new("TextLabel")
+	item.BackgroundTransparency = 1
+	item.Position = UDim2.fromOffset(0, y)
+	item.Size = UDim2.new(1, 0, 0, 10)
+	item.Font = Enum.Font.Arcade
+	item.TextSize = 9
+	item.Text = text
+	item.TextColor3 = color or Color3.new(1, 1, 1)
+	item.TextStrokeTransparency = 0.5
+	item.ZIndex = 43
+	item.Parent = parent
+	return item
+end
+
+-- A Minecraft button (its own picture, 9-slice like Minecraft draws it), x / y / w in Minecraft pixels
+local buttons = {}
+local function button(parent: Instance, text: string, x: number, y: number, w: number, onClick: () -> ())
+	local back = image(parent, "Button", x, y, w, 20, 42)
+	back.ScaleType = Enum.ScaleType.Slice
+	back.SliceCenter = Rect.new(3, 3, 197, 17)
+	back.BackgroundColor3 = Color3.fromRGB(110, 110, 110)
+	back.BorderSizePixel = 0
+	local click = Instance.new("TextButton")
+	click.BackgroundTransparency = 1
+	click.Size = UDim2.fromScale(1, 1)
+	click.Font = Enum.Font.Arcade
+	click.TextSize = 9
+	click.Text = text
+	click.TextColor3 = Color3.new(1, 1, 1)
+	click.TextStrokeTransparency = 0.5
+	click.ZIndex = 44
+	click.Parent = back
+	local entry = { back = back, click = click, hover = false }
+	click.MouseEnter:Connect(function()
+		entry.hover = true
+		refreshMenu()
+	end)
+	click.MouseLeave:Connect(function()
+		entry.hover = false
+		refreshMenu()
+	end)
+	click.MouseButton1Click:Connect(onClick)
+	table.insert(buttons, entry)
+	return entry
+end
+
+local mainPage = Instance.new("Frame")
+mainPage.BackgroundTransparency = 1
+mainPage.Size = UDim2.fromScale(1, 1)
+mainPage.ZIndex = 41
+mainPage.Parent = panel
+local shaderPage = mainPage:Clone()
+shaderPage.Parent = panel
+label(mainPage, "Optionen", 0)
+label(shaderPage, "Shader", 0)
+local shaderHint = label(shaderPage, "", 110, Color3.fromRGB(170, 170, 170))
+
+-- the field of view slider (Minecraft: 30 .. 110, "Normal" = 70)
+local slider = image(mainPage, "Fov", 55, 30, 200, 20, 42)
+slider.ScaleType = Enum.ScaleType.Slice
+slider.SliceCenter = Rect.new(3, 3, 197, 17)
+slider.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+slider.BorderSizePixel = 0
+local handle = image(slider, "Handle", 0, 0, 8, 20, 43)
+handle.ScaleType = Enum.ScaleType.Slice
+handle.SliceCenter = Rect.new(2, 2, 6, 17)
+handle.BackgroundColor3 = Color3.fromRGB(190, 190, 190)
+handle.BorderSizePixel = 0
+local sliderText = label(slider, "", 5, nil)
+local dragging = false
+local sliderHover = false
+
+local function fovText(value: number): string
+	if value == 70 then
+		return "Sichtfeld: Normal"
+	elseif value == 110 then
+		return "Sichtfeld: Quake Pro"
+	end
+	return "Sichtfeld: " .. tostring(value)
+end
+
+local shaderButtons = {}
+
+refreshMenu = function()
+	menu.Visible = menuOpen
+	mainPage.Visible = menuPage == "main"
+	shaderPage.Visible = menuPage == "shaders"
+	local normal, highlighted = gui("button"), gui("button_highlighted")
+	for _, entry in ipairs(buttons) do
+		local picture = if entry.hover then highlighted or normal else normal
+		setPicture(entry.back, picture)
+		entry.back.BackgroundTransparency = if picture then 1 else (if entry.hover then 0.1 else 0.3)
+	end
+	local sliderPicture = gui("slider")
+	setPicture(slider, sliderPicture)
+	slider.BackgroundTransparency = if sliderPicture then 1 else 0.3
+	local handlePicture = if sliderHover or dragging then gui("slider_handle_highlighted") or gui("slider_handle")
+		else gui("slider_handle")
+	setPicture(handle, handlePicture)
+	handle.BackgroundTransparency = if handlePicture then 1 else 0
+	handle.Position = UDim2.fromOffset(math.floor((settings.fov - 30) / 80 * 192 + 0.5), 0)
+	sliderText.Text = fovText(settings.fov)
+	for id, entry in pairs(shaderButtons) do
+		local name = entry.name
+		entry.click.Text = if settings.shader == id then "> " .. name .. " <" else name
+		if entry.hover then
+			shaderHint.Text = entry.description
+		end
+	end
+	if not next(shaderButtons) or not (function()
+		for _, entry in pairs(shaderButtons) do
+			if entry.hover then
+				return true
+			end
+		end
+		return false
+	end)() then
+		for _, shader in ipairs(Shaders.LIST) do
+			if shader.id == settings.shader then
+				shaderHint.Text = shader.description
+			end
+		end
+	end
+end
+
+local function setFov(mouseX: number)
+	local left = slider.AbsolutePosition.X
+	local width = math.max(slider.AbsoluteSize.X, 1)
+	local value = math.clamp(math.floor(30 + (mouseX - left) / width * 80 + 0.5), 30, 110)
+	if value ~= settings.fov then
+		settings.fov = value
+		player:SetAttribute("McFov", value) -- MinecraftPlayer uses it for the camera
+	end
+	refreshMenu()
+end
+
+local sliderButton = Instance.new("TextButton")
+sliderButton.BackgroundTransparency = 1
+sliderButton.Text = ""
+sliderButton.Size = UDim2.fromScale(1, 1)
+sliderButton.ZIndex = 45
+sliderButton.Parent = slider
+sliderButton.MouseButton1Down:Connect(function(x)
+	dragging = true
+	setFov(x)
+end)
+sliderButton.MouseEnter:Connect(function()
+	sliderHover = true
+	refreshMenu()
+end)
+sliderButton.MouseLeave:Connect(function()
+	sliderHover = false
+	refreshMenu()
+end)
+UserInputService.InputChanged:Connect(function(input)
+	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		setFov(input.Position.X)
+	end
+end)
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
+		dragging = false
+		refreshMenu()
+	end
+end)
+
+local function setMenu(open: boolean)
+	menuOpen = open
+	menuPage = "main"
+	player:SetAttribute("McMenuOpen", open) -- MinecraftPlayer frees the mouse and stops walking
+	refreshMenu()
+end
+
+button(mainPage, "Shader ...", 55, 60, 200, function()
+	menuPage = "shaders"
+	refreshMenu()
+end)
+button(mainPage, "Fertig", 55, 120, 200, function()
+	setMenu(false)
+end)
+for index, shader in ipairs(Shaders.LIST) do
+	local entry = button(shaderPage, shader.name, 55, 20 + index * 24, 200, function()
+		settings.shader = shader.id
+		Shaders.apply(shader.id)
+		refreshMenu()
+	end)
+	entry.name = shader.name
+	entry.description = shader.description
+	shaderButtons[shader.id] = entry
+end
+button(shaderPage, "Fertig", 55, 130, 200, function()
+	menuPage = "main"
+	refreshMenu()
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or inventoryOpen or input.KeyCode ~= Enum.KeyCode.M then
+		return
+	end
+	setMenu(not menuOpen)
+end)
+RunService.RenderStepped:Connect(function()
+	if menuOpen then
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
+	end
+end)
+-- endregion
 
 -- region health: hearts, fall damage, getting hit
 local hearts = {}

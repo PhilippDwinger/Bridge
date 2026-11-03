@@ -58,6 +58,9 @@
       },
       "MinecraftAnimations": {
         "$path": "examples/MinecraftWorld/animations"
+      },
+      "MinecraftShaders": {
+        "$path": "examples/MinecraftWorld/MinecraftShaders.luau"
       }
     },
     "ServerStorage": {

@@ -163,7 +163,8 @@ shim.services.ReplicatedStorage = {
 }
 env = setmetatable({
 	game = game, workspace = workspaceRoot, Instance = Instance, Vector3 = Vector3, CFrame = CFrame, Enum = Enum,
-	Color3 = Color3, Vector2 = roblox.Vector2, task = task, warn = warn, buffer = buffer,
+	Color3 = Color3, Vector2 = roblox.Vector2, PhysicalProperties = roblox.PhysicalProperties, task = task, warn = warn,
+	buffer = buffer,
 	require = function(target)
 		return requireModule(string.sub(target, 8))
 	end,
@@ -243,6 +244,20 @@ local function observe()
 		result.paddy = { skin = paddy.Character:GetAttribute("McSkin"), slim = paddy.Character:GetAttribute("McSlim"),
 			skinUser = paddy.Character:GetAttribute("McSkinUser") }
 	end
+	result.trapdoors = {}
+	if worldFolder then
+		for _, part in ipairs(worldFolder:GetDescendants()) do
+			if part:IsA("BasePart") and string.find(part.Name, "_trapdoor[", 1, true) then
+				local textures = {}
+				for _, texture in ipairs(part:GetChildren()) do
+					textures[texture.Face.Name] = texture:GetAttribute("McTexture")
+				end
+				local p, size = part.CFrame.Position, part.Size
+				table.insert(result.trapdoors, { name = part.Name, pos = { p.X, p.Y, p.Z }, size = { size.X, size.Y, size.Z },
+					textures = textures, collide = part.CanCollide })
+			end
+		end
+	end
 	result.starterCharacter = starterPlayer:FindFirstChild("StarterCharacter") ~= nil
 	result.animateBlocked = starterScripts:FindFirstChild("Animate") ~= nil
 	result.gravity = workspaceRoot.Gravity
@@ -306,7 +321,7 @@ while os.clock() - started < scenario.seconds do
 				part:SetAttribute("SimBefore", true)
 				before += 1
 			end
-			editHandler(paddy, event.what, event.x, event.y, event.z, event.item)
+			editHandler(paddy, event.what, event.x, event.y, event.z, event.item, event.placement)
 			observations[event.name] = observe()
 			local kept = 0
 			for _, part in ipairs(chunk and chunk:GetChildren() or {}) do

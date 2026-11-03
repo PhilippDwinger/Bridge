@@ -27,10 +27,15 @@ local Character = {}
 local PIXEL = 3 / 16 * 0.9375 -- studs per skin pixel
 Character.PIXEL = PIXEL
 Character.STUDS_PER_BLOCK = 3
-Character.HIP_HEIGHT = 12 * PIXEL -- the legs
 Character.HITBOX = Vector3.new(1.8, 5.4, 1.8) -- Minecraft: 0.6 x 1.8 x 0.6 blocks
-Character.ROOT_SIZE = Vector3.new(1.8, 5.4 - 12 * PIXEL, 1.8) -- the root part = the hitbox above the legs
-Character.ROOT_HEIGHT = 12 * PIXEL + (5.4 - 12 * PIXEL) / 2 -- middle of the root part above the feet
+--[[
+	The root part IS Minecraft's hitbox, from the feet up (hip height 0): it stands on a block as long as any part of it
+	is over the block - like Minecraft. (With Roblox's usual hip height only the middle under the player counts: at an
+	edge the legs sank into the block.)
+]]
+Character.HIP_HEIGHT = 0
+Character.ROOT_SIZE = Character.HITBOX
+Character.ROOT_HEIGHT = 5.4 / 2 -- middle of the root part above the feet
 Character.EYE_HEIGHT = 1.62 * 3 -- Minecraft's eyes: 1.62 blocks, sneaking 1.27
 Character.SNEAK_EYE_HEIGHT = 1.27 * 3
 -- Minecraft's movement in studs (blocks x 3): walk 4.317, sprint 5.612, sneak 1.295 blocks/s, jump 1.2522 blocks
@@ -41,6 +46,7 @@ Character.JUMP_HEIGHT = 1.2522 * 3
 -- Gravity so that a jump takes as long as in Minecraft (top after 6 ticks, down after 12): 83.5 studs/s² - falls of
 -- 3 / 10 / 20 blocks then take 0.46 / 0.85 / 1.2 s like in Minecraft (0.45 / 0.85 / 1.2)
 Character.GRAVITY = 83.5
+Character.JUMP_VELOCITY = math.sqrt(2 * 83.5 * 1.2522 * 3) -- studs/s straight up at the start of a jump
 
 -- region the model
 --[[
@@ -158,6 +164,8 @@ function Character.build(options: { slim: boolean?, name: string? }?): Model
 	root.TopSurface = Enum.SurfaceType.Smooth
 	root.BottomSurface = Enum.SurfaceType.Smooth
 	root.CFrame = CFrame.new(0, Character.ROOT_HEIGHT, 0)
+	-- the hitbox slides on the blocks without friction (the Humanoid does the walking and the stopping)
+	root.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0, 0, 100, 1)
 	root.Parent = model
 	model.PrimaryPart = root
 
