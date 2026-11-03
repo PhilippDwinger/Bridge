@@ -2629,6 +2629,11 @@ inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c, d)
 		inOrder(player, function()
 			callPlayer(player, "state")
 		end)
+	elseif op == "trade" and isWhole(a) and a >= 0 and a < 64 then
+		-- a trade chosen in the villager's list
+		inOrder(player, function()
+			callPlayer(player, "trade", { index = a })
+		end)
 	elseif op == "button" and isWhole(a) and a >= 0 and a <= 64 then
 		-- a button of the open window (enchanting table offer ...): Minecraft's clickMenuButton
 		inOrder(player, function()
@@ -3084,7 +3089,21 @@ end)
 
 -- A Roblox player hits a Minecraft player's NPC: Minecraft does the damage (with knockback from our mannequin)
 local attackedAt = {}
+local interactAt = {}
 attackRemote.OnServerEvent:Connect(function(player, model, how, mobId)
+	if model == nil and type(mobId) == "number" and type(how) == "table" and how.use == true then
+		-- a right click on a mob (trading, milking, shearing, feeding ...): Minecraft's interactOn
+		local now = os.clock()
+		if now - (interactAt[player] or 0) < 0.2 then
+			return
+		end
+		interactAt[player] = now
+		swingArm(player)
+		inOrder(player, function()
+			callPlayer(player, "interact", { mob = mobId, feet = feetOf(player) })
+		end)
+		return
+	end
 	if model == nil and type(mobId) == "number" then
 		-- a mob: Minecraft's attack by his stand-in (the item in his hand, crit, sweep, knockback - Minecraft checks reach)
 		local now = os.clock()

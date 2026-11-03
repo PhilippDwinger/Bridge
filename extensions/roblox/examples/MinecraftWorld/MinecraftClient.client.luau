@@ -1067,6 +1067,7 @@ local function clickContainer(index: number, button: number)
 end
 
 local enchantButtons: { TextButton } = {}
+local tradeRows: { any } = {}
 local function refreshContainer()
 	local menu = state.menu
 	if type(menu) ~= "table" or type(menu.slots) ~= "table" then
@@ -1111,6 +1112,52 @@ local function refreshContainer()
 	for index = #menu.slots + 1, #containerSlots do
 		containerSlots[index].button.Visible = false
 		showStack(containerSlots[index].view, nil)
+	end
+	-- a villager's trades (left of its window like Minecraft): cost a, cost b -> result; a click picks it (the costs
+	-- go into the slots), then take the result like any slot
+	local trades = if type(menu.trades) == "table" then menu.trades else nil
+	for i = 1, 7 do
+		local row = tradeRows[i]
+		if not row and trades then
+			local button = Instance.new("TextButton")
+			button.Name = "Trade" .. i
+			button.Text = ""
+			button.AutoButtonColor = true
+			button.BorderSizePixel = 0
+			button.BackgroundColor3 = Color3.fromRGB(198, 198, 198)
+			button.BackgroundTransparency = 0.2
+			button.Position = UDim2.fromOffset(5, 18 + (i - 1) * 20)
+			button.Size = UDim2.fromOffset(88, 20)
+			button.ZIndex = 13
+			button.Parent = container
+			local arrow = Instance.new("TextLabel")
+			arrow.BackgroundTransparency = 1
+			arrow.Position = UDim2.fromOffset(53, 2)
+			arrow.Size = UDim2.fromOffset(12, 16)
+			arrow.Font = Enum.Font.Arcade
+			arrow.TextSize = 10
+			arrow.Text = ">"
+			arrow.TextColor3 = Color3.fromRGB(80, 80, 80)
+			arrow.ZIndex = 14
+			arrow.Parent = button
+			local index = i - 1
+			button.MouseButton1Click:Connect(function()
+				inventoryRemote:FireServer("trade", index)
+			end)
+			row = { button = button, a = slotView(button, "CostA", 4, 2, 14), b = slotView(button, "CostB", 30, 2, 14),
+				out = slotView(button, "Result", 68, 2, 14) }
+			tradeRows[i] = row
+		end
+		if row then
+			local trade = trades and trades[i]
+			row.button.Visible = type(trade) == "table"
+			if type(trade) == "table" then
+				showStack(row.a, if type(trade[1]) == "table" then trade[1] else nil)
+				showStack(row.b, if type(trade[2]) == "table" then trade[2] else nil)
+				showStack(row.out, if type(trade[3]) == "table" then trade[3] else nil)
+				row.button.BackgroundColor3 = if trade[4] == true then Color3.fromRGB(150, 110, 110) else Color3.fromRGB(198, 198, 198)
+			end
+		end
 	end
 	-- the enchanting table: Minecraft's three offers (levels it costs, the hint) - a click enchants (clickMenuButton)
 	local offers = if type(menu.enchant) == "table" then menu.enchant else nil
@@ -1693,6 +1740,10 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 		end
 		if mobsHere then
 			table.insert(aimAt, mobsHere)
+		end
+		local thingsHere = workspace:FindFirstChild("MinecraftThings") -- (the dragon, end crystals can be hit)
+		if thingsHere then
+			table.insert(aimAt, thingsHere)
 		end
 		rayParams.FilterDescendantsInstances = aimAt
 		local result = workspace:Raycast(origin, look * (reach() + 1) * assets.scale, rayParams)
@@ -2324,7 +2375,10 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 			end
 		elseif held.use and now - held.use >= REPEAT_USE then
 			held.use = now
-			if not startEating() and not startCharging() then
+			if targetMob ~= nil and not eating and not charging then
+				-- a right click on a mob: Minecraft's interaction (trading, milking, shearing, feeding ...)
+				attackRemote:FireServer(nil, { use = true }, targetMob)
+			elseif not startEating() and not startCharging() then
 				act("use", true)
 			end
 		end
@@ -3871,6 +3925,47 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 			else
 				thingPart(model, Vector3.one * scale * 0.98, Color3.fromRGB(150, 150, 150))
 			end
+		elseif kind == "minecraft:ender_dragon" then
+			-- (Minecraft draws the dragon with code, no model to take): a dark body, neck, head, wings, purple eyes
+			local body = thingPart(model, Vector3.new(4, 3, 7) * scale, Color3.fromRGB(25, 25, 30))
+			body.CFrame = CFrame.new(0, 0, 0)
+			local neck = thingPart(model, Vector3.new(1.5, 1.5, 4) * scale, Color3.fromRGB(30, 30, 36))
+			neck.CFrame = CFrame.new(0, 0.6 * scale, -5 * scale)
+			local head = thingPart(model, Vector3.new(2, 1.6, 2.6) * scale, Color3.fromRGB(35, 35, 40))
+			head.CFrame = CFrame.new(0, 0.8 * scale, -8 * scale)
+			for side = -1, 1, 2 do
+				local eye = thingPart(model, Vector3.new(0.4, 0.3, 0.1) * scale, Color3.fromRGB(220, 80, 255))
+				eye.Material = Enum.Material.Neon
+				eye.CFrame = CFrame.new(side * 0.6 * scale, 1.1 * scale, -9.32 * scale)
+				local wing = thingPart(model, Vector3.new(8, 0.2, 5) * scale, Color3.fromRGB(40, 38, 48))
+				wing.CFrame = CFrame.new(side * 6 * scale, 1 * scale, 0)
+			end
+			local tail = thingPart(model, Vector3.new(1, 1, 8) * scale, Color3.fromRGB(28, 28, 33))
+			tail.CFrame = CFrame.new(0, 0, 7.5 * scale)
+			for _, item in ipairs(model:GetChildren()) do
+				item:SetAttribute("McMob", data[1]) -- (it can be hit)
+				if item:IsA("BasePart") then
+					item.CanQuery = true
+				end
+			end
+		elseif kind == "minecraft:end_crystal" then
+			local core = thingPart(model, Vector3.one * scale * 0.5, Color3.fromRGB(255, 120, 230))
+			core.Material = Enum.Material.Neon
+			core.Name = "Core"
+			local glass = thingPart(model, Vector3.one * scale * 0.85, Color3.fromRGB(230, 200, 255))
+			glass.Transparency = 0.7
+			glass.Material = Enum.Material.Glass
+			glass.Name = "Glass"
+			if extra == "bottom" then
+				local base = thingPart(model, Vector3.new(1, 0.5, 1) * scale, Color3.fromRGB(70, 70, 70))
+				base.CFrame = CFrame.new(0, -0.75 * scale, 0)
+			end
+			for _, item in ipairs(model:GetChildren()) do
+				item:SetAttribute("McMob", data[1]) -- (a hit makes it explode, like Minecraft)
+				if item:IsA("BasePart") then
+					item.CanQuery = true
+				end
+			end
 		elseif kind == "minecraft:experience_orb" then
 			local value = tonumber(extra) or 1
 			local orb = thingPart(model, Vector3.one * scale * (0.18 + math.min(0.22, value / 120)), Color3.fromRGB(180, 255, 60))
@@ -4026,6 +4121,18 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 				end
 			elseif kind == "minecraft:experience_orb" then
 				frame = frame * CFrame.new(0, math.sin(now * 6 + (b[1] % 7)) * 0.08 * scale, 0)
+			elseif kind == "minecraft:ender_dragon" then
+				-- Minecraft's dragon yaw: 180 - yaw like the mobs, its head at -z of the model
+				frame = frame * CFrame.Angles(0, math.rad(180 - (tonumber(b[6]) or 0)), 0)
+			elseif kind == "minecraft:end_crystal" then
+				-- the crystal turns and bobs (the base stays)
+				local spin = CFrame.new(0, (0.35 + math.sin(now * 2) * 0.15) * scale, 0) * CFrame.Angles(now * 1.5, now * 2, 0)
+				for _, piece in ipairs(thing.pieces) do
+					table.insert(moveParts, piece.part)
+					table.insert(moveFrames, if piece.part.Name == "Core" or piece.part.Name == "Glass" then frame * spin
+						else frame * piece.offset)
+				end
+				continue
 			end
 			for _, piece in ipairs(thing.pieces) do
 				table.insert(moveParts, piece.part)
