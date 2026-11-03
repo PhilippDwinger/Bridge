@@ -4165,6 +4165,15 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 			label.Parent = billboard
 			billboard.Parent = anchor
 		end
+		if kind == "minecraft:item_frame" or kind == "minecraft:glow_item_frame" or kind == "minecraft:painting" then
+			-- (left click: Minecraft breaks it / takes the item out, right click: puts an item in / turns it)
+			for _, item in ipairs(model:GetChildren()) do
+				if item:IsA("BasePart") then
+					item:SetAttribute("McMob", data[1])
+					item.CanQuery = true
+				end
+			end
+		end
 		addPieces()
 		thing.model = model
 		thing.pieces = pieces
@@ -4322,6 +4331,45 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 			if not mob.model then
 				mob.model, mob.parts = buildMob(look, id)
 				mob.model.Parent = mobFolder
+			end
+			-- a name tag (Minecraft: its custom name above it)
+			local tag = if type(mob.to[14]) == "string" and mob.to[14] ~= "" then mob.to[14] else nil
+			if mob.tag ~= tag then
+				mob.tag = tag
+				local old = mob.model:FindFirstChild("McNameTag", true)
+				if old then
+					old:Destroy()
+				end
+				local anchor = nil
+				for _, entry in ipairs(mob.parts) do
+					for _, box in ipairs(entry.boxes) do
+						if not anchor or box.part.Size.Magnitude > anchor.Size.Magnitude then
+							anchor = box.part
+						end
+					end
+				end
+				if tag and anchor then
+					local billboard = Instance.new("BillboardGui")
+					billboard.Name = "McNameTag"
+					billboard.Size = UDim2.fromOffset(200, 20)
+					billboard.StudsOffsetWorldSpace = Vector3.new(0, (assets.scale or 3) * 1.1, 0)
+					billboard.LightInfluence = 0
+					billboard.MaxDistance = 64
+					billboard.AlwaysOnTop = false
+					local label = Instance.new("TextLabel")
+					label.BackgroundColor3 = Color3.new(0, 0, 0)
+					label.BackgroundTransparency = 0.75
+					label.AutomaticSize = Enum.AutomaticSize.X
+					label.Size = UDim2.fromOffset(0, 18)
+					label.AnchorPoint = Vector2.new(0.5, 0)
+					label.Position = UDim2.fromScale(0.5, 0)
+					label.Font = Enum.Font.Arcade
+					label.TextSize = 16
+					label.TextColor3 = Color3.new(1, 1, 1)
+					label.Text = " " .. tag .. " "
+					label.Parent = billboard
+					billboard.Parent = anchor
+				end
 			end
 			local a, b = mob.from, mob.to
 			local t = math.clamp((now - mob.at) / 0.1, 0, 1) -- (a list every 2 ticks: 0.1 s from the last to the newest)
