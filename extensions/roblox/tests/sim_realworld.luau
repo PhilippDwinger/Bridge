@@ -202,7 +202,15 @@ local function signal()
 		return { Disconnect = function() end }
 	end }
 end
-local fakeClient = { Server = "fake://minecraft", Connected = signal(), Disconnected = signal(), MessageReceived = signal() }
+local messageHandlers = {}
+local fakeClient = { Server = "fake://minecraft", Connected = signal(), Disconnected = signal(), MessageReceived = {
+	Connect = function(_, callback)
+		table.insert(messageHandlers, callback)
+		return { Disconnect = function() end }
+	end,
+} }
+local playerCalls = {} -- op -> count
+local menuOpen = false
 function fakeClient:Call(command, args)
 	task.wait(0.01) -- (a round trip)
 	if command == "mcworld.info" then
@@ -226,6 +234,25 @@ function fakeClient:Call(command, args)
 			end
 		end
 		return { chunks = answer }
+	elseif command == "mcworld.player" then
+		playerCalls[args.op] = (playerCalls[args.op] or 0) + 1
+		local slots = table.create(46, false)
+		slots[37] = { id = "minecraft:bread", n = 3, name = "Bread", max = 64 }
+		local state = { gm = "survival", sel = 0, slots = slots, carried = false }
+		if args.op == "click" and args.container then
+			menuOpen = true
+		elseif args.op == "close" then
+			menuOpen = false
+		end
+		if menuOpen then
+			state.menu = { type = "generic_9x3", title = "Kiste", slots = { { 8, 18, false }, { 26, 18, { id = "minecraft:stone", n = 5 } } } }
+		end
+		if args.op == "eat" then
+			return { ok = true, food = 5, sat = 6, state = state }
+		end
+		return { ok = true, state = state }
+	elseif command == "mcworld.hurt" then
+		return { ok = true, crit = args.falling == true, magic = false, amount = 1.5, health = 18 }
 	elseif command == "mcworld.assets" then
 		if args and args.gui then
 			return assetsAnswer()
@@ -616,6 +643,59 @@ end
 check(not caveFound or (deepVisible > 0 and deepMissing == 0), string.format(
 	"deep down (cave walls at y %d): built when the player is there (%d blocks with a cave face, %d missing)",
 	deepY, deepVisible, deepMissing))
+
+-- hunger, eating, effects, crits, an open chest (the server's code for them runs without errors)
+do
+	local function remote(name)
+		return remoteFolder:FindFirstChild(name)
+	end
+	local character = paddy.Character
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	frames(1)
+	check(paddy:GetAttribute("McFood") == 20, "hunger: food 20 at the start (" .. tostring(paddy:GetAttribute("McFood")) .. ")")
+	-- sprinting 60 blocks: 6 exhaustion -> saturation 5 -> 4 (Minecraft: every 4 exhaustion one saturation)
+	character:SetAttribute("McSprint", true)
+	local start = root.Position
+	for step = 1, 60 do
+		root.CFrame = CFrame.new(start + Vector3.new(step * SCALE, 0, 0))
+		root.Position = root.CFrame.Position
+		frames(0.06)
+	end
+	character:SetAttribute("McSprint", nil)
+	local saturation = paddy:GetAttribute("McSaturation")
+	check(type(saturation) == "number" and saturation < 5, "hunger: sprinting makes hungry (saturation " .. tostring(saturation) .. ")")
+	-- eating: Minecraft says bread gives 5 food + 6 saturation
+	local inventory = remote("Inventory")
+	paddy.attributes.McFood = nil
+	inventory.handler(paddy, "eat", 0)
+	frames(0.5)
+	check(playerCalls.eat == 1, "eating: Minecraft was asked (op eat)")
+	-- effects from Minecraft
+	local hurtCalls = 0
+	for _, handler in ipairs(messageHandlers) do
+		handler({ Content = { type = "mc.effects", u = 4242, list = { { id = "speed", amp = 1, dur = 30, color = 3402751, good = true } } } })
+		-- (Lune's Humanoid has no TakeDamage: the damage itself only works in Roblox - the path up to it is tested)
+		local ok, err = pcall(handler, { Content = { type = "mc.effect", u = 4242, kind = "poison" } })
+		if ok or string.find(tostring(err), "TakeDamage", 1, true) then
+			hurtCalls += 1
+		end
+		ok, err = pcall(handler, { Content = { type = "mc.hurt", u = 4242, amount = 2, crit = true, from = { 0, 0, 0 } } })
+		if ok or string.find(tostring(err), "TakeDamage", 1, true) then
+			hurtCalls += 1
+		end
+	end
+	frames(0.2)
+	check(type(paddy:GetAttribute("McEffects")) == "string" and string.find(paddy:GetAttribute("McEffects"), "speed", 1, true) ~= nil,
+		"effects: the list from Minecraft is on the player (" .. tostring(paddy:GetAttribute("McEffects")) .. ")")
+	check(hurtCalls == 2, "poison / a critical hit from Minecraft reach the damage (" .. hurtCalls .. " of 2)")
+	-- an open chest: a click in its window goes to Minecraft as a container click
+	inventory.handler(paddy, "click", 1, 0, false, true)
+	frames(0.5)
+	check(playerCalls.click == 1, "chest: the click went to Minecraft")
+	inventory.handler(paddy, "close")
+	frames(0.5)
+	check(playerCalls.close == 1, "chest: closed")
+end
 
 print(string.format("RESULT %s", serde.encode("json", { failures = #failures, chunks = chunks, parts = parts,
 	textures = textures, loadSeconds = loadSeconds, longestFrameMs = longestFrame * 1000 })))
