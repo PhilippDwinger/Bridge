@@ -776,7 +776,7 @@ end
 	so cliffs and ravines are there) or not deeper than SectionsBelow below the lowest player - caves deep under
 	everybody wait until somebody goes down there (they are inside the ground: nobody can see them).
 ]]
-local VIEW = math.clamp(math.floor(tonumber(Config.ViewChunks) or 6), 1, 16)
+local VIEW = math.clamp(math.floor(tonumber(Config.ViewChunks) or 5), 1, 16)
 local BELOW = math.max(0, math.floor(tonumber(Config.SectionsBelow) or 3))
 local BUDGET = math.clamp(tonumber(Config.BuildBudgetMs) or 6, 1, 50) / 1000
 local loader = {
@@ -1731,6 +1731,10 @@ local function loaderWorker(generation)
 					if not applied then
 						warn("[MinecraftWorld] chunk " .. key .. ": " .. tostring(err))
 						loader.retryAt[key] = now + 5
+					end
+					task.wait() -- (unpacking a chunk takes ~10-20 ms: one per frame, the server never stands still)
+					if generation ~= world.generation then
+						return
 					end
 				end
 			end

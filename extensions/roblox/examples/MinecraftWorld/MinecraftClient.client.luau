@@ -1022,6 +1022,17 @@ containerTitle.TextColor3 = Color3.fromRGB(64, 64, 64)
 containerTitle.TextXAlignment = Enum.TextXAlignment.Left
 containerTitle.ZIndex = 13
 containerTitle.Parent = container
+local containerInventory = Instance.new("TextLabel") -- Minecraft: "Inventory" above the player's slots
+containerInventory.Name = "InventoryTitle"
+containerInventory.BackgroundTransparency = 1
+containerInventory.Size = UDim2.fromOffset(160, 9)
+containerInventory.Font = Enum.Font.Arcade
+containerInventory.TextSize = 8
+containerInventory.TextColor3 = Color3.fromRGB(64, 64, 64)
+containerInventory.TextXAlignment = Enum.TextXAlignment.Left
+containerInventory.Text = "Inventar"
+containerInventory.ZIndex = 13
+containerInventory.Parent = container
 local furnaceFire = Instance.new("Frame") -- the fire fills from the bottom, the arrow from the left
 furnaceFire.Name = "Fire"
 furnaceFire.BackgroundTransparency = 1
@@ -1068,6 +1079,8 @@ local function refreshContainer()
 	containerBack.BackgroundTransparency = if picture then 1 else 0
 	containerBack.BackgroundColor3 = Color3.fromRGB(198, 198, 198)
 	containerTitle.Text = tostring(menu.title or "")
+	containerInventory.Position = UDim2.fromOffset(8, height - 94 + 1)
+	containerInventory.Visible = menu.type ~= "beacon" and menu.type ~= "merchant"
 	for index, slot in ipairs(menu.slots) do
 		local entry = containerSlots[index]
 		local x, y = tonumber(slot[1]) or 0, tonumber(slot[2]) or 0
@@ -1191,7 +1204,8 @@ function refresh()
 		-- Minecraft: the tabs stand on the top / bottom edge of the open window, 27 pixels apart
 		local width = if inventoryView == "creative" then 195 else 176
 		local height = if inventoryView == "creative" then 136 else 166
-		local x = (-width / 2 + tab.column * 27) * scale
+		-- (search + inventory sit at the right edge like Minecraft's alignedRight tabs)
+		local x = (-width / 2 + (if tab.column >= 6 then width - 27 else tab.column * 27)) * scale
 		if tab.row == "top" then
 			tab.frame.AnchorPoint = Vector2.new(0, 1)
 			tab.frame.Position = UDim2.new(0.5, x, 0.5, (-height / 2 + 4) * scale)

@@ -21,7 +21,7 @@ return {
 	BottomTurn = 0,
 	-- Real worlds: chunks around every Roblox player (Minecraft's "render distance"), and how many sections (16 blocks)
 	-- below the lowest player still get built (caves deeper than that only when somebody goes down)
-	ViewChunks = 6,
+	ViewChunks = 5,
 	SectionsBelow = 3,
 	-- Milliseconds per frame the server may spend building blocks (more = loads faster, less = never stutters)
 	BuildBudgetMs = 6,
