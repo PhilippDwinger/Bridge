@@ -1068,6 +1068,8 @@ end
 
 local enchantButtons: { TextButton } = {}
 local tradeRows: { any } = {}
+local anvilName: TextBox? = nil
+local anvilCost: TextLabel? = nil
 local function refreshContainer()
 	local menu = state.menu
 	if type(menu) ~= "table" or type(menu.slots) ~= "table" then
@@ -1112,6 +1114,50 @@ local function refreshContainer()
 	for index = #menu.slots + 1, #containerSlots do
 		containerSlots[index].button.Visible = false
 		showStack(containerSlots[index].view, nil)
+	end
+	-- the anvil: Minecraft's name field + what it costs (levels; red when he has too few)
+	if menu.type == "anvil" then
+		if not anvilName then
+			local box = Instance.new("TextBox")
+			box.Name = "AnvilName"
+			box.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+			box.BorderSizePixel = 0
+			box.Position = UDim2.fromOffset(59, 20)
+			box.Size = UDim2.fromOffset(103, 12)
+			box.Font = Enum.Font.Arcade
+			box.TextSize = 8
+			box.TextColor3 = Color3.new(1, 1, 1)
+			box.TextXAlignment = Enum.TextXAlignment.Left
+			box.ClearTextOnFocus = false
+			box.Text = ""
+			box.ZIndex = 15
+			box.Parent = container
+			box.FocusLost:Connect(function()
+				inventoryRemote:FireServer("rename", string.sub(box.Text, 1, 50))
+			end)
+			local cost = Instance.new("TextLabel")
+			cost.Name = "AnvilCost"
+			cost.BackgroundTransparency = 1
+			cost.Position = UDim2.fromOffset(60, 67)
+			cost.Size = UDim2.fromOffset(110, 9)
+			cost.Font = Enum.Font.Arcade
+			cost.TextSize = 8
+			cost.TextXAlignment = Enum.TextXAlignment.Right
+			cost.TextStrokeTransparency = 0.5
+			cost.ZIndex = 15
+			cost.Parent = container
+			anvilName, anvilCost = box, cost
+		end
+		(anvilName :: TextBox).Visible = true
+		local levels = tonumber(menu.cost) or 0
+		local mine = tonumber(player:GetAttribute("McXpLevel")) or 0
+		local label = anvilCost :: TextLabel
+		label.Visible = levels > 0
+		label.Text = "Enchantment Cost: " .. tostring(levels)
+		label.TextColor3 = if mine >= levels or gameMode() == "creative" then Color3.fromRGB(128, 255, 32) else Color3.fromRGB(255, 96, 96)
+	elseif anvilName then
+		(anvilName :: TextBox).Visible = false;
+		(anvilCost :: TextLabel).Visible = false
 	end
 	-- a villager's trades (left of its window like Minecraft): cost a, cost b -> result; a click picks it (the costs
 	-- go into the slots), then take the result like any slot
@@ -3987,7 +4033,13 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 					item.CanQuery = true
 				end
 			end
-		elseif kind == "minecraft:lightning_bolt" then
+		elseif kind == "minecraft:fishing_bobber" then
+		-- the bobber: red on top, white below
+		local top = thingPart(model, Vector3.new(0.25, 0.15, 0.25) * scale, Color3.fromRGB(200, 30, 30))
+		top.CFrame = CFrame.new(0, 0.07 * scale, 0)
+		local bottom = thingPart(model, Vector3.new(0.25, 0.12, 0.25) * scale, Color3.fromRGB(240, 240, 240))
+		bottom.CFrame = CFrame.new(0, -0.07 * scale, 0)
+	elseif kind == "minecraft:lightning_bolt" then
 			-- a lightning bolt: a zigzag of light from high up down to where it strikes (Minecraft's LightningBoltRenderer)
 			local random = Random.new(data[1])
 			local x, z = 0, 0

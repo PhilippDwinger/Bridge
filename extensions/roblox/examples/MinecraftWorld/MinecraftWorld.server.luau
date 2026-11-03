@@ -2672,6 +2672,11 @@ inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c, d)
 		inOrder(player, function()
 			callPlayer(player, "state")
 		end)
+	elseif op == "rename" and type(a) == "string" and #a <= 200 and utf8.len(a) ~= nil then
+		-- the anvil's name field
+		inOrder(player, function()
+			callPlayer(player, "rename", { text = a })
+		end)
 	elseif op == "trade" and isWhole(a) and a >= 0 and a < 64 then
 		-- a trade chosen in the villager's list
 		inOrder(player, function()
