@@ -1069,6 +1069,8 @@ end
 local enchantButtons: { TextButton } = {}
 local tradeRows: { any } = {}
 local anvilName: TextBox? = nil
+local optionButtons: { TextButton } = {}
+local optionViews: { any } = {}
 local anvilCost: TextLabel? = nil
 local function refreshContainer()
 	local menu = state.menu
@@ -1114,6 +1116,51 @@ local function refreshContainer()
 	for index = #menu.slots + 1, #containerSlots do
 		containerSlots[index].button.Visible = false
 		showStack(containerSlots[index].view, nil)
+	end
+	-- the stonecutter's choices (their items) / the loom's patterns (their names): Minecraft's buttons
+	local options = if type(menu.options) == "table" then menu.options elseif type(menu.patterns) == "table" then menu.patterns else nil
+	local loom = type(menu.patterns) == "table"
+	for i = 1, 16 do
+		local button = optionButtons[i]
+		if not button and options then
+			local made = Instance.new("TextButton")
+			made.Name = "Option" .. i
+			made.AutoButtonColor = true
+			made.BorderSizePixel = 0
+			made.Font = Enum.Font.Arcade
+			made.TextSize = 5
+			made.TextWrapped = true
+			made.ZIndex = 14
+			made.Parent = container
+			local index = i - 1
+			made.MouseButton1Click:Connect(function()
+				inventoryRemote:FireServer("button", index)
+			end)
+			optionButtons[i] = made
+			optionViews[i] = slotView(made, "Icon", 0, 1, 15)
+			button = made
+		end
+		if button then
+			local option = options and options[i]
+			button.Visible = option ~= nil
+			if option ~= nil then
+				local column, row = (i - 1) % 4, (i - 1) // 4
+				if loom then
+					button.Position = UDim2.fromOffset(60 + column * 14, 13 + row * 14)
+					button.Size = UDim2.fromOffset(14, 14)
+					button.Text = string.upper(string.sub(string.gsub(tostring(option), "_", " "), 1, 6))
+					showStack(optionViews[i], nil)
+				else
+					button.Position = UDim2.fromOffset(52 + column * 16, 14 + row * 18)
+					button.Size = UDim2.fromOffset(16, 18)
+					button.Text = ""
+					showStack(optionViews[i], if type(option) == "table" then option else nil)
+				end
+				local chosen = tonumber(menu.selected) == i - 1
+				button.BackgroundColor3 = if chosen then Color3.fromRGB(120, 170, 120) else Color3.fromRGB(200, 200, 200)
+				button.TextColor3 = Color3.fromRGB(50, 50, 50)
+			end
+		end
 	end
 	-- the anvil: Minecraft's name field + what it costs (levels; red when he has too few)
 	if menu.type == "anvil" then
