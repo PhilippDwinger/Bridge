@@ -3346,6 +3346,225 @@ RunService.RenderStepped:Connect(function()
 end)
 -- endregion
 
+-- region mobs: Minecraft's own models + textures, moved + animated like Minecraft (head, legs, arms)
+--[[
+	The server forwards Minecraft's list (Mobs: {{id, type, x, y, z, bodyYaw, headYaw, pitch, walkPos, walkSpeed, hurt,
+	baby, invisible}}) about 10 times a second; each kind's look comes once (MobModel). Drawn only here (anchored
+	parts with Minecraft's pictures, moved every frame between two lists), not touchable.
+]]
+local mobsRemoteClient = remotes:WaitForChild("Mobs", 10) :: RemoteEvent?
+local mobModelRemote = remotes:WaitForChild("MobModel", 10) :: RemoteFunction?
+local mobFolder = Instance.new("Folder")
+mobFolder.Name = "MinecraftMobs"
+local mobLooks: { [string]: any } = {} -- type -> look | "waiting" | false
+local mobs: { [number]: any } = {} -- id -> {kind, look, parts, from, to, at, model}
+local MOB_PIXEL = (assets and assets.scale or 3) / 16
+
+local function mobLook(id: number, kind: string)
+	if mobLooks[kind] ~= nil or not mobModelRemote then
+		return
+	end
+	mobLooks[kind] = "waiting"
+	task.spawn(function()
+		local ok, look = pcall(function()
+			return (mobModelRemote :: RemoteFunction):InvokeServer(id, kind)
+		end)
+		if ok and type(look) == "table" and type(look.parts) == "table" then
+			if assets then
+				for key, texture in pairs(look.textures or {}) do
+					assets.textures[key] = texture -- (worldContent makes the pictures)
+				end
+			end
+			mobLooks[kind] = look
+		else
+			mobLooks[kind] = nil -- (asked again with the next list)
+			task.wait(5)
+		end
+	end)
+end
+
+-- the parts of one mob: per Minecraft part its boxes (anchored, pictures on all six sides)
+local MOB_FACES = { up = Enum.NormalId.Top, down = Enum.NormalId.Bottom, north = Enum.NormalId.Front,
+	south = Enum.NormalId.Back, east = Enum.NormalId.Right, west = Enum.NormalId.Left }
+local function buildMob(look: any): (Model, { any })
+	local model = Instance.new("Model")
+	model.Name = "Mob"
+	local parts = {}
+	for index, spec in ipairs(look.parts) do
+		local entry = { spec = spec, boxes = {}, index = index }
+		for _, box in ipairs(spec.b or {}) do
+			local b = box.b
+			local size = Vector3.new(b[4] - b[1], b[5] - b[2], b[6] - b[3]) * MOB_PIXEL
+			local part = Instance.new("Part")
+			part.Name = spec.n
+			part.Anchored = true
+			part.CanCollide = false
+			part.CanQuery = false
+			part.CanTouch = false
+			part.Transparency = 1
+			part.Size = Vector3.new(math.max(size.X, 0.02), math.max(size.Y, 0.02), math.max(size.Z, 0.02))
+			for direction, key in pairs(box.f or {}) do
+				local normal = MOB_FACES[direction]
+				-- (Top / Bottom turned like the blocks: /drehen)
+				local turn = if normal == Enum.NormalId.Top then tonumber(ReplicatedStorage:GetAttribute("McTopTurn")) or 0
+					elseif normal == Enum.NormalId.Bottom then tonumber(ReplicatedStorage:GetAttribute("McBottomTurn")) or 0 else 0
+				local content = normal and worldContent(key, turn)
+				if content then
+					local texture = Instance.new("Texture")
+					texture.Face = normal
+					local u = if normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom then part.Size.X
+						elseif normal == Enum.NormalId.Left or normal == Enum.NormalId.Right then part.Size.Z else part.Size.X
+					local v = if normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom then part.Size.Z else part.Size.Y
+					texture.StudsPerTileU = u
+					texture.StudsPerTileV = v
+					texture.TextureContent = content
+					pcall(function()
+						texture.ResampleMode = Enum.ResamplerMode.Pixelated
+					end)
+					texture.Parent = part
+				end
+			end
+			part.Parent = model
+			table.insert(entry.boxes, { part = part,
+				offset = CFrame.new(Vector3.new(b[1] + b[4], b[2] + b[5], b[3] + b[6]) / 2 * MOB_PIXEL) })
+		end
+		parts[index] = entry
+	end
+	return model, parts
+end
+
+-- Minecraft's walking animation by part names (QuadrupedModel / HumanoidModel), head turned + tilted
+local function animate(name: string, pos: number, speed: number, headYaw: number, pitch: number): (number, number)
+	local swing = pos * 0.6662
+	if name == "head" then
+		return math.rad(pitch), math.rad(headYaw)
+	elseif name == "right_hind_leg" or name == "left_front_leg" or name == "right_leg" then
+		return math.cos(swing) * 1.4 * speed, 0
+	elseif name == "left_hind_leg" or name == "right_front_leg" or name == "left_leg" then
+		return math.cos(swing + math.pi) * 1.4 * speed, 0
+	elseif name == "right_arm" then
+		return math.cos(swing + math.pi) * speed, 0
+	elseif name == "left_arm" then
+		return math.cos(swing) * speed, 0
+	end
+	return 0, 0
+end
+
+if mobsRemoteClient then
+	(mobsRemoteClient :: RemoteEvent).OnClientEvent:Connect(function(list)
+		if type(list) ~= "table" or not assets then
+			return
+		end
+		local now = os.clock()
+		local seen = {}
+		for _, data in ipairs(list) do
+			local id = data[1]
+			if type(id) ~= "number" or type(data[2]) ~= "string" then
+				continue
+			end
+			seen[id] = true
+			local mob = mobs[id]
+			if not mob then
+				mob = { kind = data[2] }
+				mobs[id] = mob
+			end
+			mob.from = mob.to or data
+			mob.to = data
+			mob.at = now
+			mobLook(id, data[2])
+		end
+		for id, mob in pairs(mobs) do
+			if not seen[id] then
+				if mob.model then
+					mob.model:Destroy()
+				end
+				mobs[id] = nil
+			end
+		end
+	end)
+end
+
+local function lerpAngle(a: number, b: number, t: number): number
+	local difference = ((b - a + 180) % 360) - 180
+	return a + difference * t
+end
+
+RunService.RenderStepped:Connect(function()
+	if not next(mobs) or not assets or not assets.minY then
+		return
+	end
+	if not mobFolder.Parent then
+		mobFolder.Parent = workspace
+	end
+	local scale = assets.scale or 3
+	local now = os.clock()
+	local moveParts, moveFrames = {}, {}
+	for _, mob in pairs(mobs) do
+		local look = mobLooks[mob.kind]
+		if type(look) ~= "table" then
+			continue
+		end
+		if not mob.model then
+			mob.model, mob.parts = buildMob(look)
+			mob.model.Parent = mobFolder
+		end
+		local a, b = mob.from, mob.to
+		local t = math.clamp((now - mob.at) / 0.1, 0, 1) -- (a list every 2 ticks: 0.1 s from the last to the newest)
+		local function mix(i: number): number
+			return (tonumber(a[i]) or 0) + ((tonumber(b[i]) or 0) - (tonumber(a[i]) or 0)) * t
+		end
+		local bodyYaw = lerpAngle(tonumber(a[6]) or 0, tonumber(b[6]) or 0, t)
+		local headYaw = lerpAngle(tonumber(a[7]) or 0, tonumber(b[7]) or 0, t)
+		local pitch = mix(8)
+		local walkPos, walkSpeed = mix(9), mix(10)
+		local baby = b[12] == true
+		local hidden = b[13] == true
+		local feet = Vector3.new(mix(3) * scale, (mix(4) - assets.minY) * scale, mix(5) * scale)
+		-- Minecraft: rotate (180 - body yaw), the model hangs 1.5 blocks above the feet (babies half as big)
+		local size = if baby then 0.5 else 1
+		local origin = CFrame.new(feet) * CFrame.Angles(0, math.rad(180 - bodyYaw), 0) * CFrame.new(0, 24 * MOB_PIXEL * size, 0)
+		local frames = {}
+		for index, entry in ipairs(mob.parts) do
+			local spec = entry.spec
+			local parent = if spec.p and spec.p >= 0 then frames[spec.p + 1] else origin
+			local o, r = spec.o or { 0, 0, 0 }, spec.r or { 0, 0, 0 }
+			local ax, ay = animate(spec.n, walkPos, walkSpeed, headYaw - bodyYaw, pitch)
+			-- Minecraft's rotation (z, y, x order) turned into Roblox axes: x and y flip their sign
+			local frame = (parent or origin) * CFrame.new(Vector3.new(o[1], o[2], o[3]) * MOB_PIXEL * size)
+				* CFrame.Angles(0, 0, r[3]) * CFrame.Angles(0, -(r[2] + ay), 0) * CFrame.Angles(-(r[1] + ax), 0, 0)
+			frames[index] = frame
+			for _, box in ipairs(entry.boxes) do
+				table.insert(moveParts, box.part)
+				table.insert(moveFrames, frame * box.offset)
+				if baby and not box.part:GetAttribute("McBaby") then
+					box.part:SetAttribute("McBaby", true)
+					box.part.Size *= 0.5
+					box.offset = CFrame.new(box.offset.Position * 0.5)
+				end
+			end
+		end
+		-- hurt = red (Minecraft's red overlay), invisible = not drawn - only when it changes
+		local look2 = (if hidden then "h" else "v") .. (if b[11] == true then "r" else "n")
+		if mob.shown ~= look2 then
+			mob.shown = look2
+			for _, entry in ipairs(mob.parts) do
+				for _, box in ipairs(entry.boxes) do
+					for _, texture in ipairs(box.part:GetChildren()) do
+						if texture:IsA("Texture") then
+							texture.Transparency = if hidden then 1 else 0
+							texture.Color3 = if b[11] == true then Color3.fromRGB(255, 120, 120) else Color3.new(1, 1, 1)
+						end
+					end
+				end
+			end
+		end
+	end
+	if #moveParts > 0 then
+		workspace:BulkMoveTo(moveParts, moveFrames, Enum.BulkMoveMode.FireCFrameChanged)
+	end
+end)
+-- endregion
+
 -- region crosshair + attack indicator (Minecraft: the charge of the next hit under the crosshair)
 local crosshair = image(screen, "Crosshair", 0, 0, 15, 15, 5)
 crosshair.AnchorPoint = Vector2.new(0.5, 0.5)

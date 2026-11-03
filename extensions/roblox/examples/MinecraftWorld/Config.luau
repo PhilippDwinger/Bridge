@@ -25,6 +25,8 @@ return {
 	SectionsBelow = 3,
 	-- Milliseconds per frame the server may spend building blocks (more = loads faster, less = never stutters)
 	BuildBudgetMs = 6,
+	-- Mobs / animals from Minecraft (their own models + textures - only from the game itself, not a dedicated server)
+	Mobs = true,
 	-- true: print what the Bridge module does
 	Debug = false,
 }

@@ -67,6 +67,8 @@ local COMMAND = Config.WorldPrefix .. ".command"
 local PLAYER = Config.WorldPrefix .. ".player"
 local ITEMS = Config.WorldPrefix .. ".items"
 local SKY = Config.WorldPrefix .. ".sky"
+local MOBS = Config.WorldPrefix .. ".mobs"
+local MOB = Config.WorldPrefix .. ".mob"
 local CHAT_PER_5S = 6 -- messages / commands per player in 5 seconds
 local MAX_CHAT = 256 -- characters, like Minecraft
 local MAX_HEALTH = 20 -- Minecraft: 10 hearts
@@ -3061,6 +3063,50 @@ local itemFolder = workspace:FindFirstChild("MinecraftItems") or Instance.new("F
 itemFolder.Name = "MinecraftItems"
 itemFolder.Parent = workspace
 local itemAnchors = {} -- entity id (text) -> invisible Part where it lies; the clients draw the item there
+
+-- region mobs (topic mcworld.mobs -> every client; their looks once per kind from Minecraft: mcworld.mob {id})
+local mobsRemote = remote("RemoteEvent", "Mobs") -- server -> clients: (list) like the topic
+local mobModel = remote("RemoteFunction", "MobModel") -- client asks: (id, type) -> {parts, textures} or nil
+local mobLooks = {} -- type -> look | false (Minecraft has none) | "waiting"
+if Config.Mobs ~= false then
+	client:Subscribe(nil, MOBS, function(data)
+		if type(data) == "table" and type(data.mobs) == "table" then
+			mobsRemote:FireAllClients(data.mobs)
+		end
+	end, { Latest = true })
+end
+mobModel.OnServerInvoke = function(_player, id, kind)
+	if type(id) ~= "number" or type(kind) ~= "string" or #kind > 100 then
+		return nil
+	end
+	local started = os.clock()
+	while mobLooks[kind] == "waiting" and os.clock() - started < 10 do
+		task.wait(0.1)
+	end
+	local known = mobLooks[kind]
+	if known ~= nil and known ~= "waiting" then
+		return known or nil
+	end
+	mobLooks[kind] = "waiting"
+	local ok, result = pcall(client.Call, client, MOB, { id = id }, { Timeout = 15 })
+	if not ok or type(result) ~= "table" or result.ok ~= true then
+		-- a dedicated server has no models: never again; anything else (mob gone, no answer): ask again later
+		local reason = if ok and type(result) == "table" then tostring(result.reason or "") else ""
+		mobLooks[kind] = if string.find(reason, "dedicated", 1, true) then false else nil
+		if Config.Debug then
+			warn("[MinecraftWorld] mob " .. kind .. ": " .. tostring(if ok and type(result) == "table" then result.reason else result))
+		end
+		return nil
+	end
+	local textures = {}
+	for key, texture in pairs(type(result.textures) == "table" and result.textures or {}) do
+		textures[key] = decodeTexture(texture)
+	end
+	local look = { parts = result.parts, textures = textures }
+	mobLooks[kind] = look
+	return look
+end
+-- endregion
 
 client:Subscribe(nil, ITEMS, function(data)
 	local info = world.info
