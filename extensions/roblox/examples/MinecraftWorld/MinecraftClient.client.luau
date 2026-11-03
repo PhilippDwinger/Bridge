@@ -3987,6 +3987,19 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 					item.CanQuery = true
 				end
 			end
+		elseif kind == "minecraft:lightning_bolt" then
+			-- a lightning bolt: a zigzag of light from high up down to where it strikes (Minecraft's LightningBoltRenderer)
+			local random = Random.new(data[1])
+			local x, z = 0, 0
+			for i = 0, 7 do
+				local nx, nz = x + random:NextNumber(-1.5, 1.5), z + random:NextNumber(-1.5, 1.5)
+				local from = Vector3.new(x, i * 6, z) * scale
+				local to = Vector3.new(nx, (i + 1) * 6, nz) * scale
+				local piece = thingPart(model, Vector3.new(0.25 * scale, 0.25 * scale, (to - from).Magnitude), Color3.fromRGB(200, 220, 255))
+				piece.Material = Enum.Material.Neon
+				piece.CFrame = CFrame.lookAt((from + to) / 2, to)
+				x, z = nx, nz
+			end
 		elseif kind == "minecraft:end_crystal" then
 			local core = thingPart(model, Vector3.one * scale * 0.5, Color3.fromRGB(255, 120, 230))
 			core.Material = Enum.Material.Neon
@@ -4157,6 +4170,7 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 						end
 					end
 					piece.part.Transparency = if white then 0 else 1
+					piece.part.Color = Color3.new(1, 1, 1)
 				end
 			elseif kind == "minecraft:experience_orb" then
 				frame = frame * CFrame.new(0, math.sin(now * 6 + (b[1] % 7)) * 0.08 * scale, 0)
