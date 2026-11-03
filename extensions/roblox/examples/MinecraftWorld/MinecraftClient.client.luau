@@ -126,12 +126,14 @@ end
 	a moment later - and every Texture that has no picture yet waits in "waiting" until it gets one. (Before, all
 	pictures were made again after every change and one failure stopped all the rest: whole block kinds went grey.)
 ]]
-local cache = {} -- cache key -> {image = EditableImage, content = Content, source = string}
+local cache = {} -- cache key -> {image = EditableImage, content = Content, source = (what it was made from)}
 local failedAt = {} -- cache key -> os.clock() of the last failure
 local waiting = setmetatable({}, { __mode = "k" }) -- Texture -> true: still without its picture
 local RETRY = 2 -- seconds
 
-local function makeImage(cacheKey: string, source: string, build: () -> any): Content?
+-- source: what the picture is made from - a string, or the texture table itself (compared by identity: a new
+-- answer from Minecraft brings new tables; comparing the pixels as a string cost a 1-32 KB string per call)
+local function makeImage(cacheKey: string, source: any, build: () -> any): Content?
 	local cached = cache[cacheKey]
 	if cached and cached.source == source then
 		return cached.content
@@ -179,7 +181,7 @@ local function worldContent(key: any, turn: number?): Content?
 	end
 	if texture.frames and texture.frames > 1 and ((turn or 0) // 90) % 4 == 0 then
 		local cacheKey = "anim:" .. tostring(key)
-		local content = makeImage(cacheKey, tostring(texture), function()
+		local content = makeImage(cacheKey, texture, function()
 			return Images.upscale(frameOf(texture, 0), ANIMATED_SCALE)
 		end)
 		local entry = animations[cacheKey]
@@ -189,7 +191,7 @@ local function worldContent(key: any, turn: number?): Content?
 		return content
 	end
 	local quarter = ((turn or 0) // 90) % 4
-	return makeImage("world:" .. tostring(key) .. (if quarter ~= 0 then "@" .. quarter else ""), buffer.tostring(texture.pixels),
+	return makeImage("world:" .. tostring(key) .. (if quarter ~= 0 then "@" .. quarter else ""), texture,
 		function()
 			return Images.upscale(if quarter ~= 0 then Images.turn(texture, quarter * 90) else texture, TEXTURE_SCALE)
 		end)
@@ -340,6 +342,27 @@ local shownBy = {} -- world texture key -> {Texture -> true} (weak)
 local holders = {} -- world texture key -> Texture on the hidden part
 local holderPart: Part? = nil
 local lost = {} -- world texture key -> true: Textures with this picture went away
+--[[
+	The refresh costs one property write per Texture of that kind - with a real world (tens of thousands of Textures)
+	and chunks going away all the time (flying, a portal), doing it at once every frame made Roblox stutter badly. So:
+	the kinds that lost Textures are collected for REFRESH_EVERY seconds, their Textures go into a queue, and the queue
+	is worked off with at most REFRESH_BUDGET seconds per frame (a grey block is back within a moment).
+]]
+local REFRESH_EVERY = 0.5
+local REFRESH_BUDGET = 0.0015
+local refreshQueue: { Texture } = {}
+local refreshQueued = setmetatable({}, { __mode = "k" }) -- Texture -> true (in the queue)
+local refreshPassAt = 0
+local pixelated: boolean? = nil -- does this Roblox know Texture.ResampleMode? (asked once)
+local function setPixelated(texture: Texture)
+	if pixelated == nil then
+		pixelated = pcall(function()
+			texture.ResampleMode = Enum.ResamplerMode.Pixelated
+		end)
+	elseif pixelated then
+		texture.ResampleMode = Enum.ResamplerMode.Pixelated
+	end
+end
 
 local function hold(key: string, content: Content)
 	local camera = workspace.CurrentCamera
@@ -387,16 +410,31 @@ local function showAgain(key: string)
 		return
 	end
 	for texture in pairs(shownBy[key] or {}) do
-		if texture.Parent then
-			local content = worldContent(key, turnOf(texture)) or plain
-			texture.TextureContent = Content.none
-			texture.TextureContent = content
+		if not refreshQueued[texture] then
+			refreshQueued[texture] = true
+			table.insert(refreshQueue, texture) -- (worked off a bit per frame: see the Heartbeat below)
 		end
 	end
 	local holder = holders[key]
 	if holder then
 		holder.TextureContent = Content.none
 		holder.TextureContent = plain
+	end
+end
+
+local function refreshSome()
+	local started = os.clock()
+	while #refreshQueue > 0 and os.clock() - started < REFRESH_BUDGET do
+		local texture = table.remove(refreshQueue) :: Texture
+		refreshQueued[texture] = nil
+		if texture.Parent then
+			local key = texture:GetAttribute("McTexture")
+			local content = if type(key) == "string" then worldContent(key, turnOf(texture)) else nil
+			if content then
+				texture.TextureContent = Content.none
+				texture.TextureContent = content
+			end
+		end
 	end
 end
 
@@ -422,9 +460,7 @@ local function applyTexture(texture: Texture)
 	end
 	if content then
 		texture.TextureContent = content
-		pcall(function()
-			texture.ResampleMode = Enum.ResamplerMode.Pixelated
-		end)
+		setPixelated(texture)
 		waiting[texture] = nil
 	else
 		waiting[texture] = true
@@ -472,12 +508,17 @@ workspace.DescendantRemoving:Connect(function(item)
 	end
 end)
 RunService.Heartbeat:Connect(function()
-	if next(lost) ~= nil then
+	local now = os.clock()
+	if next(lost) ~= nil and now - refreshPassAt >= REFRESH_EVERY then
+		refreshPassAt = now
 		local keys = lost
 		lost = {}
 		for key in pairs(keys) do
 			showAgain(key)
 		end
+	end
+	if #refreshQueue > 0 then
+		refreshSome()
 	end
 end)
 
@@ -4454,6 +4495,92 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 end
 -- endregion
 
+-- region lights: only the nearest block lights shine (and only the nearest few cast shadows)
+--[[
+	Minecraft's light is free, Roblox pays for every PointLight on every frame - with shadows (Future lighting) a lot.
+	A Nether full of lava, a glowstone ceiling or a lit village made dozens of shadow-casting lights and the frame rate
+	broke down. Every 0.3 s: the McLight lights of the world sorted by distance to the camera, the nearest MAX on (within
+	their reach + a bit), shadows only for the nearest SHADOWS. Only on this client (the server's lights stay as they are).
+	How many: Roblox's graphics quality (Esc > Settings), like Minecraft's video settings.
+]]
+do -- (its own block: these locals do not count towards the 200 of the script)
+	local lights: { [PointLight]: boolean } = {}
+	local tracked = 0
+	local function track(item: Instance)
+		if item:IsA("PointLight") and item.Name == "McLight" and not lights[item] then
+			lights[item] = true
+			tracked += 1
+		end
+	end
+	local function untrack(item: Instance)
+		if lights[item :: any] then
+			lights[item :: any] = nil
+			tracked -= 1
+		end
+	end
+	local function budget(): (number, number)
+		local level = 0
+		pcall(function()
+			level = UserSettings():GetService("UserGameSettings").SavedQualityLevel.Value
+		end)
+		if level == 0 then
+			return 24, 4 -- (automatic)
+		elseif level <= 3 then
+			return 8, 1
+		elseif level <= 6 then
+			return 16, 3
+		end
+		return 32, 6
+	end
+	task.spawn(function()
+		local world = workspace:WaitForChild("MinecraftWorld", 60)
+		if not world then
+			return
+		end
+		world.DescendantAdded:Connect(track)
+		world.DescendantRemoving:Connect(untrack)
+		for _, item in ipairs(world:GetDescendants()) do
+			track(item)
+		end
+		local list = {}
+		while true do
+			task.wait(0.3)
+			local camera = workspace.CurrentCamera
+			if not camera or tracked == 0 then
+				continue
+			end
+			local eye = camera.CFrame.Position
+			local most, shadows = budget()
+			table.clear(list)
+			for light in pairs(lights) do
+				local part = light.Parent
+				if part and part:IsA("BasePart") then
+					table.insert(list, { light, (part.Position - eye).Magnitude - light.Range })
+				end
+			end
+			table.sort(list, function(a, b)
+				return a[2] < b[2]
+			end)
+			local on, shadowed = 0, 0
+			for index, item in ipairs(list) do
+				local light: PointLight = item[1]
+				local enabled = index <= most and item[2] < 24 -- (its reach + 8 blocks from the eye)
+				local shadow = enabled and index <= shadows
+				if light.Enabled ~= enabled then
+					light.Enabled = enabled
+				end
+				if light.Shadows ~= shadow then
+					light.Shadows = shadow
+				end
+				on += if enabled then 1 else 0
+				shadowed += if shadow then 1 else 0
+			end
+			player:SetAttribute("McLightsInfo", string.format("%d/%d an, %d Schatten", on, tracked, shadowed)) -- (F3)
+		end
+	end)
+end
+-- endregion
+
 -- region sounds: what Minecraft plays near him (remote Sounds, from the topic mcworld.sounds) + the footsteps of
 -- everybody (Minecraft's clients make those themselves: one step per 1.67 blocks walked, the block's sound group)
 do -- (its own block: these locals do not count towards the 200 of the script)
@@ -4717,6 +4844,129 @@ for _, name in ipairs({ "McTopTurn", "McBottomTurn" }) do
 		end
 	end)
 end
+
+-- region F3: Minecraft's debug screen - frame rate, place, what the world costs here and on the server
+do -- (its own block: these locals do not count towards the 200 of the script)
+	local Stats = game:GetService("Stats")
+	local debugGui = Instance.new("ScreenGui")
+	debugGui.Name = "McDebug"
+	debugGui.ResetOnSpawn = false
+	debugGui.DisplayOrder = 20
+	debugGui.Enabled = false
+	local text = Instance.new("TextLabel")
+	text.BackgroundColor3 = Color3.new(0, 0, 0)
+	text.BackgroundTransparency = 0.55
+	text.BorderSizePixel = 0
+	text.Position = UDim2.fromOffset(4, 4)
+	text.AutomaticSize = Enum.AutomaticSize.XY
+	text.Font = Enum.Font.Code
+	text.TextSize = 14
+	text.TextColor3 = Color3.new(1, 1, 1)
+	text.TextXAlignment = Enum.TextXAlignment.Left
+	text.TextYAlignment = Enum.TextYAlignment.Top
+	text.Text = ""
+	text.Parent = debugGui
+	debugGui.Parent = player:WaitForChild("PlayerGui")
+	local parts, textures = 0, 0
+	local function counted(item: Instance, step: number)
+		if item:IsA("BasePart") then
+			parts += step
+		elseif item:IsA("Texture") then
+			textures += step
+		end
+	end
+	task.spawn(function()
+		local world = workspace:WaitForChild("MinecraftWorld", 60)
+		if world then
+			world.DescendantAdded:Connect(function(item)
+				counted(item, 1)
+			end)
+			world.DescendantRemoving:Connect(function(item)
+				counted(item, -1)
+			end)
+			for _, item in ipairs(world:GetDescendants()) do
+				counted(item, 1)
+			end
+		end
+	end)
+	local frames, frameTime, worst = 0, 0, 0
+	RunService.RenderStepped:Connect(function(dt)
+		frames += 1
+		frameTime += dt
+		worst = math.max(worst, dt)
+	end)
+	local server: any = nil
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if input.KeyCode == Enum.KeyCode.F3 and not processed then
+			debugGui.Enabled = not debugGui.Enabled
+		end
+	end)
+	task.spawn(function()
+		while true do
+			task.wait(0.5)
+			if not debugGui.Enabled then
+				frames, frameTime, worst = 0, 0, 0
+				continue
+			end
+			local statsRemote = remotes:FindFirstChild("WorldStats")
+			if statsRemote and statsRemote:IsA("RemoteFunction") then
+				task.spawn(function()
+					local ok, answer = pcall(function()
+						return (statsRemote :: RemoteFunction):InvokeServer()
+					end)
+					if ok and type(answer) == "table" then
+						server = answer
+					end
+				end)
+			end
+			local fps = if frameTime > 0 then frames / frameTime else 0
+			local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+			local scale = (assets and assets.scale) or 3
+			local minY = (assets and assets.minY) or 0
+			local lines = {
+				string.format("Bridge MinecraftWorld  %d fps (schlechtester Frame %.0f ms)", math.floor(fps + 0.5), worst * 1000),
+			}
+			if root then
+				local p = root.Position
+				local bx, by, bz = math.floor(p.X / scale), math.floor(p.Y / scale) + minY - 1, math.floor(p.Z / scale)
+				local dim = (by + 128) // 1024 -- (Dims: 1024 blocks per dimension)
+				table.insert(lines, string.format("XYZ: %d / %d / %d   Chunk %d %d   Dimension %s", bx, by - dim * 1024, bz,
+					bx // 16, bz // 16, if dim == 0 then "Oberwelt" elseif dim == 1 then "Nether" elseif dim == 2 then "End"
+						else tostring(dim)))
+			end
+			local images = 0
+			for _ in pairs(cache) do
+				images += 1
+			end
+			table.insert(lines, string.format("Welt hier: %d Parts, %d Texturen, %d Bilder, Textur-Auffrischen wartet: %d",
+				parts, textures, images, #refreshQueue))
+			table.insert(lines, "Lichter: " .. tostring(player:GetAttribute("McLightsInfo") or "-"))
+			local memory, instances, received, sent = 0, 0, 0, 0
+			pcall(function()
+				memory = Stats:GetTotalMemoryUsageMb()
+				instances = Stats.InstanceCount
+				received = Stats.DataReceiveKbps
+				sent = Stats.DataSendKbps
+			end)
+			table.insert(lines, string.format("Speicher %.0f MB, %d Instanzen, Netz rein %.0f KB/s raus %.0f KB/s", memory,
+				instances, received, sent))
+			if server then
+				local dims = {}
+				for dim, count in pairs(server.byDim or {}) do
+					table.insert(dims, string.format("%s %d", if tonumber(dim) == 0 then "Oberwelt" elseif tonumber(dim) == 1
+						then "Nether" elseif tonumber(dim) == 2 then "End" else tostring(dim), count))
+				end
+				table.insert(lines, string.format("Server: %d Chunks (%s), %d Abschnitte, %d Parts, Bau-Warteschlange %d",
+					server.chunks or 0, table.concat(dims, ", "), server.sections or 0, server.parts or 0, server.queue or 0))
+				table.insert(lines, string.format("Server-Frame %.1f ms (schlechtester %.0f ms), Bauen %.1f ms/Abschnitt, Bridge %d Anfragen/min",
+					server.frameMs or 0, server.worstMs or 0, server.buildMs or 0, server.requestsPerMinute or 0))
+			end
+			text.Text = table.concat(lines, "\n")
+			frames, frameTime, worst = 0, 0, 0
+		end
+	end)
+end
+-- endregion
 
 -- region start
 local function useAssets(newAssets)

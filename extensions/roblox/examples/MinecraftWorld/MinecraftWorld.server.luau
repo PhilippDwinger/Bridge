@@ -733,10 +733,22 @@ local function boxId(box)
 end
 
 -- Light like Minecraft's block light (torch 14, glowstone / lava 15): a PointLight reaching that many blocks,
--- in the warm colour of Minecraft's block light
-local function addLight(part, light, scale)
+-- in the warm colour of Minecraft's block light. Not one per block: a lava lake, a glowstone ceiling or a field of
+-- torches would be hundreds of lights (each one costs every client a lot, with shadows even more) - a light only where
+-- no other light of this section is within LIGHT_SPACING blocks (it reaches 15 blocks: the place stays lit). The
+-- clients switch on only the nearest ones anyway (MinecraftClient, region lights).
+local LIGHT_SPACING = 6
+local function addLight(part, light, scale, spots, at)
 	if type(light) ~= "number" or light <= 0 then
 		return
+	end
+	if spots and at then
+		for _, other in ipairs(spots) do
+			if (other - at).Magnitude < LIGHT_SPACING then
+				return
+			end
+		end
+		table.insert(spots, at)
 	end
 	local point = Instance.new("PointLight")
 	point.Name = "McLight"
@@ -750,6 +762,9 @@ end
 local function renderSection(chunk, sectionY, section, force)
 	local old = section.parts
 	local kept = {}
+	-- where this section has lights (block coordinates): the ones of parts that stay, then the new ones
+	local oldSpots = section.lightSpots or {}
+	local spots, keptSpots = {}, {}
 	local scale = world.info.studsPerBlock
 	local minY = world.info.minY
 	local meshStarted = os.clock()
@@ -770,6 +785,10 @@ local function renderSection(chunk, sectionY, section, force)
 		if existing and existing.Parent then
 			old[id] = nil
 			kept[id] = existing
+			if oldSpots[id] then
+				keptSpots[id] = oldSpots[id]
+				table.insert(spots, oldSpots[id])
+			end
 			continue
 		end
 		local blockX = chunk.x * 16 + box.x
@@ -791,7 +810,12 @@ local function renderSection(chunk, sectionY, section, force)
 			if look.light then
 				for _, piece in ipairs(model:GetChildren()) do
 					if piece:IsA("BasePart") then
-						addLight(piece, look.light, scale) -- (one light per block, in its first part)
+						local at = Vector3.new(blockX, blockY, blockZ)
+						local before = #spots
+						addLight(piece, look.light, scale, spots, at) -- (in its first part)
+						if #spots > before then
+							keptSpots[id] = at
+						end
 						break
 					end
 				end
@@ -846,7 +870,14 @@ local function renderSection(chunk, sectionY, section, force)
 				local span = if texture and texture.span then texture.span else 1
 				pictureOn(part, face[1], key, scale * span, scale * span)
 			end
-			addLight(part, look.light, scale)
+			if look.light then
+				local at = Vector3.new(blockX + box.w / 2, blockY + box.h / 2, blockZ + box.d / 2)
+				local before = #spots
+				addLight(part, look.light, scale, spots, at)
+				if #spots > before then
+					keptSpots[id] = at
+				end
+			end
 			if look.boxes then
 				-- a cube with its own collision (soul sand): the picture does not collide, its boxes do
 				part.CanCollide = false
@@ -870,6 +901,7 @@ local function renderSection(chunk, sectionY, section, force)
 		part:Destroy() -- (only now: the new parts are already there)
 	end
 	section.parts = kept
+	section.lightSpots = keptSpots
 end
 
 local function decodeSection(data)
@@ -2013,6 +2045,7 @@ local function manage()
 	if has and info.follow then
 		local limit = (VIEW + 2) * (VIEW + 2)
 		local unloaded = 0
+		local started = os.clock()
 		for key, chunk in pairs(world.chunks) do
 			local near = false
 			for _, point in ipairs(points) do
@@ -2022,8 +2055,10 @@ local function manage()
 					break
 				end
 			end
-			if not near and unloaded < 6 then
-				unloaded += 1 -- (a few per round: a portal / far teleport does not stop the server for a moment)
+			-- (a few per round, at most ~4 ms: a portal / far teleport does not stop the server for a moment - but the
+			-- old world is gone within seconds, it costs every client while it is there)
+			if not near and (unloaded < 2 or os.clock() - started < 0.004) then
+				unloaded += 1
 				unloadChunk(key, chunk)
 			end
 		end
@@ -3589,6 +3624,53 @@ local itemFolder = workspace:FindFirstChild("MinecraftItems") or Instance.new("F
 itemFolder.Name = "MinecraftItems"
 itemFolder.Parent = workspace
 local itemAnchors = {} -- entity id (text) -> invisible Part where it lies; the clients draw the item there
+
+-- region F3 (the debug screen of the clients): what the server knows - world, building, Bridge requests, its frame time
+do -- (a block: its locals do not count towards the script's 200)
+	local statsRemote = remote("RemoteFunction", "WorldStats")
+	local frames, frameTotal, frameWorst = 0, 0, 0
+	RunService.Heartbeat:Connect(function(dt)
+		frames += 1
+		frameTotal += dt
+		frameWorst = math.max(frameWorst, dt)
+	end)
+	local sample = { at = os.clock(), requests = 0, perMinute = 0, frameMs = 0, worstMs = 0 }
+	local askedAt = {}
+	statsRemote.OnServerInvoke = function(player)
+		local now = os.clock()
+		if now - (askedAt[player] or 0) < 0.5 then
+			return nil -- (at most twice a second per player)
+		end
+		askedAt[player] = now
+		if now - sample.at >= 2 then
+			local ok, stats = pcall(function()
+				return client:GetStats()
+			end)
+			local requests = if ok and type(stats) == "table" then tonumber(stats.Requests) or 0 else 0
+			sample.perMinute = (requests - sample.requests) / (now - sample.at) * 60
+			sample.requests = requests
+			sample.frameMs = if frames > 0 then frameTotal / frames * 1000 else 0
+			sample.worstMs = frameWorst * 1000
+			frames, frameTotal, frameWorst = 0, 0, 0
+			sample.at = now
+		end
+		local chunks, sections, parts = worldStats()
+		local byDim = {}
+		for _, chunk in pairs(world.chunks) do
+			byDim[chunk.dim or 0] = (byDim[chunk.dim or 0] or 0) + 1
+		end
+		return {
+			chunks = chunks, sections = sections, parts = parts, queue = #renderQueue, view = VIEW, byDim = byDim,
+			buildMs = buildStats.total / math.max(1, buildStats.count) * 1000, buildWorstMs = buildStats.longest * 1000,
+			requestsPerMinute = math.floor(sample.perMinute + 0.5), frameMs = sample.frameMs, worstMs = sample.worstMs,
+			bridge = Config.Server or "",
+		}
+	end
+	Players.PlayerRemoving:Connect(function(player)
+		askedAt[player] = nil
+	end)
+end
+-- endregion
 
 -- region sounds (topic mcworld.sounds: Minecraft's sounds near the Roblox players -> each client that can hear them;
 -- the clients play their uploaded copies - MinecraftSoundIds, tools/upload_sounds.py)

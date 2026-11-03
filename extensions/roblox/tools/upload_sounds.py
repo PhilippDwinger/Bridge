@@ -119,17 +119,32 @@ def first_file(sounds, event, depth=0):
     return None
 
 
+class UploadError(Exception):
+    pass
+
+
 def request(method, url, key, body=None, content_type=None):
+    """One Open Cloud request. Too many requests (429) / Roblox busy (5xx): waits and tries again (up to 6 times)."""
     headers = {"x-api-key": key}
     if content_type:
         headers["Content-Type"] = content_type
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as error:
-        text = error.read().decode("utf-8", "replace")
-        raise SystemExit(f"Roblox answered {error.code} for {url}: {text[:500]}")
+    for attempt in range(6):
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as error:
+            text = error.read().decode("utf-8", "replace")
+            if error.code == 429 or error.code >= 500:
+                wait = float(error.headers.get("Retry-After") or 0) or min(60, 5 * 2 ** attempt)
+                print(f"        Roblox {error.code} - waiting {wait:.0f} s ...")
+                time.sleep(wait)
+                continue
+            raise UploadError(f"Roblox answered {error.code}: {text[:300]}")
+        except (urllib.error.URLError, TimeoutError) as error:
+            print(f"        no connection ({error}) - waiting 10 s ...")
+            time.sleep(10)
+    raise UploadError("Roblox did not answer after several tries")
 
 
 def upload(name, data, key, user_id):
@@ -154,11 +169,11 @@ def upload(name, data, key, user_id):
             asset = operation.get("response", {})
             asset_id = asset.get("assetId")
             if not asset_id:
-                raise SystemExit(f"{name}: no asset id ({json.dumps(operation)[:300]})")
+                raise UploadError(f"no asset id ({json.dumps(operation)[:300]})")
             return int(asset_id)
         time.sleep(2)
         operation = request("GET", API + path, key)
-    raise SystemExit(f"{name}: Roblox did not finish the upload in time")
+    raise UploadError("Roblox did not finish the upload in time")
 
 
 def write_ids(event_ids):
@@ -197,6 +212,7 @@ def main():
     uploaded = 0
     unknown = []
     later = 0
+    failed = []
     for event in EVENTS:
         name = first_file(sounds, event)
         digest = index.get(f"minecraft/sounds/{name}.ogg") if name else None
@@ -204,22 +220,35 @@ def main():
             unknown.append(event)
             continue
         if name not in done:
+            if name in failed:
+                continue
             if uploaded >= limit:
                 later += 1
                 continue
             with open(object_path(assets, digest), "rb") as handle:
                 data = handle.read()
-            done[name] = upload(name, data, key, user_id)
+            try:
+                done[name] = upload(name, data, key, user_id)
+            except UploadError as error:
+                # (one sound Roblox does not take - moderation, a limit - does not stop the others)
+                print(f"  FAIL  {event}: {name} - {error}")
+                failed.append(name)
+                if "limit" in str(error).lower() or "quota" in str(error).lower():
+                    print("        looks like Roblox's upload limit - stopping here, run it again later")
+                    break
+                continue
             uploaded += 1
             with open(DONE, "w", encoding="utf-8") as handle:
                 json.dump(done, handle, indent=1, sort_keys=True)
             print(f"  up    {event}: {name} -> {done[name]}")
         event_ids[event] = done[name]
+        write_ids(event_ids)  # (after every sound: an interrupted run keeps what it has)
     write_ids(event_ids)
     if unknown:
         print(f"not in this Minecraft version: {', '.join(unknown)}")
     print(f"{uploaded} files uploaded now, {len(event_ids)} sounds in MinecraftSoundIds.luau"
-          + (f", {later} still to come (limit reached - run it again later)" if later else ""))
+          + (f", {later} still to come (limit reached - run it again later)" if later else "")
+          + (f", {len(failed)} not taken by Roblox: {', '.join(failed)}" if failed else ""))
 
 
 if __name__ == "__main__":
