@@ -123,11 +123,29 @@ local function base64(data)
 end
 
 local generatedChunks = {} -- chunks Minecraft has "generated" (the first ask answers later)
+local netherAsked = 0
 local chunkCalls, laterAnswers, bytesSent = 0, 0, 0
-local function packChunk(cx, cz)
+-- the Nether (dimension 1, Roblox y = y + 1024): bedrock at 0 and 127, netherrack floor + roof, lava sea below 31
+local function netherAt(x, y, z)
+	if y == 0 or y == 127 then
+		return "minecraft:bedrock"
+	end
+	if y > 127 then
+		return "minecraft:air"
+	end
+	local floor = 34 + math.floor(4 * math.sin(x / 7) + 3 * math.cos(z / 5))
+	local roof = 100 + math.floor(3 * math.sin(z / 6))
+	if y <= floor or y >= roof then
+		return "minecraft:netherrack"
+	end
+	return "minecraft:air"
+end
+local function packChunk(cx, cz, dim)
 	local palette, index = { "minecraft:air" }, { ["minecraft:air"] = 0 }
 	local ys, parts = {}, {}
-	for sy = MIN_Y // 16, (MAX_Y - 1) // 16 do
+	local nether = dim == 1
+	local blockAt = if nether then netherAt else blockAt
+	for sy = if nether then 0 else MIN_Y // 16, if nether then 15 else (MAX_Y - 1) // 16 do
 		local bytes = table.create(4096)
 		local any = false
 		local n = 0
@@ -150,7 +168,7 @@ local function packChunk(cx, cz)
 			end
 		end
 		if any then
-			table.insert(ys, sy)
+			table.insert(ys, if nether then sy + 64 else sy)
 			local chars = table.create(4096)
 			for k = 1, 4096 do
 				chars[k] = string.char(bytes[k])
@@ -159,7 +177,7 @@ local function packChunk(cx, cz)
 		end
 	end
 	local data = base64(serde.compress("zlib", table.concat(parts)))
-	return { x = cx, z = cz, v = 2, palette = palette, ys = ys, wide = false, data = data }
+	return { x = cx, z = cz, v = 2, palette = palette, ys = ys, wide = false, data = data, d = if nether then 1 else nil }
 end
 
 -- the looks of the blocks (cubes: one picture per face; water + leaves see-through)
@@ -215,19 +233,24 @@ function fakeClient:Call(command, args)
 	task.wait(0.01) -- (a round trip)
 	if command == "mcworld.info" then
 		return { version = 1, label = "MC", spawn = SPAWN, minY = MIN_Y, maxY = MAX_Y, center = { 0, 0 }, radius = 4,
-			studsPerBlock = 3, rootHeight = 3, follow = true, maxReach = 32 }
+			studsPerBlock = 3, rootHeight = 3, follow = true, maxReach = 32,
+			dims = { { i = 0, id = "minecraft:overworld", kind = "overworld", shift = 0, minY = MIN_Y, maxY = MAX_Y },
+				{ i = 1, id = "minecraft:the_nether", kind = "nether", shift = 1024, minY = 0, maxY = 256, ceiling = true } } }
 	elseif command == "mcworld.chunks" then
 		chunkCalls += 1
 		local answer, size = {}, 0
 		for _, pair in ipairs(args.chunks) do
-			local cx, cz = pair[1], pair[2]
-			local key = cx .. "," .. cz
+			local cx, cz, dim = pair[1], pair[2], pair[3] or 0
+			local key = cx .. "," .. cz .. "@" .. dim
+			if dim == 1 then
+				netherAsked += 1
+			end
 			if not generatedChunks[key] or size >= 36000 then
 				generatedChunks[key] = true -- generated now - the next ask gets it
 				laterAnswers += 1
-				table.insert(answer, { x = cx, z = cz, later = true })
+				table.insert(answer, { x = cx, z = cz, later = true, d = if dim ~= 0 then dim else nil })
 			else
-				local chunk = packChunk(cx, cz)
+				local chunk = packChunk(cx, cz, dim)
 				size += #chunk.data
 				bytesSent += #chunk.data
 				table.insert(answer, chunk)
@@ -695,6 +718,48 @@ do
 	inventory.handler(paddy, "close")
 	frames(0.5)
 	check(playerCalls.close == 1, "chest: closed")
+end
+
+-- through a nether portal: Minecraft sends mc.teleport (Roblox y of the Nether: + 1024 blocks) - the character waits
+-- up there until the Nether around it is built, the overworld goes away
+do
+	local netherX, netherZ = 8, 8
+	local floorY = netherAt(netherX, 0, netherZ) and (34 + math.floor(4 * math.sin(netherX / 7) + 3 * math.cos(netherZ / 5)))
+	local feetBlockY = floorY + 1 + 1024
+	local rootY = (feetBlockY - MIN_Y) * SCALE + 3
+	for _, handler in ipairs(messageHandlers) do
+		handler({ Content = { type = "mc.teleport", u = 4242, p = { (netherX + 0.5) * SCALE, rootY, (netherZ + 0.5) * SCALE },
+			yaw = 0, dim = 1 } })
+	end
+	root.Position = root.CFrame.Position -- (Lune: Position does not follow CFrame by itself)
+	frames(0.3)
+	check(root.Anchored == true, "portal: the character waits in the Nether until it is built")
+	local arrived = frames(120, function()
+		return workspaceRoot.MinecraftWorld:FindFirstChild("Chunk 0,0@1") ~= nil and not root.Anchored
+	end)
+	check(arrived, "portal: Nether chunks come (Chunk 0,0@1) and the character goes on (" .. netherAsked .. " asks)")
+	local function overworldLeft()
+		local left = 0
+		for _, folder in ipairs(workspaceRoot.MinecraftWorld:GetChildren()) do
+			if not string.find(folder.Name, "@", 1, true) then
+				left += 1
+			end
+		end
+		return left
+	end
+	frames(30, function()
+		return overworldLeft() == 0 and queueEmpty()
+	end)
+	check(overworldLeft() == 0, "portal: the overworld chunks went away (" .. overworldLeft() .. " left)")
+	-- the floor under him is built (a part right below his feet, in the Nether's height band)
+	local covered = cellsOfParts()
+	check(covered[netherX .. "," .. (feetBlockY - 1) .. "," .. netherZ] ~= nil,
+		"portal: the Nether floor under him is built (y " .. (feetBlockY - 1) .. ")")
+	local inNether = 0
+	for _ in pairs(covered) do
+		inNether += 1
+	end
+	check(inNether > 0, "portal: blocks in the Nether band")
 end
 
 print(string.format("RESULT %s", serde.encode("json", { failures = #failures, chunks = chunks, parts = parts,

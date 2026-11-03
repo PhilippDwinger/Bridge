@@ -623,7 +623,7 @@ local itemName = Instance.new("TextLabel")
 itemName.Name = "ItemName"
 itemName.BackgroundTransparency = 1
 itemName.AnchorPoint = Vector2.new(0.5, 1)
-itemName.Position = UDim2.new(0.5, 0, 0, -26) -- above the hearts
+itemName.Position = UDim2.new(0.5, 0, 0, -36) -- above the hearts (and the armor row)
 itemName.Size = UDim2.fromOffset(182, 10)
 itemName.Font = Enum.Font.Arcade
 itemName.TextSize = 9
@@ -1837,7 +1837,17 @@ local function buildAtOnce(id: number)
 		return
 	end
 	local x, y, z = target.x + step.X, target.y + step.Y, target.z + step.Z
-	if y < assets.minY or y >= assets.maxY then
+	local lowest, highest = assets.minY, assets.maxY
+	if type(assets.dims) == "table" and #assets.dims > 1 then
+		-- (every dimension at its own height: the one this block is in)
+		local d = math.clamp((y + 352) // 1024, 0, #assets.dims - 1)
+		local dim = assets.dims[d + 1]
+		if type(dim) == "table" then
+			lowest = (tonumber(dim.minY) or 0) + (tonumber(dim.shift) or 0)
+			highest = (tonumber(dim.maxY) or 256) + (tonumber(dim.shift) or 0)
+		end
+	end
+	if y < lowest or y >= highest then
 		return
 	end
 	local scale = assets.scale
@@ -2772,13 +2782,93 @@ local function updateFood(survival: boolean)
 	end
 end
 
+-- the armor row above the hearts (Minecraft: only with armor, 20 points = 10 chestplates) and the experience bar
+-- between hearts and hotbar with the level in green (Gui.renderExperienceBar / renderArmor)
+local armors = {}
+for index = 1, 10 do
+	armors[index] = image(hotbar, "Armor" .. index, (index - 1) * 8, -27, 9, 9, 4)
+end
+local xpBack = image(hotbar, "Experience", 0, -7, 182, 5, 3)
+local xpClip = Instance.new("Frame")
+xpClip.Name = "Progress"
+xpClip.BackgroundTransparency = 1
+xpClip.ClipsDescendants = true
+xpClip.Size = UDim2.fromOffset(0, 5)
+xpClip.ZIndex = 4
+xpClip.Parent = xpBack
+local xpFill = image(xpClip, "Fill", 0, 0, 182, 5, 4)
+local xpLevel = Instance.new("TextLabel")
+xpLevel.Name = "Level"
+xpLevel.BackgroundTransparency = 1
+xpLevel.AnchorPoint = Vector2.new(0.5, 1)
+xpLevel.Position = UDim2.new(0.5, 0, 0, -4)
+xpLevel.Size = UDim2.fromOffset(40, 9)
+xpLevel.Font = Enum.Font.Arcade
+xpLevel.TextSize = 9
+xpLevel.TextColor3 = Color3.fromRGB(128, 255, 32)
+xpLevel.TextStrokeColor3 = Color3.new(0, 0, 0)
+xpLevel.TextStrokeTransparency = 0
+xpLevel.ZIndex = 6
+xpLevel.Parent = hotbar
+local function updateArmorAndXp(survival: boolean)
+	local armor = math.floor(tonumber(player:GetAttribute("McArmor")) or 0)
+	local empty, full, half = gui("armor_empty"), gui("armor_full"), gui("armor_half")
+	for index, label in ipairs(armors) do
+		label.Visible = survival and armor > 0
+		local points = armor - (index - 1) * 2
+		setPicture(label, if points >= 2 then full elseif points == 1 then half else empty)
+		label.BackgroundTransparency = if full then 1 else 0.5
+		label.BackgroundColor3 = if points >= 1 then Color3.fromRGB(200, 200, 210) else Color3.fromRGB(40, 40, 40)
+	end
+	local level = math.floor(tonumber(player:GetAttribute("McXpLevel")) or 0)
+	local progress = math.clamp(tonumber(player:GetAttribute("McXpProgress")) or 0, 0, 1)
+	xpBack.Visible = survival
+	setPicture(xpBack, gui("experience_bar_background"))
+	setPicture(xpFill, gui("experience_bar_progress"))
+	xpBack.BackgroundTransparency = if gui("experience_bar_background") then 1 else 0.5
+	xpBack.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	xpFill.BackgroundTransparency = if gui("experience_bar_progress") then 1 else 0
+	xpFill.BackgroundColor3 = Color3.fromRGB(128, 255, 32)
+	xpClip.Size = UDim2.fromOffset(math.floor(progress * 183), 5)
+	xpLevel.Visible = survival and level > 0
+	xpLevel.Text = tostring(level)
+end
+
+-- burning (lava, fire - attribute McBurning on his character): Minecraft's flames at the bottom of the screen
+local burningOverlay = Instance.new("Frame")
+burningOverlay.Name = "Burning"
+burningOverlay.AnchorPoint = Vector2.new(0, 1)
+burningOverlay.Position = UDim2.fromScale(0, 1)
+burningOverlay.Size = UDim2.fromScale(1, 0.45)
+burningOverlay.BackgroundColor3 = Color3.fromRGB(255, 120, 20)
+burningOverlay.BorderSizePixel = 0
+burningOverlay.Visible = false
+burningOverlay.ZIndex = 0
+burningOverlay.Parent = screen
+local burningGradient = Instance.new("UIGradient")
+burningGradient.Rotation = -90
+burningGradient.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 1) })
+burningGradient.Color = ColorSequence.new(Color3.fromRGB(255, 200, 60), Color3.fromRGB(230, 60, 10))
+burningGradient.Parent = burningOverlay
+local function updateBurning()
+	local character = player.Character
+	local burning = character ~= nil and character:GetAttribute("McBurning") == true
+	burningOverlay.Visible = burning
+	if burning then
+		local flicker = 0.35 + 0.12 * math.sin(os.clock() * 23) + 0.06 * math.sin(os.clock() * 41)
+		burningGradient.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, flicker), NumberSequenceKeypoint.new(1, 1) })
+	end
+end
+
 local function updateHearts()
+	updateBurning()
 	local mode = gameMode()
 	local survival = mode == "survival" or mode == "adventure" -- (creative / spectator: no hearts, like Minecraft)
 	for _, heart in ipairs(hearts) do
 		heart.container.Visible = survival
 	end
 	updateFood(survival)
+	updateArmorAndXp(survival)
 	if not survival then
 		return
 	end

@@ -67,6 +67,81 @@ local function attribute(name: string, fallback: any): any
 	return value
 end
 
+-- region the other dimensions: each lies at its own height (assets.dims); their sky comes in McDimSky (JSON: index ->
+-- {skybox, ceiling, sky, fog, ambient, skyLight, stars, waterFog, waterColor ...} sampled by Minecraft where a
+-- player of that dimension stands). The Nether: no sun, moon, clouds or rain - its biome fog all around. The End: dark.
+local dimSkyText = ""
+local dimSky: { [string]: any } = {}
+local current: any = nil -- the entry of the dimension the camera is in (nil = the overworld)
+local currentKind = "overworld"
+
+local function rgbOf(value: any, fallback: Color3): Color3
+	if type(value) == "table" and #value >= 3 then
+		return Color3.fromRGB(tonumber(value[1]) or 0, tonumber(value[2]) or 0, tonumber(value[3]) or 0)
+	end
+	return fallback
+end
+
+local DIM_NAMES: { [string]: { string } } = {
+	McSkyColor = { "sky", "color" }, McFogColor = { "fog", "color" }, McSkyLightColor = { "skyLightColor", "color" },
+	McWaterFogColor = { "waterFog", "color" }, McWaterColor = { "waterColor", "color" },
+	McSkyLight = { "skyLight", "number" }, McStarBrightness = { "stars", "number" },
+}
+local DIM_NONE: { [string]: any } = {
+	McRain = 0, McThunder = 0, McPrecipitation = "none", McSunriseAlpha = 0, McCloudAlpha = 0,
+}
+
+local function dimAttribute(name: string, fallback: any): any
+	if not current then
+		return attribute(name, fallback)
+	end
+	local none = DIM_NONE[name]
+	if none ~= nil then
+		return none
+	end
+	local mapped = DIM_NAMES[name]
+	if mapped then
+		local value = current[mapped[1]]
+		if mapped[2] == "color" then
+			return rgbOf(value, if typeof(fallback) == "Color3" then fallback else Color3.new())
+		end
+		return if type(value) == "number" then value else fallback
+	end
+	return attribute(name, fallback)
+end
+
+-- Which dimension the camera is in (its height band, like the mod's Dims: band 1024 blocks, from y - 352)
+local function updateDimension(assets: any, eyeY: number, scale: number)
+	local dims = assets and assets.dims
+	if type(dims) ~= "table" or #dims <= 1 then
+		current, currentKind = nil, "overworld"
+		return
+	end
+	local blockY = math.floor(eyeY / scale) + (assets.minY or -64)
+	local d = math.clamp((blockY + 352) // 1024, 0, #dims - 1)
+	local entry = dims[d + 1]
+	if d == 0 or type(entry) ~= "table" then
+		current, currentKind = nil, "overworld"
+		return
+	end
+	local text = Lighting:GetAttribute("McDimSky")
+	if type(text) == "string" and text ~= dimSkyText then
+		dimSkyText = text
+		local ok, decoded = pcall(function()
+			return game:GetService("HttpService"):JSONDecode(text)
+		end)
+		dimSky = if ok and type(decoded) == "table" then decoded else {}
+	end
+	currentKind = tostring(entry.kind or "nether")
+	current = dimSky[tostring(d)] or {
+		-- (not from Minecraft yet: its usual look)
+		fog = if currentKind == "end" then { 10, 10, 16 } else { 51, 8, 8 },
+		sky = if currentKind == "end" then { 0, 0, 0 } else { 51, 8, 8 },
+		skyLight = 0, stars = 0,
+	}
+end
+-- endregion
+
 local function lerpColor(a: Color3, b: Color3, t: number): Color3
 	return a:Lerp(b, math.clamp(t, 0, 1))
 end
@@ -230,17 +305,18 @@ function Sky.start(options: Options)
 		end
 		local assets = options.assets()
 		local scale = if assets and assets.scale then assets.scale else BLOCK
+		updateDimension(assets, camera.CFrame.Position.Y, scale)
 		local blend = 1 - math.exp(-dt * SMOOTH)
-		shown.sun = follow(shown.sun, attribute("McSunAngle", 0), blend, 360)
-		shown.moon = follow(shown.moon, attribute("McMoonAngle", 180), blend, 360)
-		shown.skyLight = follow(shown.skyLight, attribute("McSkyLight", 1), blend)
-		shown.sky = lerpColor(shown.sky, attribute("McSkyColor", shown.sky), blend)
-		shown.fog = lerpColor(shown.fog, attribute("McFogColor", shown.fog), blend)
-		shown.cloud = lerpColor(shown.cloud, attribute("McCloudColor", shown.cloud), blend)
-		shown.sunrise = lerpColor(shown.sunrise, attribute("McSunriseColor", shown.sunrise), blend)
-		shown.sunriseAlpha = follow(shown.sunriseAlpha, attribute("McSunriseAlpha", 0), blend)
-		shown.rain = follow(shown.rain, attribute("McRain", 0), blend)
-		shown.stars = follow(shown.stars, attribute("McStarBrightness", 0), blend)
+		shown.sun = follow(shown.sun, dimAttribute("McSunAngle", 0), blend, 360)
+		shown.moon = follow(shown.moon, dimAttribute("McMoonAngle", 180), blend, 360)
+		shown.skyLight = follow(shown.skyLight, dimAttribute("McSkyLight", 1), blend)
+		shown.sky = lerpColor(shown.sky, dimAttribute("McSkyColor", shown.sky), blend)
+		shown.fog = lerpColor(shown.fog, dimAttribute("McFogColor", shown.fog), blend)
+		shown.cloud = lerpColor(shown.cloud, dimAttribute("McCloudColor", shown.cloud), blend)
+		shown.sunrise = lerpColor(shown.sunrise, dimAttribute("McSunriseColor", shown.sunrise), blend)
+		shown.sunriseAlpha = follow(shown.sunriseAlpha, dimAttribute("McSunriseAlpha", 0), blend)
+		shown.rain = follow(shown.rain, dimAttribute("McRain", 0), blend)
+		shown.stars = follow(shown.stars, dimAttribute("McStarBrightness", 0), blend)
 
 		-- region Lighting: the clock + Minecraft's light (unless a shader of the settings menu does the look)
 		Lighting.ClockTime = Sky.clockTime(shown.sun)
@@ -255,7 +331,7 @@ function Sky.start(options: Options)
 		local nightVision = effects.night_vision ~= nil
 		local blind = effects.blindness ~= nil or effects.darkness ~= nil
 		if not options.shaderActive() then
-			local skyLightColor = attribute("McSkyLightColor", Color3.new(1, 1, 1)) :: Color3
+			local skyLightColor = dimAttribute("McSkyLightColor", Color3.new(1, 1, 1)) :: Color3
 			Lighting.Brightness = 2.4 * (if nightVision then 1 else daylight)
 			Lighting.OutdoorAmbient = scaleColor(skyLightColor, (if nightVision then 1 else brightness) * 0.62)
 			Lighting.Ambient = if nightVision then Color3.fromRGB(150, 150, 150) else Color3.fromRGB(16, 16, 20) -- (Minecraft: no sky light = dark, only block light)
@@ -280,8 +356,8 @@ function Sky.start(options: Options)
 				tint.Saturation = -0.3
 			elseif fluid == "water" then
 				-- Minecraft's water fog: its colour, 96 blocks far (darker at night)
-				local water = lerpColor(attribute("McWaterFogColor", Color3.fromRGB(5, 5, 51)),
-					attribute("McWaterColor", Color3.fromRGB(63, 118, 228)), 0.4)
+				local water = lerpColor(dimAttribute("McWaterFogColor", Color3.fromRGB(5, 5, 51)),
+					dimAttribute("McWaterColor", Color3.fromRGB(63, 118, 228)), 0.4)
 				a.Color = scaleColor(water, 0.3 + 0.7 * brightness)
 				a.Decay = a.Color
 				a.Density = 0.55
@@ -301,6 +377,24 @@ function Sky.start(options: Options)
 				tint.Enabled = true
 				tint.TintColor = Color3.fromRGB(255, 170, 120)
 				tint.Saturation = 0
+			elseif current then
+				-- the Nether / the End: no sun; the Nether's biome fog close around, the End dark
+				local nether = currentKind ~= "end"
+				local ambient = rgbOf(current.ambient, Color3.new())
+				if ambient.R + ambient.G + ambient.B < 0.15 then
+					ambient = if nether then Color3.fromRGB(95, 78, 72) else Color3.fromRGB(105, 100, 118)
+				end
+				Lighting.Brightness = 0
+				Lighting.OutdoorAmbient = if nightVision then Color3.fromRGB(200, 200, 200) else ambient
+				Lighting.Ambient = if nightVision then Color3.fromRGB(150, 150, 150) else scaleColor(ambient, 0.8)
+				Lighting.GlobalShadows = false
+				a.Color = shown.fog
+				a.Decay = if nether then shown.fog else shown.sky
+				a.Density = if nether then 0.62 else 0.4
+				a.Offset = 0
+				a.Haze = if nether then 2 else 0.5
+				a.Glare = 0
+				tint.Enabled = false
 			else
 				-- the horizon in Minecraft's fog colour, above it its sky colour; the sunrise glows into the haze
 				a.Color = lerpColor(shown.fog, shown.sunrise, shown.sunriseAlpha * 0.5)
@@ -319,6 +413,9 @@ function Sky.start(options: Options)
 
 		-- region sun + moon: where Roblox has them (the clock above), Minecraft's pictures
 		local hidden = 1 - math.clamp(shown.rain, 0, 1) -- Minecraft: rain hides sun and moon
+		if current and current.skybox ~= "overworld" then
+			hidden = 0 -- (the Nether / the End have none)
+		end
 		local function place(anchor: Part, gui: BillboardGui, image: ImageLabel, direction: Vector3, size: number,
 			key: string?)
 			anchor.CFrame = CFrame.new(eye + direction * CELESTIAL_DISTANCE)
@@ -333,19 +430,19 @@ function Sky.start(options: Options)
 		end
 		local gui = assets and assets.gui or {}
 		place(sunAnchor, sunGui, sunImage, Lighting:GetSunDirection(), SUN_SIZE, gui.sun)
-		local phase = attribute("McMoonPhase", "full_moon")
+		local phase = dimAttribute("McMoonPhase", "full_moon")
 		place(moonAnchor, moonGui, moonImage, Lighting:GetMoonDirection(), MOON_SIZE, gui["moon_" .. tostring(phase)])
 		-- endregion
 
 		-- region clouds: at Minecraft's cloud height, drifting east, the picture fixed to the world
 		local minY = if assets and assets.minY then assets.minY else -64
-		local cloudY = attribute("McCloudHeight", (192.33 - minY) * scale) :: number
+		local cloudY = dimAttribute("McCloudHeight", (192.33 - minY) * scale) :: number
 		local tile = CLOUD_TILE_BLOCKS * scale
 		local centre = Vector3.new(math.floor(eye.X / 64) * 64, cloudY, math.floor(eye.Z / 64) * 64)
 		clouds.CFrame = CFrame.new(centre)
 		local drift = (os.clock() - started) * CLOUD_SPEED * scale
 		local cloudContent = if gui.clouds then options.picture(gui.clouds) else nil
-		local cloudAlpha = (attribute("McCloudAlpha", 0.8) :: number)
+		local cloudAlpha = (dimAttribute("McCloudAlpha", 0.8) :: number)
 		for _, texture in ipairs(cloudTextures) do
 			if cloudContent and texture.TextureContent ~= cloudContent then
 				texture.TextureContent = cloudContent
@@ -358,7 +455,7 @@ function Sky.start(options: Options)
 		-- endregion
 
 		-- region rain + snow
-		local precipitation = attribute("McPrecipitation", "none")
+		local precipitation = dimAttribute("McPrecipitation", "none")
 		local raining = shown.rain > 0.01 and precipitation ~= "none"
 		local snow = precipitation == "snow"
 		local weatherKey = if snow then gui.snow else gui.rain

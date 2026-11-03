@@ -163,8 +163,47 @@ local function log(...)
 	print("[MinecraftWorld]", ...)
 end
 
-local function chunkKey(x, z)
+-- A chunk: "x,z" in the overworld, "x,z@d" in dimension d (Nether 1, End 2 ...)
+local function chunkKey(x, z, d)
+	if d and d ~= 0 then
+		return x .. "," .. z .. "@" .. d
+	end
 	return x .. "," .. z
+end
+
+-- region dimensions: every Minecraft dimension lies at its own height in this one world (Minecraft y + shift, the mod
+-- sends Roblox y everywhere): overworld 0, the Nether 1024, the End 2048 (info.dims)
+local DIM_BAND = 1024
+local DIM_BELOW = 352
+local function dimAt(blockY)
+	local dims = world.info and world.info.dims
+	if type(dims) ~= "table" or #dims == 0 then
+		return 0
+	end
+	return math.clamp((math.floor(blockY) + DIM_BELOW) // DIM_BAND, 0, #dims - 1)
+end
+-- {i, kind, shift, minY, maxY} of a dimension (minY / maxY: Roblox y)
+local function dimInfo(d)
+	local info = world.info
+	local dims = info and info.dims
+	local entry = type(dims) == "table" and dims[(d or 0) + 1]
+	if type(entry) == "table" then
+		local shift = tonumber(entry.shift) or 0
+		return {
+			i = d,
+			kind = entry.kind or "overworld",
+			shift = shift,
+			minY = (tonumber(entry.minY) or 0) + shift,
+			maxY = (tonumber(entry.maxY) or 256) + shift,
+			ceiling = entry.ceiling == true,
+		}
+	end
+	return { i = 0, kind = "overworld", shift = 0, minY = info and info.minY or -64, maxY = info and info.maxY or 320, ceiling = false }
+end
+-- Is a block y inside its dimension (not in the gap between two)?
+local function insideWorld(blockY)
+	local dim = dimInfo(dimAt(blockY))
+	return blockY >= dim.minY and blockY < dim.maxY
 end
 
 -- region blocks -> parts
@@ -397,11 +436,11 @@ end
 -- The six neighbour sections: a section (table), nil (air: above the top, or no blocks there) or false (solid:
 -- below the bottom of the world, or a chunk that is not loaded)
 local function neighbourSections(chunk, sectionY)
-	local info = world.info
-	local minSection = info.minY // 16
-	local maxSection = (info.maxY - 1) // 16
+	local dim = dimInfo(chunk.dim)
+	local minSection = dim.minY // 16
+	local maxSection = (dim.maxY - 1) // 16
 	local function side(dx, dz)
-		local other = world.chunks[chunkKey(chunk.x + dx, chunk.z + dz)]
+		local other = world.chunks[chunkKey(chunk.x + dx, chunk.z + dz, chunk.dim)]
 		if not other then
 			return false
 		end
@@ -794,11 +833,19 @@ local queueSorted = true
 local queueSortedAt = 0
 
 local function renderFromOf(chunk)
-	local ground = ((chunk.surface or world.info.minY) - 8) // 16
-	local floor = loader.playerFloor
+	local dim = dimInfo(chunk.dim)
+	local ground = ((chunk.surface or dim.minY) - 8) // 16
+	local floors = loader.playerFloor
+	local floor = if type(floors) == "table" then floors[chunk.dim or 0] else nil
 	if floor == nil then
+		if (chunk.dim or 0) ~= 0 then
+			return dim.minY // 16 -- (nobody of this dimension known yet: all of it)
+		end
 		local spawn = world.info.spawn
 		floor = spawn[2] // 16 - BELOW
+	end
+	if dim.ceiling then
+		return floor -- (the Nether: its "surface" is the bedrock roof - from below the players up)
 	end
 	return math.min(ground, floor)
 end
@@ -865,7 +912,7 @@ local function surfaceOf(chunk)
 			end
 		end
 	end
-	return world.info.minY -- a column without ground (void, a hole to the bottom): everything from the bottom
+	return dimInfo(chunk.dim).minY -- a column without ground (void, a hole to the bottom): everything from the bottom
 end
 
 -- A chunk arrived: the faces of its neighbours toward it may be seen now (air there) - only those sections again
@@ -878,7 +925,7 @@ local NEIGHBOURS = {
 }
 local function recheckNeighbours(chunk)
 	for _, side in ipairs(NEIGHBOURS) do
-		local other = world.chunks[chunkKey(chunk.x + side[1], chunk.z + side[2])]
+		local other = world.chunks[chunkKey(chunk.x + side[1], chunk.z + side[2], chunk.dim)]
 		if not other then
 			continue
 		end
@@ -942,7 +989,7 @@ RunService.Heartbeat:Connect(function()
 		local entry = table.remove(renderQueue)
 		local chunk = entry.chunk
 		local section = chunk.sections[entry.sy]
-		if section and section.queued and world.chunks[chunkKey(chunk.x, chunk.z)] == chunk then
+		if section and section.queued and world.chunks[chunkKey(chunk.x, chunk.z, chunk.dim)] == chunk then
 			section.queued = false
 			local force = section.queuedForce == true
 			section.queuedForce = nil
@@ -953,7 +1000,7 @@ RunService.Heartbeat:Connect(function()
 			buildStats.total += spent
 			buildStats.longest = math.max(buildStats.longest, spent)
 			if not ok then
-				warn("[MinecraftWorld] section " .. chunkKey(chunk.x, chunk.z) .. " y " .. entry.sy .. ": " .. tostring(err))
+				warn("[MinecraftWorld] section " .. chunkKey(chunk.x, chunk.z, chunk.dim) .. " y " .. entry.sy .. ": " .. tostring(err))
 			end
 		end
 	end
@@ -1069,12 +1116,13 @@ function noticeItems(ids)
 end
 
 local function applyChunk(data)
-	local key = chunkKey(data.x, data.z)
+	local dim = tonumber(data.d) or 0
+	local key = chunkKey(data.x, data.z, dim)
 	local old = world.chunks[key]
 	-- a chunk loaded again (after /fill, ...): its parts that are still right stay, only the changes are rebuilt
 	local folder = if old then old.folder else Instance.new("Folder")
 	folder.Name = "Chunk " .. key
-	local chunk = { x = data.x, z = data.z, sections = {}, folder = folder }
+	local chunk = { x = data.x, z = data.z, dim = dim, sections = {}, folder = folder }
 	if data.v == 2 then
 		chunk.sections = decodePacked(data)
 		noticeBlocks(data.palette or {})
@@ -1211,6 +1259,7 @@ local function clientAssets()
 		scale = info.studsPerBlock,
 		minY = info.minY,
 		maxY = info.maxY,
+		dims = info.dims, -- (every dimension at its own height: the clients check blocks against their own one)
 		textures = assets.textures,
 		blocks = assets.blocks,
 		items = assets.items,
@@ -1507,10 +1556,10 @@ function afterNewPictures()
 							again(chunk, sectionY)
 							again(chunk, sectionY + 1)
 							again(chunk, sectionY - 1)
-							again(world.chunks[chunkKey(chunk.x + 1, chunk.z)], sectionY)
-							again(world.chunks[chunkKey(chunk.x - 1, chunk.z)], sectionY)
-							again(world.chunks[chunkKey(chunk.x, chunk.z + 1)], sectionY)
-							again(world.chunks[chunkKey(chunk.x, chunk.z - 1)], sectionY)
+							again(world.chunks[chunkKey(chunk.x + 1, chunk.z, chunk.dim)], sectionY)
+							again(world.chunks[chunkKey(chunk.x - 1, chunk.z, chunk.dim)], sectionY)
+							again(world.chunks[chunkKey(chunk.x, chunk.z + 1, chunk.dim)], sectionY)
+							again(world.chunks[chunkKey(chunk.x, chunk.z - 1, chunk.dim)], sectionY)
 							break
 						end
 					end
@@ -1619,15 +1668,15 @@ local function playerPoints()
 			local bx = math.floor(p.X / scale)
 			local by = math.floor(p.Y / scale) + info.minY
 			local bz = math.floor(p.Z / scale)
-			if p.Y < 1000 then -- (not on the waiting platform)
-				table.insert(points, { cx = bx // 16, cz = bz // 16, sy = by // 16, root = root })
+			if not (waitingPlatform and p.Y > 1000 and p.Y < 2000) then -- (not on the waiting platform)
+				table.insert(points, { cx = bx // 16, cz = bz // 16, sy = by // 16, root = root, dim = dimAt(by) })
 			end
 		end
 	end
 	local has = #points > 0
 	if not has then
 		local spawn = info.spawn
-		table.insert(points, { cx = spawn[1] // 16, cz = spawn[3] // 16, sy = spawn[2] // 16 })
+		table.insert(points, { cx = spawn[1] // 16, cz = spawn[3] // 16, sy = spawn[2] // 16, dim = 0 })
 	end
 	return points, has
 end
@@ -1641,7 +1690,7 @@ local function wantedChunks(points)
 		for dx = -info.radius, info.radius do
 			for dz = -info.radius, info.radius do
 				local cx, cz = info.center[1] + dx, info.center[2] + dz
-				table.insert(list, { chunkKey(cx, cz), cx, cz, dx * dx + dz * dz })
+				table.insert(list, { chunkKey(cx, cz), cx, cz, dx * dx + dz * dz, 0 })
 			end
 		end
 	else
@@ -1653,10 +1702,10 @@ local function wantedChunks(points)
 					local d2 = dx * dx + dz * dz
 					if d2 <= limit then
 						local cx, cz = point.cx + dx, point.cz + dz
-						local key = chunkKey(cx, cz)
+						local key = chunkKey(cx, cz, point.dim)
 						local known = seen[key]
 						if not known then
-							known = { key, cx, cz, d2 }
+							known = { key, cx, cz, d2, point.dim or 0 }
 							seen[key] = known
 							table.insert(list, known)
 						elseif d2 < known[4] then
@@ -1699,7 +1748,8 @@ local function loaderWorker(generation)
 		local coords = {}
 		for _, item in ipairs(batch) do
 			loader.inFlight[item[1]] = true
-			table.insert(coords, { item[2], item[3] })
+			-- ([cx, cz] in the overworld, [cx, cz, dimension] elsewhere)
+			table.insert(coords, if (item[5] or 0) ~= 0 then { item[2], item[3], item[5] } else { item[2], item[3] })
 		end
 		local ok, result = pcall(client.Call, client, CHUNKS, { chunks = coords, v = 2 }, { Timeout = 30 })
 		for _, item in ipairs(batch) do
@@ -1720,7 +1770,7 @@ local function loaderWorker(generation)
 		local answered = {}
 		for _, data in ipairs(result.chunks or {}) do
 			if type(data) == "table" and type(data.x) == "number" and type(data.z) == "number" then
-				local key = chunkKey(data.x, data.z)
+				local key = chunkKey(data.x, data.z, tonumber(data.d) or 0)
 				answered[key] = true
 				if data.later then
 					loader.retryAt[key] = now + 0.3 -- Minecraft loads / generates it meanwhile
@@ -1756,8 +1806,8 @@ local function unloadChunk(key, chunk)
 end
 
 -- Is the ground around this place built (the section there, the one below and above)?
-local function placeReady(cx, cz, sy)
-	local chunk = world.chunks[chunkKey(cx, cz)]
+local function placeReady(cx, cz, sy, dim)
+	local chunk = world.chunks[chunkKey(cx, cz, dim)]
 	if not chunk then
 		return false
 	end
@@ -1793,11 +1843,12 @@ local function manage()
 	local points, has = playerPoints()
 	loader.points = points
 	loader.hasPlayers = has
-	local floor = math.huge
+	local floors = {} -- dimension -> lowest section of its players - BELOW
 	for _, point in ipairs(points) do
-		floor = math.min(floor, point.sy - BELOW)
+		local d = point.dim or 0
+		floors[d] = math.min(floors[d] or math.huge, point.sy - BELOW)
 	end
-	loader.playerFloor = floor
+	loader.playerFloor = floors
 	-- the vertical window of every chunk follows the players
 	for _, chunk in pairs(world.chunks) do
 		local from = renderFromOf(chunk)
@@ -1825,7 +1876,7 @@ local function manage()
 			local near = false
 			for _, point in ipairs(points) do
 				local dx, dz = chunk.x - point.cx, chunk.z - point.cz
-				if dx * dx + dz * dz <= limit then
+				if dx * dx + dz * dz <= limit and (point.dim or 0) == (chunk.dim or 0) then
 					near = true
 					break
 				end
@@ -1865,7 +1916,7 @@ local function manage()
 	for _, point in ipairs(points) do
 		local root = point.root
 		if root then
-			if not placeReady(point.cx, point.cz, point.sy) then
+			if not placeReady(point.cx, point.cz, point.sy, point.dim) then
 				if not root.Anchored then
 					root.Anchored = true
 					root:SetAttribute("McWaitWorld", true)
@@ -1942,7 +1993,7 @@ end
 -- region changes
 local function sectionAt(blockX, blockY, blockZ, create)
 	local chunkX, chunkZ = math.floor(blockX / 16), math.floor(blockZ / 16)
-	local chunk = world.chunks[chunkKey(chunkX, chunkZ)]
+	local chunk = world.chunks[chunkKey(chunkX, chunkZ, dimAt(blockY))]
 	if not chunk then
 		return nil
 	end
@@ -1991,10 +2042,10 @@ local function applyBlocks(blocks)
 				end
 				if ly == 0 then mark(chunk, sectionY - 1) end
 				if ly == 15 then mark(chunk, sectionY + 1) end
-				if lx == 0 then mark(world.chunks[chunkKey(chunk.x - 1, chunk.z)], sectionY) end
-				if lx == 15 then mark(world.chunks[chunkKey(chunk.x + 1, chunk.z)], sectionY) end
-				if lz == 0 then mark(world.chunks[chunkKey(chunk.x, chunk.z - 1)], sectionY) end
-				if lz == 15 then mark(world.chunks[chunkKey(chunk.x, chunk.z + 1)], sectionY) end
+				if lx == 0 then mark(world.chunks[chunkKey(chunk.x - 1, chunk.z, chunk.dim)], sectionY) end
+				if lx == 15 then mark(world.chunks[chunkKey(chunk.x + 1, chunk.z, chunk.dim)], sectionY) end
+				if lz == 0 then mark(world.chunks[chunkKey(chunk.x, chunk.z - 1, chunk.dim)], sectionY) end
+				if lz == 15 then mark(world.chunks[chunkKey(chunk.x, chunk.z + 1, chunk.dim)], sectionY) end
 			end
 		end
 	end
@@ -2113,6 +2164,13 @@ local function setState(player, state)
 	end
 	noticeItems(ids) -- items nobody has seen yet: their icons
 	inventoryRemote:FireClient(player, "state", state)
+	-- armor (the bar above his hearts, Minecraft's damage reduction) + experience (the green bar, his level)
+	player:SetAttribute("McArmor", tonumber(state.armor) or 0)
+	player:SetAttribute("McToughness", tonumber(state.tough) or 0)
+	if type(state.xp) == "table" then
+		player:SetAttribute("McXpLevel", tonumber(state.xp[1]) or 0)
+		player:SetAttribute("McXpProgress", tonumber(state.xp[2]) or 0)
+	end
 	-- the item in his hand (every client shows it at his right arm)
 	local held = state.slots[37 + (tonumber(state.sel) or 0)]
 	local character = player.Character
@@ -2296,7 +2354,7 @@ local function guessPlacement(player, x, y, z, face, slot, sneaking, root)
 	end
 	local px, py, pz = x + normal.X, y + normal.Y, z + normal.Z
 	local info = world.info
-	if not AIR[baseName(blockAt(px, py, pz))] or py < info.minY or py >= info.maxY then
+	if not AIR[baseName(blockAt(px, py, pz))] or not insideWorld(py) then
 		return nil
 	end
 	local scale = info.studsPerBlock
@@ -2344,7 +2402,7 @@ local function onEdit(player, action, x, y, z, info)
 	end
 	info = if type(info) == "table" then info else {}
 	local worldInfo = world.info
-	if not world.loaded or not worldInfo or y < worldInfo.minY or y >= worldInfo.maxY or not allowEdit(player) then
+	if not world.loaded or not worldInfo or not insideWorld(y) or not allowEdit(player) then
 		return
 	end
 	local scale = worldInfo.studsPerBlock
@@ -2420,7 +2478,7 @@ local function onEdit(player, action, x, y, z, info)
 				end
 			end
 			-- (load that chunk again: the loaders take it first)
-			local key = chunkKey(chunk.x, chunk.z)
+			local key = chunkKey(chunk.x, chunk.z, chunk.dim)
 			loader.reload[key] = true
 			loader.retryAt[key] = nil
 		end
@@ -2573,7 +2631,24 @@ end
 
 -- Creative and spectator players cannot be hurt (Minecraft)
 local exhaustNext = {} -- player -> exhaustion to add (hurt() comes before the hunger region)
+-- Minecraft's armor for the damage Roblox counts itself (lava, fire, a hot floor, cactus): CombatRules.getDamageAfterAbsorb
+-- (hits from Minecraft - mobs, players - come already reduced)
+local ARMORED = { lava = true, fire = true, cactus = true }
+local function afterArmor(player, amount, cause)
+	if not ARMORED[cause] then
+		return amount
+	end
+	local armor = tonumber(player:GetAttribute("McArmor")) or 0
+	local toughness = tonumber(player:GetAttribute("McToughness")) or 0
+	if armor <= 0 then
+		return amount
+	end
+	local f = 2 + toughness / 4
+	local g = math.clamp(armor - amount / f, armor * 0.2, 20)
+	return amount * (1 - g / 25)
+end
 local function hurt(player, amount, from, cause)
+	amount = afterArmor(player, amount, cause)
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local mode = gameModeOf(player)
@@ -2692,6 +2767,102 @@ local function hungerTick(player, state, humanoid, root, difficulty)
 	end
 end
 
+-- region dangers like Minecraft: below the world (the void), lava, fire, magma, cactus, burning afterwards
+local burning = {} -- player -> os.clock() until he burns (Minecraft: 15 s after lava, 8 s after fire)
+local dangerAt = {} -- player -> os.clock() of the last damage (Minecraft's 10 ticks without new damage)
+local burnAt = {} -- player -> os.clock() of the last burn damage (1 per second)
+local function effectOn(player, id)
+	return string.find(tostring(player:GetAttribute("McEffects") or ""), '"' .. id .. '"', 1, true) ~= nil
+end
+local function dangers(player, mode, humanoid, root)
+	local info = world.info
+	local scale = info.studsPerBlock
+	local p = root.Position
+	local feetY = (p.Y - Character.ROOT_HEIGHT) / scale + info.minY
+	local dim = dimInfo(dimAt(feetY))
+	local now = os.clock()
+	local character = player.Character
+	local protected = mode == "creative" or mode == "spectator"
+	if feetY < dim.minY - 64 and mode ~= "spectator" then
+		-- below the world: Minecraft's "fell out of the world" (4 every tick, in creative too)
+		lastHurt[player] = { cause = "void", at = now }
+		humanoid:TakeDamage(4)
+		return
+	end
+	if protected then
+		burning[player] = nil
+		if character then
+			character:SetAttribute("McBurning", nil)
+		end
+		return
+	end
+	local x, z = math.floor(p.X / scale), math.floor(p.Z / scale)
+	local fy = math.floor(feetY + 0.01)
+	local feetBlock = baseName(blockAt(x, fy, z))
+	local bodyBlock = baseName(blockAt(x, fy + 1, z))
+	local fireProof = effectOn(player, "fire_resistance")
+	local amount, cause = 0, nil
+	if feetBlock == "minecraft:water" or bodyBlock == "minecraft:water" then
+		burning[player] = nil -- (water puts it out)
+	end
+	if feetBlock == "minecraft:lava" or bodyBlock == "minecraft:lava" then
+		amount, cause = 4, "lava"
+		burning[player] = now + 15
+	elseif feetBlock == "minecraft:fire" or feetBlock == "minecraft:soul_fire" or bodyBlock == "minecraft:fire" then
+		amount, cause = if feetBlock == "minecraft:soul_fire" then 2 else 1, "fire"
+		burning[player] = math.max(burning[player] or 0, now + 8)
+	elseif feetBlock == "minecraft:campfire" or feetBlock == "minecraft:soul_campfire" then
+		local lit = string.find(blockAt(x, fy, z) or "", "lit=true", 1, true) ~= nil
+		if lit and not (character and character:GetAttribute("McSneak") == true) then
+			amount, cause = 1, "fire"
+		end
+	elseif baseName(blockAt(x, math.floor(feetY - 0.05), z)) == "minecraft:magma_block"
+		and not (character and character:GetAttribute("McSneak") == true) then
+		amount, cause = 1, "fire" -- (Minecraft: a hot floor, not while sneaking)
+	else
+		-- a cactus next to him (Minecraft: touching it hurts 1)
+		local fx, fz = p.X / scale - x, p.Z / scale - z
+		local sides = {}
+		if fx < 0.32 then table.insert(sides, { -1, 0 }) end
+		if fx > 0.68 then table.insert(sides, { 1, 0 }) end
+		if fz < 0.32 then table.insert(sides, { 0, -1 }) end
+		if fz > 0.68 then table.insert(sides, { 0, 1 }) end
+		for _, side in ipairs(sides) do
+			for dy = 0, 1 do
+				if baseName(blockAt(x + side[1], fy + dy, z + side[2])) == "minecraft:cactus" then
+					amount, cause = 1, "cactus"
+				end
+			end
+		end
+		if baseName(blockAt(x, fy, z)) == "minecraft:sweet_berry_bush" and (root.AssemblyLinearVelocity.Magnitude > 0.5) then
+			amount, cause = 1, "cactus"
+		end
+	end
+	if fireProof and cause ~= "cactus" then
+		amount, cause = 0, nil
+		burning[player] = nil
+	end
+	local onFire = burning[player] ~= nil and now < burning[player]
+	if not onFire then
+		burning[player] = nil
+	end
+	if character and (character:GetAttribute("McBurning") == true) ~= onFire then
+		character:SetAttribute("McBurning", if onFire then true else nil) -- (the clients show the flames)
+	end
+	if amount > 0 and now - (dangerAt[player] or 0) >= 0.5 then
+		dangerAt[player] = now
+		hurt(player, amount, nil, cause)
+	elseif amount == 0 and onFire and now - (burnAt[player] or 0) >= 1 then
+		burnAt[player] = now
+		hurt(player, 1, nil, "burn")
+	end
+end
+Players.PlayerRemoving:Connect(function(player)
+	burning[player] = nil
+	dangerAt[player] = nil
+	burnAt[player] = nil
+end)
+
 local hungerClock = 0
 RunService.Heartbeat:Connect(function(dt)
 	hungerClock += dt
@@ -2706,6 +2877,12 @@ RunService.Heartbeat:Connect(function(dt)
 		local character = player.Character
 		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if humanoid and humanoid.Health > 0 and root and world.loaded and not root.Anchored then
+			local ok, err = pcall(dangers, player, mode, humanoid, root)
+			if not ok then
+				warn("[MinecraftWorld] dangers: " .. tostring(err))
+			end
+		end
 		if (mode == "survival" or mode == "adventure") and humanoid and humanoid.Health > 0 and root then
 			local state = hungerOf(player)
 			if exhaustNext[player] then
@@ -2860,7 +3037,9 @@ client.MessageReceived:Connect(function(message)
 		end
 		for _, player in ipairs(Players:GetPlayers()) do
 			if player.UserId == content.u then
-				hurt(player, math.clamp(tonumber(content.amount) or 0, 0, 100), from, "attack")
+				-- (cause: "attack" | "explosion" | "other" - a zombie, an arrow, a creeper, /kill ...)
+				local cause = if type(content.cause) == "string" then content.cause else "attack"
+				hurt(player, math.clamp(tonumber(content.amount) or 0, 0, 1000), from, cause)
 				local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 				if root then
 					if content.crit then
@@ -2912,6 +3091,23 @@ client.MessageReceived:Connect(function(message)
 		for _, player in ipairs(Players:GetPlayers()) do
 			if player.UserId == content.u then
 				setState(player, content.state)
+			end
+		end
+	elseif content.type == "mc.teleport" and type(content.p) == "table" then
+		-- a portal took him (Minecraft's own portal code found the exit): his character goes there - another
+		-- dimension is another height in this world; it waits there until the ground is built
+		for _, player in ipairs(Players:GetPlayers()) do
+			local character = player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if player.UserId == content.u and root then
+				local at = Vector3.new(tonumber(content.p[1]) or 0, tonumber(content.p[2]) or 0, tonumber(content.p[3]) or 0)
+				local yaw = tonumber(content.yaw)
+				local turn = if yaw then CFrame.Angles(0, yaw, 0) else (root.CFrame - root.Position)
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.CFrame = CFrame.new(at) * turn -- (the whole character: its joints hang on the root)
+				root.Anchored = true -- (manage() lets go when the ground there is built)
+				root:SetAttribute("McWaitWorld", true)
+				log(player.Name .. " went through a portal (dimension " .. tostring(content.dim) .. ")")
 			end
 		end
 	end
@@ -3223,6 +3419,13 @@ client:Subscribe(nil, SKY, function(data)
 		McPrecipitation = if type(data.precipitation) == "string" then data.precipitation else "none",
 		McWaterColor = color3(data.waterColor, Color3.fromRGB(63, 118, 228)),
 	}
+	-- the sky of the other dimensions (Nether, End) - JSON, the clients there use it instead
+	local dimsText = ""
+	if type(data.dims) == "table" then
+		local ok, text = pcall(HttpService.JSONEncode, HttpService, data.dims)
+		dimsText = if ok then text else ""
+	end
+	values.McDimSky = dimsText
 	for name, value in pairs(values) do
 		if Lighting:GetAttribute(name) ~= value then
 			Lighting:SetAttribute(name, value)
@@ -3249,7 +3452,7 @@ client:Subscribe(nil, CHANGES, function(data)
 	if type(data.chunks) == "table" then
 		-- very many changes there (explosion, /fill): those chunks are loaded again (the loaders take them first)
 		for _, pair in ipairs(data.chunks) do
-			local key = type(pair) == "table" and chunkKey(pair[1], pair[2])
+			local key = type(pair) == "table" and chunkKey(pair[1], pair[2], tonumber(pair[3]) or 0)
 			if key and world.chunks[key] then
 				loader.reload[key] = true
 				loader.retryAt[key] = nil
