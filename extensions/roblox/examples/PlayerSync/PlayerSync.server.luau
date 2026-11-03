@@ -358,6 +358,11 @@ local function onSnapshot(data, event)
 				if npc.model:GetAttribute("McHeld") ~= held then
 					npc.model:SetAttribute("McHeld", held)
 				end
+				-- his armor (Minecraft: "head|chest|legs|feet" item ids) - the clients draw it
+				local armor = if type(player.ar) == "string" and player.ar ~= "|||" and player.ar ~= "" then player.ar else nil
+				if npc.model:GetAttribute("McArmorItems") ~= armor then
+					npc.model:SetAttribute("McArmorItems", armor)
+				end
 				local fx = tonumber(player.fx)
 				npc.model:SetAttribute("McEffectColor", if fx and fx >= 0 then fx else nil)
 				npc.model:SetAttribute("McInvisible", player.inv == true)
@@ -501,6 +506,7 @@ local function snapshot()
 				sp = character:GetAttribute("McSprint") == true,
 				sw = character:GetAttribute("McSwing") == true,
 				sm = character:GetAttribute("McSwimming") == true, -- swimming (set by a game script, e.g. MinecraftWorld)
+				bl = if character:GetAttribute("McBlocking") == true then true else nil, -- a shield held up (MinecraftWorld)
 				f = round(rootHeightOf(humanoid, rootPart), 0.01), -- root part above the feet: the others put us on the ground
 				hp = round(tonumber(character:GetAttribute("McPitch")) or 0, 0.01), -- head pitch (radians, + = looking down)
 			}

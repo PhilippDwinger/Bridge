@@ -2128,7 +2128,7 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 	local function startCharging(): boolean
 		local stack = hotbarStack(selected)
 		local info = stack and itemInfo(stack.id)
-		if not info or info.use ~= "charge" or gameMode() == "spectator" then
+		if not info or (info.use ~= "charge" and info.use ~= "block") or gameMode() == "spectator" then
 			return false
 		end
 		if target and assets and assets.blocks then
@@ -2137,14 +2137,22 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 				return false -- (a chest / door in front goes first)
 			end
 		end
-		charging = { id = stack.id, slot = selected, started = os.clock(), full = tonumber(info.useTime) or 1 }
+		charging = { id = stack.id, slot = selected, started = os.clock(), full = tonumber(info.useTime) or 1,
+			block = info.use == "block" }
 		player:SetAttribute("McEating", "charge")
+		if info.use == "block" then
+			player:SetAttribute("McBlocking", true) -- (a shield: up while held - Minecraft blocks hits from in front)
+		end
 		return true
 	end
 	local function stopCharging(shoot: boolean)
 		local was = charging
 		charging = nil
 		player:SetAttribute("McEating", nil)
+		player:SetAttribute("McBlocking", nil)
+		if was and was.block then
+			shoot = false -- (a shield shoots nothing)
+		end
 		local camera = workspace.CurrentCamera
 		if chargeFov and camera then
 			camera.FieldOfView = chargeFov
@@ -2349,7 +2357,7 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 				stopCharging(true) -- (let go: shoot)
 			elseif not hotbarStack(selected) or hotbarStack(selected).id ~= charging.id or selected ~= charging.slot then
 				stopCharging(false)
-			elseif camera then
+			elseif camera and not charging.block then
 				chargeFov = chargeFov or camera.FieldOfView
 				local pull = math.clamp((now - charging.started) / charging.full, 0, 1)
 				camera.FieldOfView = (chargeFov :: number) * (1 - 0.15 * pull * pull)
@@ -4345,4 +4353,116 @@ task.spawn(function()
 		end
 	end
 end)
+-- endregion
+
+-- region armor on every character (Roblox players + Minecraft players: attribute McArmorItems "head|chest|legs|feet"):
+-- Minecraft's armor model (HumanoidModel 1 px bigger, leggings 0.5 px) in the colour of its material
+do
+	local PIXEL = 3 / 16 * 0.9375
+	local MATERIALS = {
+		leather = Color3.fromRGB(160, 101, 64), chainmail = Color3.fromRGB(140, 140, 145), iron = Color3.fromRGB(216, 216, 216),
+		golden = Color3.fromRGB(250, 222, 77), diamond = Color3.fromRGB(92, 219, 213), netherite = Color3.fromRGB(68, 58, 59),
+		copper = Color3.fromRGB(196, 110, 80), turtle = Color3.fromRGB(71, 191, 74),
+	}
+	-- slot -> {limb, grow (px), part of the limb (from, to: 0 = its top, 1 = its bottom)}
+	local PIECES = {
+		{ { "Head", 1, 0, 1 } },
+		{ { "Body", 1, 0, 1 }, { "RightArm", 1, 0, 1 }, { "LeftArm", 1, 0, 1 } },
+		{ { "Body", 0.5, 0.55, 1 }, { "RightLeg", 0.5, 0, 0.75 }, { "LeftLeg", 0.5, 0, 0.75 } },
+		{ { "RightLeg", 1, 0.6, 1 }, { "LeftLeg", 1, 0.6, 1 } },
+	}
+	local function materialOf(id: string): (Color3?, Enum.Material)
+		local name = string.match(id, ":([%w_]+)$") or id
+		for key, color in pairs(MATERIALS) do
+			if string.find(name, key, 1, true) == 1 then
+				return color, if key == "chainmail" then Enum.Material.DiamondPlate elseif key == "golden" or key == "iron"
+					or key == "netherite" or key == "copper" then Enum.Material.Metal else Enum.Material.SmoothPlastic
+			end
+		end
+		return nil, Enum.Material.SmoothPlastic
+	end
+	local function dress(model: Model)
+		for _, old in ipairs(model:GetChildren()) do
+			if old.Name == "McArmorPiece" then
+				old:Destroy()
+			end
+		end
+		local text = model:GetAttribute("McArmorItems")
+		if type(text) ~= "string" or model:GetAttribute("McInvisible") == true then
+			return
+		end
+		local slot = 0
+		for id in string.gmatch(text .. "|", "([^|]*)|") do
+			slot += 1
+			local color, material = materialOf(id)
+			if id == "" or not color or not PIECES[slot] then
+				continue
+			end
+			for _, piece in ipairs(PIECES[slot]) do
+				local limb = model:FindFirstChild(piece[1])
+				if not limb or not limb:IsA("BasePart") then
+					continue
+				end
+				local grow = piece[2] * 2 * PIXEL
+				local size = limb.Size
+				local from, to = piece[3], piece[4]
+				local height = size.Y * (to - from)
+				local part = Instance.new("Part")
+				part.Name = "McArmorPiece"
+				part.Color = color
+				part.Material = material
+				part.CanCollide = false
+				part.CanQuery = false
+				part.CanTouch = false
+				part.Massless = true
+				part.Size = Vector3.new(size.X + grow, height + (if from == 0 then grow / 2 else 0) + (if to == 1 then grow / 2 else 0),
+					size.Z + grow)
+				local middle = size.Y / 2 - size.Y * (from + to) / 2 -- (from the limb's middle, up = +)
+				local shift = (if from == 0 then grow / 4 else 0) - (if to == 1 then grow / 4 else 0)
+				part.CFrame = limb.CFrame * CFrame.new(0, middle + shift, 0)
+				local weld = Instance.new("WeldConstraint")
+				weld.Part0 = limb
+				weld.Part1 = part
+				weld.Parent = part
+				part.Parent = model
+			end
+		end
+	end
+	local watched = setmetatable({}, { __mode = "k" })
+	local function watch(model: Instance)
+		if not model:IsA("Model") or watched[model] then
+			return
+		end
+		watched[model] = true
+		model:GetAttributeChangedSignal("McArmorItems"):Connect(function()
+			dress(model)
+		end)
+		model:GetAttributeChangedSignal("McInvisible"):Connect(function()
+			dress(model)
+		end)
+		if model:GetAttribute("McArmorItems") then
+			task.defer(dress, model)
+		end
+	end
+	workspace.DescendantAdded:Connect(function(item)
+		if item:IsA("Model") and item:GetAttribute("McSkinUser") ~= nil then
+			watch(item)
+		end
+	end)
+	-- (a model can get McSkinUser after it came into the workspace)
+	task.spawn(function()
+		while true do
+			task.wait(2)
+			for _, other in ipairs(Players:GetPlayers()) do
+				if other.Character then
+					watch(other.Character)
+				end
+			end
+			local npcs = workspace:FindFirstChild("BridgeRemotePlayers") -- (the Minecraft players)
+			for _, item in ipairs(if npcs then npcs:GetChildren() else {}) do
+				watch(item)
+			end
+		end
+	end)
+end
 -- endregion

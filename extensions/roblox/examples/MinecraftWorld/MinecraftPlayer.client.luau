@@ -56,7 +56,7 @@ local eyeHeight = Character.EYE_HEIGHT
 local fov = FOV
 local animation = nil
 local animatedCharacter = nil
-local sent = { sneak = nil :: boolean?, sprint = nil :: boolean?, pitch = 0, at = 0, flying = nil :: boolean?,
+local sent = { sneak = nil :: boolean?, sprint = nil :: boolean?, pitch = 0, at = 0, flying = nil :: boolean?, blocking = false,
 	swimming = nil :: boolean? }
 
 -- Roblox's own walking is off: Minecraft walks relative to where the player looks (the camera may face him)
@@ -790,11 +790,13 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 
 	-- the others see it: sneaking / sprinting at once, the head pitch a few times per second
 	local now = os.clock()
+	local blocking = player:GetAttribute("McBlocking") == true -- (a shield held up: MinecraftClient)
 	if sneaking ~= sent.sneak or sprinting ~= sent.sprint or isFlying() ~= sent.flying or swimming ~= sent.swimming
-		or (math.abs(pitch - sent.pitch) > 0.03 and now - sent.at > SEND_EVERY) then
+		or blocking ~= sent.blocking or (math.abs(pitch - sent.pitch) > 0.03 and now - sent.at > SEND_EVERY) then
 		sent.sneak, sent.sprint, sent.pitch, sent.at, sent.flying = sneaking, sprinting, pitch, now, isFlying()
 		sent.swimming = swimming
-		moveRemote:FireServer(sneaking, sprinting, math.floor(pitch * 100 + 0.5) / 100, isFlying(), swimming)
+		sent.blocking = blocking
+		moveRemote:FireServer(sneaking, sprinting, math.floor(pitch * 100 + 0.5) / 100, isFlying(), swimming, blocking)
 	end
 end)
 

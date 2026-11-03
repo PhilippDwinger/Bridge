@@ -2283,6 +2283,14 @@ local function setState(player, state)
 	local character = player.Character
 	if character then
 		character:SetAttribute("McHeld", if type(held) == "table" and type(held.id) == "string" then held.id else nil)
+		-- what he wears (Minecraft's armor slots 5-8: head, chest, legs, feet) - every client draws it
+		local worn = {}
+		for slot = 6, 9 do
+			local stack = state.slots[slot]
+			table.insert(worn, if type(stack) == "table" and type(stack.id) == "string" then stack.id else "")
+		end
+		local armor = table.concat(worn, "|")
+		character:SetAttribute("McArmorItems", if armor ~= "|||" then armor else nil)
 	end
 end
 
@@ -3298,10 +3306,11 @@ end)
 -- endregion
 
 -- Sneaking / sprinting / flying: attributes on the character - the client scripts show the pose, PlayerSync sends it
-moveRemote.OnServerEvent:Connect(function(player, sneak, sprint, pitch, flying, swimming)
+moveRemote.OnServerEvent:Connect(function(player, sneak, sprint, pitch, flying, swimming, blocking)
 	local character = player.Character
 	if character then
 		local mode = gameModeOf(player)
+		character:SetAttribute("McBlocking", if blocking == true and mode ~= "spectator" then true else nil) -- (PlayerSync: "bl")
 		character:SetAttribute("McSwimming", swimming == true and mode ~= "spectator") -- (PlayerSync: "sm")
 		character:SetAttribute("McSneak", sneak == true)
 		character:SetAttribute("McSprint", sprint == true and sneak ~= true)
