@@ -225,14 +225,29 @@ local function meshSection(section)
 	return boxes
 end
 
-local function renderSection(chunk, sectionY, section)
-	for _, part in ipairs(section.parts) do
-		part:Destroy()
-	end
-	table.clear(section.parts)
+--[[
+	Builds the parts of a section - only what changed: a part whose box (block kind, place, size) is still the same stays
+	as it is, new parts are made BEFORE old ones go. So the ground under a player is never gone for a moment (no jolt
+	of the camera), and the textures of unchanged blocks are not touched at all. force = make every part new (after new
+	pictures from Minecraft: the look of a block kind may have changed).
+]]
+local function boxId(box)
+	return string.format("%s|%d|%d|%d|%d|%d|%d", box.key, box.x, box.y, box.z, box.w, box.h, box.d)
+end
+
+local function renderSection(chunk, sectionY, section, force)
+	local old = section.parts
+	local kept = {}
 	local scale = world.info.studsPerBlock
 	local minY = world.info.minY
 	for _, box in ipairs(meshSection(section)) do
+		local id = boxId(box)
+		local existing = if force then nil else old[id]
+		if existing and existing.Parent then
+			old[id] = nil
+			kept[id] = existing
+			continue
+		end
 		local blockX = chunk.x * 16 + box.x
 		local blockY = sectionY * 16 + box.y
 		local blockZ = chunk.z * 16 + box.z
@@ -271,8 +286,12 @@ local function renderSection(chunk, sectionY, section)
 			end
 		end
 		part.Parent = chunk.folder
-		table.insert(section.parts, part)
+		kept[id] = part
 	end
+	for _, part in pairs(old) do
+		part:Destroy() -- (only now: the new parts are already there)
+	end
+	section.parts = kept
 end
 
 local function decodeSection(data)
@@ -292,10 +311,10 @@ local function decodeSection(data)
 	return { palette = data.palette or { "minecraft:air" }, cells = cells, parts = {} }
 end
 
-local function renderAll()
+local function renderAll(force)
 	for _, chunk in pairs(world.chunks) do
 		for sectionY, section in pairs(chunk.sections) do
-			renderSection(chunk, sectionY, section)
+			renderSection(chunk, sectionY, section, force)
 		end
 	end
 end
@@ -354,17 +373,27 @@ end
 local function applyChunk(data)
 	local key = chunkKey(data.x, data.z)
 	local old = world.chunks[key]
-	if old then
-		old.folder:Destroy()
-	end
-	local folder = Instance.new("Folder")
+	-- a chunk loaded again (after /fill, ...): its parts that are still right stay, only the changes are rebuilt
+	local folder = if old then old.folder else Instance.new("Folder")
 	folder.Name = "Chunk " .. key
 	local chunk = { x = data.x, z = data.z, sections = {}, folder = folder }
 	for _, sectionData in ipairs(data.sections or {}) do
 		local section = decodeSection(sectionData)
+		local before = old and old.sections[sectionData.y]
+		if before then
+			section.parts = before.parts
+			old.sections[sectionData.y] = nil
+		end
 		noticeBlocks(section.palette)
 		chunk.sections[sectionData.y] = section
 		renderSection(chunk, sectionData.y, section)
+	end
+	if old then
+		for _, gone in pairs(old.sections) do -- sections that are only air now
+			for _, part in pairs(gone.parts) do
+				part:Destroy()
+			end
+		end
 	end
 	folder.Parent = worldFolder
 	world.chunks[key] = chunk
@@ -554,12 +583,12 @@ local function loadAssets(generation)
 	else
 		log("no pictures from Minecraft - grey blocks (" .. tostring(assets.reason) .. ")")
 	end
-	renderAll()
+	renderAll(true) -- all pictures may be new
 	assetsChanged:FireAllClients(clientAssets())
 end
 
 function afterNewPictures()
-	renderAll()
+	renderAll(false) -- only blocks that were grey so far change
 	assetsChanged:FireAllClients(clientAssets())
 end
 -- endregion

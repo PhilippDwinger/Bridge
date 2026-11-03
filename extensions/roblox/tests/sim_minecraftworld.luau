@@ -298,9 +298,24 @@ while os.clock() - started < scenario.seconds do
 			observations[event.name] = { key = key, w = picture and picture.w, h = picture and picture.h,
 				bytes = picture and buffer.len(picture.pixels) }
 		elseif event.action == "edit" then
-			-- a click of our player: the RemoteEvent from the client script
+			-- a click of our player: the RemoteEvent from the client script. Before: mark the parts of chunk 0,0 - after
+			-- it, which of them are still the same parts (only what changed is built new)
+			local chunk = workspaceRoot:FindFirstChild("MinecraftWorld") and workspaceRoot.MinecraftWorld:FindFirstChild("Chunk 0,0")
+			local before = 0
+			for _, part in ipairs(chunk and chunk:GetChildren() or {}) do
+				part:SetAttribute("SimBefore", true)
+				before += 1
+			end
 			editHandler(paddy, event.what, event.x, event.y, event.z, event.item)
 			observations[event.name] = observe()
+			local kept = 0
+			for _, part in ipairs(chunk and chunk:GetChildren() or {}) do
+				if part:GetAttribute("SimBefore") then
+					kept += 1
+				end
+			end
+			observations[event.name].kept = kept
+			observations[event.name].before = before
 		end
 	end
 	task.wait(1 / 30)

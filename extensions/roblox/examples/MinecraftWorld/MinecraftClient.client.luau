@@ -186,6 +186,63 @@ local function skinContent(key: string, region: string): Content?
 	end)
 end
 
+-- Keeping the pictures on screen: when Textures go away (a block is placed / broken, the server builds that part of
+-- the world new), Roblox sometimes stops drawing that picture on ALL blocks of the kind (they turn grey until the next
+-- change). So: after Textures went away, every block of that kind gets its picture once more (next frame), and a
+-- hidden part keeps one Texture per picture for good.
+local shownBy = {} -- world texture key -> {Texture -> true} (weak)
+local holders = {} -- world texture key -> Texture on the hidden part
+local holderPart: Part? = nil
+local lost = {} -- world texture key -> true: Textures with this picture went away
+
+local function hold(key: string, content: Content)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	if not holderPart or not holderPart.Parent then
+		local part = Instance.new("Part")
+		part.Name = "MinecraftTextureHolder"
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Transparency = 1
+		part.Size = Vector3.one * 0.05
+		part.CFrame = CFrame.new(0, -500, 0)
+		part.Parent = camera -- only here on this client
+		holderPart = part
+		table.clear(holders)
+	end
+	if not holders[key] then
+		local texture = Instance.new("Texture")
+		texture.Name = key
+		texture.Parent = holderPart
+		holders[key] = texture
+	end
+	if holders[key].TextureContent ~= content then
+		holders[key].TextureContent = content
+	end
+end
+
+local function showAgain(key: string)
+	local content = worldContent(key)
+	if not content then
+		return
+	end
+	for texture in pairs(shownBy[key] or {}) do
+		if texture.Parent then
+			texture.TextureContent = Content.none
+			texture.TextureContent = content
+		end
+	end
+	local holder = holders[key]
+	if holder then
+		holder.TextureContent = Content.none
+		holder.TextureContent = content
+	end
+end
+
 local function applyTexture(texture: Texture)
 	local content = nil
 	local region = texture:GetAttribute("McSkinFace")
@@ -198,7 +255,13 @@ local function applyTexture(texture: Texture)
 		end
 		content = skinContent(key :: string, region)
 	else
-		content = worldContent(texture:GetAttribute("McTexture"))
+		local key = texture:GetAttribute("McTexture")
+		content = worldContent(key)
+		if content and type(key) == "string" then
+			shownBy[key] = shownBy[key] or setmetatable({}, { __mode = "k" })
+			shownBy[key][texture] = true
+			hold(key, content)
+		end
 	end
 	if content then
 		texture.TextureContent = content
@@ -242,6 +305,24 @@ local function watchModel(model: Model)
 		applyModel(model)
 	end)
 end
+
+workspace.DescendantRemoving:Connect(function(item)
+	if item:IsA("Texture") then
+		local key = item:GetAttribute("McTexture")
+		if type(key) == "string" then
+			lost[key] = true
+		end
+	end
+end)
+RunService.Heartbeat:Connect(function()
+	if next(lost) ~= nil then
+		local keys = lost
+		lost = {}
+		for key in pairs(keys) do
+			showAgain(key)
+		end
+	end
+end)
 
 workspace.DescendantAdded:Connect(function(item)
 	if item:IsA("Texture") then

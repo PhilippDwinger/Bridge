@@ -163,6 +163,9 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   460 der 500 HTTP-Anfragen pro Minute nutzen – im Spiel nutzt sonst nichts HttpService.
 - Die Spieler spawnen erst, wenn die Welt da ist, und zwar auf dem Minecraft-Spawn. Antwortet Minecraft 15 Sekunden
   lang nicht, warten sie auf einer Plattform hoch oben.
+- **Neu bauen nur, was sich ändert:** Nach einer Änderung bleibt jeder Part, dessen Box gleich geblieben ist, neue Parts
+  kommen, bevor alte gehen – der Boden unter den Füßen verschwindet nie (kein Ruckeln der Kamera). Verschwinden
+  Texturen, bekommen alle Blöcke dieser Art ihr Bild im nächsten Frame noch mal (Roblox ließ sie sonst manchmal grau).
 - **Texturen:** Die Bilder kommen aus dem Minecraft-Spiel selbst (Command `mcworld.assets`, das Spiel enthält keine).
   **Jeder Würfel-Block** sieht aus wie in Minecraft: die Mod liest Blockstate → Modell → Textur jeder der 6 Seiten
   (mit Overlay und Biom-Farbe für Gras und Laub; Glas und Laub durchsichtig). Taucht in der Welt ein Block auf, für den
@@ -190,10 +193,12 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   die Pixel (`GetSkin`) und macht die Bilder.
 - **Bewegen wie Minecraft** (`MinecraftPlayer`, StarterPlayerScripts): Gehen 4,317 / Sprinten 5,612 / Schleichen
   1,295 Blöcke/s, Sprung 1,25 Blöcke, Gravitation 83,5 Studs/s² (ein Sprung dauert wie in Minecraft 12 Ticks, Stürze
-  gleich lang). W A S D relativ zur Blickrichtung, **Leertaste** halten = immer wieder springen, **Shift** halten =
+  gleich lang). W A S D relativ zur Blickrichtung, **Leertaste** halten = immer wieder springen (nur mit den Füßen
+  auf einem Block – Roblox' Humanoid würde sonst kurz vor der Landung schon springen), **Shift** halten =
   schleichen (Augen tiefer, man fällt nicht von Kanten), **Strg** = sprinten nur solange gehalten und vorwärts.
-- **Kamera wie Minecraft:** Maus gefangen, kein Cursor, **F5** (oder **V**, falls Studio F5 abfängt) wechselt
-  Ego-Sicht → von hinten → von vorne
+- **Kamera wie Minecraft:** Maus gefangen, kein Cursor, **F5** (oder **V**) wechselt Ego-Sicht → von hinten →
+  von vorne. In Studio gehört F5 dem Studio („Play“) – dort ggf. File → Advanced → Customize Shortcuts den
+  F5-Eintrag entfernen; im echten Spiel geht F5 so
   (4 Blöcke, Wände ziehen die Kamera ran), Fadenkreuz in der Ego-Sicht. Mausrad = Hotbar-Fach.
 - **Animationen aus Minecraft:** `tools/make_animations.luau` rechnet Minecrafts eigenen Code (HumanoidModel 26.3:
   Gehen, Atmen, Schleichen, Schlagen, Sterben) in KeyframeSequences um (`examples/MinecraftWorld/animations/*.rbxm`,

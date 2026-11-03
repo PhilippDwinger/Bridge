@@ -122,15 +122,31 @@ end
 -- endregion
 
 -- region input
-UserInputService.InputBegan:Connect(function(input, processed)
-	if processed then
-		return
-	end
-	-- F5 like Minecraft (Roblox Studio may keep F5 for itself while testing: V does the same)
-	if input.KeyCode == Enum.KeyCode.F5 or input.KeyCode == Enum.KeyCode.V then
+local switchedAt = -math.huge
+local function switchView()
+	if os.clock() - switchedAt > 0.15 then
+		switchedAt = os.clock()
 		view = view % 3 + 1
 	end
+end
+
+-- F5 like Minecraft - also when Roblox marks it as "already handled" (F5 is a Studio / Roblox key). V does the same.
+UserInputService.InputBegan:Connect(function(input, processed)
+	if input.KeyCode == Enum.KeyCode.F5 and not chatFocused() then
+		switchView()
+	elseif input.KeyCode == Enum.KeyCode.V and not processed then
+		switchView()
+	end
 end)
+-- ... and if no InputBegan comes for F5 at all: the key itself is asked every frame (see below)
+local f5Down = false
+local function pollF5()
+	local down = UserInputService:IsKeyDown(Enum.KeyCode.F5)
+	if down and not f5Down and not chatFocused() then
+		switchView()
+	end
+	f5Down = down
+end
 
 player:GetAttributeChangedSignal("McSwingAt"):Connect(function()
 	if animation then
@@ -150,6 +166,24 @@ local function hasGround(feet: Vector3): boolean
 	for _, corner in ipairs({ Vector3.new(half, 0, half), Vector3.new(-half, 0, half), Vector3.new(half, 0, -half),
 		Vector3.new(-half, 0, -half) }) do
 		if workspace:Raycast(feet + corner + Vector3.new(0, 0.1, 0), Vector3.new(0, -depth, 0), groundParams) then
+			return true
+		end
+	end
+	return false
+end
+
+-- Minecraft only jumps standing on something. Roblox's humanoid feels the floor a bit before it touches it (and
+-- would jump out of the air): here the feet must really be on a block.
+local function onGround(humanoid: Humanoid, root: BasePart): boolean
+	if humanoid.FloorMaterial == Enum.Material.Air or root.AssemblyLinearVelocity.Y < -1 then
+		return false
+	end
+	groundParams.FilterDescendantsInstances = { root.Parent :: Instance }
+	local feet = root.Position - Vector3.new(0, Character.ROOT_HEIGHT, 0)
+	local half = Character.HITBOX.X / 2 - 0.05
+	for _, corner in ipairs({ Vector3.new(half, 0, half), Vector3.new(-half, 0, half), Vector3.new(half, 0, -half),
+		Vector3.new(-half, 0, -half) }) do
+		if workspace:Raycast(feet + corner + Vector3.new(0, 0.2, 0), Vector3.new(0, -0.35, 0), groundParams) then
 			return true
 		end
 	end
@@ -195,7 +229,7 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 		move = stayOnEdge(root, move, speed)
 	end
 	humanoid:Move(move, false)
-	humanoid.Jump = not free and keyDown(Enum.KeyCode.Space)
+	humanoid.Jump = not free and keyDown(Enum.KeyCode.Space) and onGround(humanoid, root)
 	humanoid.AutoRotate = false
 	if humanoid.Health > 0 then
 		root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0) -- the body turns with the view
@@ -279,6 +313,7 @@ if player.Character then
 end
 
 RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value, function(dt)
+	pollF5()
 	local free = guiOpen()
 	if free then
 		if player:GetAttribute("McGuiOpen") ~= true then -- (the inventory handles the mouse itself)
