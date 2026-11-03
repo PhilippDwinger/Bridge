@@ -3464,8 +3464,14 @@ local function buildMob(look: any, id: number): (Model, { any })
 end
 
 -- Minecraft's walking animation by part names (QuadrupedModel / HumanoidModel), head turned + tilted
-local function animate(name: string, pos: number, speed: number, headYaw: number, pitch: number): (number, number)
+local ARMS_FORWARD = { ["minecraft:zombie"] = true, ["minecraft:husk"] = true, ["minecraft:drowned"] = true,
+	["minecraft:zombie_villager"] = true, ["minecraft:zombified_piglin"] = true, ["minecraft:skeleton"] = false }
+local function animate(name: string, pos: number, speed: number, headYaw: number, pitch: number, kind: string?): (number, number)
 	local swing = pos * 0.6662
+	if kind and ARMS_FORWARD[kind] and (name == "right_arm" or name == "left_arm") then
+		-- Minecraft's zombies hold their arms out in front (AnimationUtils.animateZombieArms)
+		return -math.pi / 2 + math.cos(os.clock() * 1.8) * 0.05, 0
+	end
 	if name == "head" then
 		return math.rad(pitch), math.rad(headYaw)
 	elseif name == "right_hind_leg" or name == "left_front_leg" or name == "right_leg" then
@@ -3558,7 +3564,7 @@ RunService.RenderStepped:Connect(function()
 			local spec = entry.spec
 			local parent = if spec.p and spec.p >= 0 then frames[spec.p + 1] else origin
 			local o, r = spec.o or { 0, 0, 0 }, spec.r or { 0, 0, 0 }
-			local ax, ay = animate(spec.n, walkPos, walkSpeed, headYaw - bodyYaw, pitch)
+			local ax, ay = animate(spec.n, walkPos, walkSpeed, headYaw - bodyYaw, pitch, mob.kind)
 			-- Minecraft's rotation (z, y, x order) turned into Roblox axes: x and y flip their sign
 			local frame = (parent or origin) * CFrame.new(Vector3.new(o[1], o[2], o[3]) * MOB_PIXEL * size)
 				* CFrame.Angles(0, 0, r[3]) * CFrame.Angles(0, -(r[2] + ay), 0) * CFrame.Angles(-(r[1] + ax), 0, 0)
