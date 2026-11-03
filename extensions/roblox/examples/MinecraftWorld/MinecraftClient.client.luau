@@ -1109,63 +1109,58 @@ local function selectionBox(index: number): SelectionBox
 	return box
 end
 
--- the cracks while breaking (survival): a box around the block with Minecraft's destroy_stage pictures. It stays in
--- the world for good (hidden = see-through): a part that leaves the world and comes back loses its pictures in Roblox
--- (the cracks showed only on the first block), and every new stage binds its picture anew.
-local crackPart = Instance.new("Part")
-crackPart.Name = "Cracks"
-crackPart.Anchored = true
-crackPart.CanCollide = false
-crackPart.CanQuery = false
-crackPart.CanTouch = false
-crackPart.Transparency = 1
-crackPart.CastShadow = false
-crackPart.Size = Vector3.one
-crackPart.CFrame = CFrame.new(0, -1000, 0)
-local crackTextures = {}
-for _, normal in ipairs(Enum.NormalId:GetEnumItems()) do
-	local texture = Instance.new("Texture")
-	texture.Face = normal
-	texture.Transparency = 1
-	texture.Parent = crackPart
-	crackTextures[normal] = texture
-end
-crackPart.Parent = workspace.CurrentCamera or workspace -- (only on this client)
+-- the cracks while breaking (survival): a box around the block with Minecraft's destroy_stage pictures. Every stage
+-- is a NEW part with new Textures (pictures set before it goes into the world): Roblox did not draw a picture again
+-- on a Texture that had one before and was taken out of the world (the cracks showed only on the first block).
+local crackPart: Part? = nil
 local shownStage = -1
 
 local function showCracks(target, stage: number)
 	if stage < 0 or not target then
-		if shownStage ~= -1 then
-			shownStage = -1
-			for _, texture in pairs(crackTextures) do
-				texture.Transparency = 1
-			end
-			crackPart.CFrame = CFrame.new(0, -1000, 0)
+		if crackPart then
+			crackPart:Destroy()
+			crackPart = nil
 		end
+		shownStage = -1
 		return
 	end
-	if crackPart.Parent == nil then
-		crackPart.Parent = workspace.CurrentCamera or workspace
-	end
 	local box = target.box
-	crackPart.Size = box.Size + Vector3.one * 0.04
-	crackPart.CFrame = box.CFrame
-	if stage ~= shownStage then
+	if stage ~= shownStage or not crackPart or not crackPart.Parent then
 		shownStage = stage
 		local key = assets and assets.gui and assets.gui["destroy_" .. stage]
 		local content = if key then worldContent(key) else nil
-		local scale = assets.scale
-		for _, texture in pairs(crackTextures) do
-			texture.StudsPerTileU = scale
-			texture.StudsPerTileV = scale
-			texture.TextureContent = Content.none -- (the same picture again would not be drawn anew)
-			texture.TextureContent = content or Content.none
-			texture.Transparency = 0
-			pcall(function()
-				texture.ResampleMode = Enum.ResamplerMode.Pixelated
-			end)
+		local part = Instance.new("Part")
+		part.Name = "Cracks"
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Transparency = 1
+		part.CastShadow = false
+		part.Size = box.Size + Vector3.one * 0.04
+		part.CFrame = box.CFrame
+		if content then
+			for _, normal in ipairs(Enum.NormalId:GetEnumItems()) do
+				local texture = Instance.new("Texture")
+				texture.Face = normal
+				texture.StudsPerTileU = assets.scale
+				texture.StudsPerTileV = assets.scale
+				texture.TextureContent = content
+				pcall(function()
+					texture.ResampleMode = Enum.ResamplerMode.Pixelated
+				end)
+				texture.Parent = part
+			end
 		end
+		part.Parent = workspace
+		if crackPart then
+			crackPart:Destroy()
+		end
+		crackPart = part
 	end
+	local part = crackPart :: Part
+	part.Size = box.Size + Vector3.one * 0.04
+	part.CFrame = box.CFrame
 end
 
 local rayParams = RaycastParams.new()
@@ -1574,7 +1569,7 @@ local COPY_OFFSETS = { Vector3.new(0, 0, 0), Vector3.new(0.09, 0.05, -0.07), Vec
 local itemVisuals = {} -- anchor part -> visual
 local visualHolder = Instance.new("Folder")
 visualHolder.Name = "MinecraftItemVisuals"
-visualHolder.Parent = workspace.CurrentCamera or workspace -- only on this client; the pictures come like the world's
+visualHolder.Parent = workspace -- (made by this client: only here; the pictures come like the world's)
 
 local function pieceFaceSize(size: Vector3, normal: Enum.NormalId): (number, number)
 	if normal == Enum.NormalId.Top or normal == Enum.NormalId.Bottom then

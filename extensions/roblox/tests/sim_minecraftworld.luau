@@ -6,6 +6,13 @@
 	    lune run sim_minecraftworld.luau <BridgeURL> <scenario json>
 ]]
 local shim = require("./roblox_shim")
+-- answers bigger than a "fast" message come in 4 KiB chunks, one request each: over the internet far too slow
+local chunkRequests = 0
+shim.onRequest = function(request)
+	if string.find(request.Url, "/message/chunk", 1, true) then
+		chunkRequests += 1
+	end
+end
 local process = require("@lune/process")
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
@@ -331,9 +338,19 @@ while os.clock() - started < scenario.seconds do
 			for key, texture in pairs(payload and payload.textures or {}) do
 				sizes[key] = { texture.w, texture.h, buffer.len(texture.pixels) }
 			end
+			-- every item of the list with its picture: a flat icon (texture there) or a 3D look (in blocks)
+			local icons, missing = 0, {}
+			for _, item in ipairs(payload and payload.items or {}) do
+				local info = payload.itemsById and payload.itemsById[item.id]
+				if info and ((info.icon and payload.textures[info.icon]) or (info.look and payload.blocks[info.look])) then
+					icons += 1
+				else
+					table.insert(missing, item.id)
+				end
+			end
 			observations[event.name] = { available = payload and payload.available, scale = payload and payload.scale,
 				minY = payload and payload.minY, sizes = sizes, items = payload and payload.items, gui = payload and payload.gui,
-				blocks = payload and payload.blocks }
+				blocks = payload and payload.blocks, icons = icons, missingIcons = missing }
 		elseif event.action == "inventory" then
 			-- what the client sends from the inventory (creative: take an item into a slot)
 			handlers.Inventory(paddy, event.op, event.a, event.b, event.c)
@@ -383,5 +400,5 @@ while os.clock() - started < scenario.seconds do
 	task.wait(1 / 30)
 end
 print("OBSERVATIONS " .. serde.encode("json", { observations = observations, requests = shim.requests,
-	minutes = (os.clock() - started) / 60 }))
+	minutes = (os.clock() - started) / 60, chunkRequests = chunkRequests }))
 process.exit(0)

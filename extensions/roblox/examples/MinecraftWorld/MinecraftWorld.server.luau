@@ -507,19 +507,39 @@ local function askLater()
 		while #askQueue.items > 0 and #items < MAX_ASK do
 			table.insert(items, table.remove(askQueue.items, 1))
 		end
-		local ok, result = pcall(client.Call, client, ASSETS, { blocks = blocks, items = items }, { Timeout = 20 })
+		local ok, result = pcall(client.Call, client, ASSETS, { blocks = blocks, items = items }, { Timeout = 30 })
 		if world.assets ~= assets then
 			return -- everything was loaded again meanwhile
 		end
 		if ok and type(result) == "table" then
 			mergeBlocks(assets, result)
+			-- what did not fit into this answer (about 40 KiB): asked for in the next call
+			local later = type(result.later) == "table" and result.later or {}
+			local laterBlocks, laterItems = {}, {}
+			for _, name in ipairs(if type(later.blocks) == "table" then later.blocks else {}) do
+				laterBlocks[name] = true
+			end
+			for _, id in ipairs(if type(later.items) == "table" then later.items else {}) do
+				laterItems[id] = true
+			end
+			for index = #blocks, 1, -1 do
+				if laterBlocks[blocks[index]] then
+					table.insert(askQueue.blocks, 1, blocks[index])
+				end
+			end
+			for index = #items, 1, -1 do
+				if laterItems[items[index]] then
+					table.insert(askQueue.items, 1, items[index])
+				end
+			end
 			for _, name in ipairs(blocks) do
-				if not assets.blocks[name] then
+				if not assets.blocks[name] and not laterBlocks[name] then
 					assets.other[name] = true
 				end
 			end
 			afterNewPictures()
 		else
+			log(string.format("pictures: Minecraft did not answer (%s) - asked again later", tostring(result)))
 			for _, name in ipairs(blocks) do
 				assets.asked[name] = nil -- try again when it shows up next time
 			end
@@ -744,7 +764,9 @@ local function lookComplete(assets, look)
 	return true
 end
 
-function mergeBlocks(assets, result)
+-- itemPictures false: the item list of the first call has no pictures yet - those items are NOT known (else
+-- their icons would never be asked for: everything stayed a plain square until the block was placed once)
+function mergeBlocks(assets, result, itemPictures: boolean?)
 	for key, texture in pairs(result.textures or {}) do
 		assets.textures[key] = decodeTexture(texture)
 	end
@@ -756,7 +778,7 @@ function mergeBlocks(assets, result)
 			assets.other[name] = true
 		end
 	end
-	for _, item in ipairs(if type(result.items) == "table" then result.items else {}) do
+	for _, item in ipairs(if itemPictures ~= false and type(result.items) == "table" then result.items else {}) do
 		if type(item) == "table" and type(item.id) == "string" then
 			assets.itemsById[item.id] = item
 		end
@@ -780,7 +802,7 @@ local function loadAssets(generation)
 	local assets = { available = false, textures = {}, blocks = {}, items = DEFAULT_ITEMS, itemsById = {}, gui = {},
 		reason = nil, other = {}, asked = {} }
 	if ok and type(result) == "table" then
-		mergeBlocks(assets, result)
+		mergeBlocks(assets, result, false)
 		for name, key in pairs(result.gui or {}) do
 			if assets.textures[key] then
 				assets.gui[name] = key
@@ -818,21 +840,47 @@ function loadItemIcons(generation)
 			table.insert(ids, item.id)
 		end
 	end
-	for first = 1, #ids, MAX_ASK do
-		local batch = {}
-		for index = first, math.min(first + MAX_ASK - 1, #ids) do
-			table.insert(batch, ids[index])
-		end
-		local ok, result = pcall(client.Call, client, ASSETS, { items = batch }, { Timeout = 30 })
+	-- Minecraft answers about 40 KiB at a time (one piece over Bridge - bigger answers came in 4 KiB chunks, one HTTP
+	-- request each, and took longer than the time limit), the rest it lists in "later": asked for right away
+	local failures, shownAt = 0, os.clock()
+	while #ids > 0 do
+		local batch = table.move(ids, 1, math.min(MAX_ASK, #ids), 1, {})
+		local ok, result = pcall(client.Call, client, ASSETS, { items = batch }, { Timeout = 45 })
 		if generation ~= world.generation or world.assets ~= assets then
 			return
 		end
-		if ok and type(result) == "table" then
-			mergeBlocks(assets, result)
-		else
-			for _, id in ipairs(batch) do
-				assets.asked["item " .. id] = nil -- (asked again when it shows up in an inventory)
+		if not ok or type(result) ~= "table" then
+			failures += 1
+			if failures >= 3 then
+				log(string.format("item icons: Minecraft did not answer (%s) - %d items without an icon for now",
+					tostring(result), #ids))
+				for _, id in ipairs(ids) do
+					assets.asked["item " .. id] = nil -- (asked again when it shows up in an inventory)
+				end
+				break
 			end
+			task.wait(2)
+			continue
+		end
+		mergeBlocks(assets, result)
+		local later = {}
+		local laterItems = type(result.later) == "table" and result.later.items
+		for _, id in ipairs(if type(laterItems) == "table" then laterItems else {}) do
+			later[id] = true
+		end
+		local rest = {}
+		for index, id in ipairs(ids) do
+			if index > #batch or later[id] then
+				table.insert(rest, id)
+			end
+		end
+		if #rest >= #ids then
+			break -- (nothing came: do not ask forever)
+		end
+		ids = rest
+		if os.clock() - shownAt > 3 then
+			shownAt = os.clock()
+			afterNewPictures() -- (the first ones are there already)
 		end
 	end
 	log(string.format("item icons from Minecraft: %d", count(assets.itemsById)))
