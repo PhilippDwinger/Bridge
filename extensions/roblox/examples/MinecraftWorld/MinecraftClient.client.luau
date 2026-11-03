@@ -1951,7 +1951,7 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 		local lowest, highest = assets.minY, assets.maxY
 		if type(assets.dims) == "table" and #assets.dims > 1 then
 			-- (every dimension at its own height: the one this block is in)
-			local d = math.clamp((y + 352) // 1024, 0, #assets.dims - 1)
+			local d = math.clamp((y + 128) // 1024, 0, #assets.dims - 1)
 			local dim = assets.dims[d + 1]
 			if type(dim) == "table" then
 				lowest = (tonumber(dim.minY) or 0) + (tonumber(dim.shift) or 0)
@@ -3251,6 +3251,7 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 
 	-- Minecraft's fall damage: the server hurts 1 per block over 3
 	local fallPeak = nil
+	local fallLastY: number? = nil
 	local FALLING = {
 		[Enum.HumanoidStateType.Freefall] = true,
 		[Enum.HumanoidStateType.Jumping] = true,
@@ -3270,13 +3271,18 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 			return
 		end
 		local effectsText = tostring(player:GetAttribute("McEffects") or "")
-		if player:GetAttribute("McFluid") ~= nil or string.find(effectsText, '"slow_falling"', 1, true)
+		if player:GetAttribute("McFluid") ~= nil or player:GetAttribute("McClimbing") == true or string.find(effectsText, '"slow_falling"', 1, true)
 			or string.find(effectsText, '"levitation"', 1, true) then
 			fallPeak = nil -- (Minecraft: in water / lava the fall starts new - landing in water does not hurt; slow falling)
 			return
 		end
 		local humanoidState = humanoid:GetState()
 		local y = root.Position.Y
+		-- a jump of many blocks in one frame (a portal, /tp): no fall - the fall starts new there
+		if fallLastY and math.abs(y - fallLastY) > 30 then
+			fallPeak = nil
+		end
+		fallLastY = y
 		if FALLING[humanoidState] then
 			fallPeak = math.max(fallPeak or y, y)
 		elseif fallPeak then
@@ -3956,6 +3962,31 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 					item.CanQuery = true
 				end
 			end
+		elseif string.find(kind, "minecart", 1, true) or string.find(kind, "boat", 1, true) or string.find(kind, "raft", 1, true) then
+			-- minecarts + boats (Minecraft's models are code): their box, a minecart grey iron, a boat its wood; a chest /
+			-- furnace / TNT / hopper on it as a small block. They can be hit (break) and right-clicked (open a chest cart)
+			local cart = string.find(kind, "minecart", 1, true) ~= nil
+			local bottom = thingPart(model, Vector3.new(size.X, size.Y * (if cart then 0.75 else 0.5), size.Z),
+				if cart then Color3.fromRGB(110, 110, 115) else Color3.fromRGB(140, 105, 60))
+			bottom.Material = if cart then Enum.Material.Metal else Enum.Material.WoodPlanks
+			bottom.CFrame = CFrame.new(0, -size.Y * (if cart then 0.125 else 0.25), 0)
+			local cargo = string.match(kind, "^minecraft:(%w+)_minecart$") or (if string.find(kind, "chest", 1, true) then "chest" else nil)
+			local block = if cargo == "chest" then "minecraft:chest" elseif cargo == "furnace" then "minecraft:furnace"
+				elseif cargo == "tnt" then "minecraft:tnt" elseif cargo == "hopper" then "minecraft:hopper"
+				elseif cargo == "spawner" then "minecraft:spawner" elseif cargo == "command_block" then "minecraft:command_block" else nil
+			local look = block and assets and assets.blocks and assets.blocks[block]
+			if look and look.cube and type(look.faces) == "table" then
+				itemPiece(model, Vector3.one * scale * 0.75, CFrame.new(0, size.Y * 0.3, 0), look.faces)
+			elseif block then
+				local box = thingPart(model, Vector3.one * scale * 0.75, Color3.fromRGB(150, 110, 50))
+				box.CFrame = CFrame.new(0, size.Y * 0.3, 0)
+			end
+			for _, item in ipairs(model:GetChildren()) do
+				if item:IsA("BasePart") then
+					item:SetAttribute("McMob", data[1])
+					item.CanQuery = true
+				end
+			end
 		elseif kind == "minecraft:end_crystal" then
 			local core = thingPart(model, Vector3.one * scale * 0.5, Color3.fromRGB(255, 120, 230))
 			core.Material = Enum.Material.Neon
@@ -4129,6 +4160,8 @@ do -- (its own block: these locals do not count towards the 200 of the script)
 				end
 			elseif kind == "minecraft:experience_orb" then
 				frame = frame * CFrame.new(0, math.sin(now * 6 + (b[1] % 7)) * 0.08 * scale, 0)
+			elseif string.find(kind, "minecart", 1, true) or string.find(kind, "boat", 1, true) or string.find(kind, "raft", 1, true) then
+				frame = frame * CFrame.Angles(0, math.rad(-(tonumber(b[6]) or 0)), 0)
 			elseif kind == "minecraft:ender_dragon" then
 				-- Minecraft's dragon yaw: 180 - yaw like the mobs, its head at -z of the model
 				frame = frame * CFrame.Angles(0, math.rad(180 - (tonumber(b[6]) or 0)), 0)

@@ -314,6 +314,39 @@ local function steer(root: BasePart, target: Vector3, keep: number): Vector3
 end
 
 -- Minecraft walks up steps up to 0.6 blocks high (a slab, a closed trapdoor) without jumping
+-- Ladders, vines, scaffolding (Minecraft's BlockTags.CLIMBABLE): the body in one of their blocks (their parts in the
+-- world are named after the block)
+local CLIMBABLE = { ["minecraft:ladder"] = true, ["minecraft:vine"] = true, ["minecraft:scaffolding"] = true,
+	["minecraft:twisting_vines"] = true, ["minecraft:twisting_vines_plant"] = true, ["minecraft:weeping_vines"] = true,
+	["minecraft:weeping_vines_plant"] = true, ["minecraft:cave_vines"] = true, ["minecraft:cave_vines_plant"] = true }
+local climbParams = OverlapParams.new()
+climbParams.FilterType = Enum.RaycastFilterType.Include
+local climbCheckAt, climbCached = 0, false
+local function onClimbable(root: BasePart): boolean
+	local now = os.clock()
+	if now - climbCheckAt < 0.05 then
+		return climbCached
+	end
+	climbCheckAt = now
+	climbCached = false
+	local worldFolder = workspace:FindFirstChild("MinecraftWorld")
+	if not worldFolder then
+		return false
+	end
+	climbParams.FilterDescendantsInstances = { worldFolder }
+	local feet = root.Position - Vector3.new(0, Character.ROOT_HEIGHT, 0)
+	local center = CFrame.new(feet + Vector3.new(0, 0.9 * BLOCK, 0))
+	for _, part in ipairs(workspace:GetPartBoundsInBox(center, Vector3.new(0.7, 1.7, 0.7) * BLOCK, climbParams)) do
+		local model = part.Parent
+		local name = model and model:IsA("Model") and (string.match(model.Name, "^([^%[#]+)") or model.Name)
+		if name and CLIMBABLE[name] then
+			climbCached = true
+			break
+		end
+	end
+	return climbCached
+end
+
 local function stepUp(root: BasePart, horizontal: Vector3, dt: number)
 	if horizontal.Magnitude < 0.5 then
 		return
@@ -536,6 +569,25 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 		move = stayOnEdge(root, move, speed)
 	end
 	local horizontal = steer(root, move * speed, (if grounded then GROUND_KEEP else AIR_KEEP) ^ (TICKS * dt))
+	-- climbing (Minecraft's LivingEntity.handleOnClimbable): sideways at most 0.15 blocks / tick, falling at most 0.15,
+	-- walking into it / jumping = up with 0.2, sneaking = holding on
+	local climbing = not spectator and onClimbable(root)
+	if player:GetAttribute("McClimbing") ~= (if climbing then true else nil) then
+		player:SetAttribute("McClimbing", if climbing then true else nil) -- (no fall damage: MinecraftClient)
+	end
+	if climbing then
+		local limit = 0.15 * TICKS * BLOCK
+		horizontal = Vector3.new(math.clamp(horizontal.X, -limit, limit), 0, math.clamp(horizontal.Z, -limit, limit))
+		local vy = root.AssemblyLinearVelocity.Y
+		if space or move.Magnitude > 0.1 then
+			vy = 0.2 * TICKS * BLOCK
+		elseif sneaking then
+			vy = 0
+		else
+			vy = math.max(vy, -limit)
+		end
+		root.AssemblyLinearVelocity = Vector3.new(horizontal.X, vy, horizontal.Z)
+	end
 	-- the humanoid wants the same speed (it would brake against it otherwise)
 	humanoid.WalkSpeed = horizontal.Magnitude
 	humanoid:Move(if horizontal.Magnitude > 0.01 then horizontal.Unit else Vector3.zero, false)

@@ -177,7 +177,7 @@ end
 local dimAt, dimInfo, insideWorld
 do
 	local DIM_BAND = 1024
-	local DIM_BELOW = 352
+	local DIM_BELOW = 128
 	function dimAt(blockY)
 		local dims = world.info and world.info.dims
 		if type(dims) ~= "table" or #dims == 0 then
@@ -757,6 +757,15 @@ local function renderSection(chunk, sectionY, section, force)
 	buildStats.meshTotal += os.clock() - meshStarted
 	for _, box in ipairs(boxes) do
 		local id = boxId(box)
+		-- a banner with patterns: its own look ("...#p=..." from the mod), once Minecraft has sent it
+		local patterned = nil
+		if chunk.banners then
+			local full = chunk.banners[(chunk.x * 16 + box.x) .. "," .. (sectionY * 16 + box.y) .. "," .. (chunk.z * 16 + box.z)]
+			if full and world.assets and world.assets.blocks[full] then
+				patterned = full
+				id = id .. "#" .. full
+			end
+		end
 		local existing = if force then nil else old[id]
 		if existing and existing.Parent then
 			old[id] = nil
@@ -768,6 +777,9 @@ local function renderSection(chunk, sectionY, section, force)
 		local blockZ = chunk.z * 16 + box.z
 		local top = string.sub(box.key, -#TOP) == TOP
 		local name = if top then string.sub(box.key, 1, -#TOP - 1) else box.key
+		if patterned then
+			name = patterned
+		end
 		local look = world.assets and world.assets.blocks[name]
 		local corner = Vector3.new(blockX * scale, (blockY - minY) * scale, blockZ * scale)
 		if look and look.cube ~= true then
@@ -1222,6 +1234,18 @@ local function applyChunk(data)
 	local folder = if old then old.folder else Instance.new("Folder")
 	folder.Name = "Chunk " .. key
 	local chunk = { x = data.x, z = data.z, dim = dim, sections = {}, folder = folder }
+	if type(data.banners) == "table" then
+		-- banners with patterns: [x, y, z, look name] - their looks are asked like any block's
+		chunk.banners = {}
+		local names = {}
+		for _, banner in ipairs(data.banners) do
+			if type(banner) == "table" and type(banner[1]) == "number" and type(banner[4]) == "string" then
+				chunk.banners[banner[1] .. "," .. banner[2] .. "," .. banner[3]] = banner[4]
+				table.insert(names, banner[4])
+			end
+		end
+		noticeBlocks(names)
+	end
 	if type(data.signs) == "table" then
 		chunk.signs = {}
 		for _, sign in ipairs(data.signs) do
@@ -1655,6 +1679,15 @@ function afterNewPictures()
 			end
 		end
 		for _, chunk in pairs(world.chunks) do
+			for key, full in pairs(chunk.banners or {}) do
+				if names[full] then
+					-- (a banner's patterned look came)
+					local y = tonumber(string.match(key, "^[^,]+,([^,]+),"))
+					if y then
+						again(chunk, y // 16)
+					end
+				end
+			end
 			for sectionY, section in pairs(chunk.sections) do
 				if section.built or section.queued then
 					for _, name in ipairs(section.palette) do
@@ -1979,6 +2012,7 @@ local function manage()
 	-- far chunks go (only while somebody is there - nobody there: keep what is built)
 	if has and info.follow then
 		local limit = (VIEW + 2) * (VIEW + 2)
+		local unloaded = 0
 		for key, chunk in pairs(world.chunks) do
 			local near = false
 			for _, point in ipairs(points) do
@@ -1988,7 +2022,8 @@ local function manage()
 					break
 				end
 			end
-			if not near then
+			if not near and unloaded < 6 then
+				unloaded += 1 -- (a few per round: a portal / far teleport does not stop the server for a moment)
 				unloadChunk(key, chunk)
 			end
 		end
@@ -3646,6 +3681,23 @@ client:Subscribe(nil, CHANGES, function(data)
 	end
 	if type(data.blocks) == "table" then
 		applyBlocks(data.blocks)
+	end
+	if type(data.banners) == "table" then
+		-- a banner got (new) patterns: its look, then its section again
+		local names = {}
+		for _, banner in ipairs(data.banners) do
+			if type(banner) == "table" and type(banner[1]) == "number" and type(banner[2]) == "number"
+				and type(banner[3]) == "number" and type(banner[4]) == "string" then
+				local chunk, sectionY = sectionAt(banner[1], banner[2], banner[3], false)
+				if chunk then
+					chunk.banners = chunk.banners or {}
+					chunk.banners[banner[1] .. "," .. banner[2] .. "," .. banner[3]] = banner[4]
+					table.insert(names, banner[4])
+					queueSection(chunk, sectionY, false)
+				end
+			end
+		end
+		noticeBlocks(names)
 	end
 	if type(data.signs) == "table" then
 		-- a sign's new text: on its board at once (its model stays)

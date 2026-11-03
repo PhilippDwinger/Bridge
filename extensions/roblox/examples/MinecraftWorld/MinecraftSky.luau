@@ -110,7 +110,7 @@ local function dimAttribute(name: string, fallback: any): any
 	return attribute(name, fallback)
 end
 
--- Which dimension the camera is in (its height band, like the mod's Dims: band 1024 blocks, from y - 352)
+-- Which dimension the camera is in (its height band, like the mod's Dims: band 1024 blocks, from y - 128)
 local function updateDimension(assets: any, eyeY: number, scale: number)
 	local dims = assets and assets.dims
 	if type(dims) ~= "table" or #dims <= 1 then
@@ -118,7 +118,7 @@ local function updateDimension(assets: any, eyeY: number, scale: number)
 		return
 	end
 	local blockY = math.floor(eyeY / scale) + (assets.minY or -64)
-	local d = math.clamp((blockY + 352) // 1024, 0, #dims - 1)
+	local d = math.clamp((blockY + 128) // 1024, 0, #dims - 1)
 	local entry = dims[d + 1]
 	if d == 0 or type(entry) ~= "table" then
 		current, currentKind = nil, "overworld"
