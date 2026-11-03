@@ -155,6 +155,7 @@ local miningSpeed = remote("RemoteFunction", "MiningSpeed") -- client asks: (x, 
 local drownRemote = remote("RemoteEvent", "Drown") -- client: the air under water is out (Minecraft: 2 damage)
 -- server -> clients: (kind, position, extra) Minecraft's particles: "crit", "magic", "effect" (colour), "smoke" ...
 local particlesRemote = remote("RemoteEvent", "Particles")
+local titleRemote = remote("RemoteEvent", "Title") -- server -> client: Minecraft's title / subtitle / action bar for him
 local lastSwing = {} -- player -> os.clock() of his last swing (Minecraft: every swing starts the attack charge again)
 local hunger = {} -- player -> {food, sat, exhaustion, timer, peaceful, last, rising} (region hunger)
 local hungerOf, showHunger -- below (region hunger)
@@ -173,37 +174,40 @@ end
 
 -- region dimensions: every Minecraft dimension lies at its own height in this one world (Minecraft y + shift, the mod
 -- sends Roblox y everywhere): overworld 0, the Nether 1024, the End 2048 (info.dims)
-local DIM_BAND = 1024
-local DIM_BELOW = 352
-local function dimAt(blockY)
-	local dims = world.info and world.info.dims
-	if type(dims) ~= "table" or #dims == 0 then
-		return 0
+local dimAt, dimInfo, insideWorld
+do
+	local DIM_BAND = 1024
+	local DIM_BELOW = 352
+	function dimAt(blockY)
+		local dims = world.info and world.info.dims
+		if type(dims) ~= "table" or #dims == 0 then
+			return 0
+		end
+		return math.clamp((math.floor(blockY) + DIM_BELOW) // DIM_BAND, 0, #dims - 1)
 	end
-	return math.clamp((math.floor(blockY) + DIM_BELOW) // DIM_BAND, 0, #dims - 1)
-end
--- {i, kind, shift, minY, maxY} of a dimension (minY / maxY: Roblox y)
-local function dimInfo(d)
-	local info = world.info
-	local dims = info and info.dims
-	local entry = type(dims) == "table" and dims[(d or 0) + 1]
-	if type(entry) == "table" then
-		local shift = tonumber(entry.shift) or 0
-		return {
-			i = d,
-			kind = entry.kind or "overworld",
-			shift = shift,
-			minY = (tonumber(entry.minY) or 0) + shift,
-			maxY = (tonumber(entry.maxY) or 256) + shift,
-			ceiling = entry.ceiling == true,
-		}
+	-- {i, kind, shift, minY, maxY} of a dimension (minY / maxY: Roblox y)
+	function dimInfo(d)
+		local info = world.info
+		local dims = info and info.dims
+		local entry = type(dims) == "table" and dims[(d or 0) + 1]
+		if type(entry) == "table" then
+			local shift = tonumber(entry.shift) or 0
+			return {
+				i = d,
+				kind = entry.kind or "overworld",
+				shift = shift,
+				minY = (tonumber(entry.minY) or 0) + shift,
+				maxY = (tonumber(entry.maxY) or 256) + shift,
+				ceiling = entry.ceiling == true,
+			}
+		end
+		return { i = 0, kind = "overworld", shift = 0, minY = info and info.minY or -64, maxY = info and info.maxY or 320, ceiling = false }
 	end
-	return { i = 0, kind = "overworld", shift = 0, minY = info and info.minY or -64, maxY = info and info.maxY or 320, ceiling = false }
-end
--- Is a block y inside its dimension (not in the gap between two)?
-local function insideWorld(blockY)
-	local dim = dimInfo(dimAt(blockY))
-	return blockY >= dim.minY and blockY < dim.maxY
+	-- Is a block y inside its dimension (not in the gap between two)?
+	function insideWorld(blockY)
+		local dim = dimInfo(dimAt(blockY))
+		return blockY >= dim.minY and blockY < dim.maxY
+	end
 end
 
 -- region blocks -> parts
@@ -347,6 +351,97 @@ local function buildModel(key, look, corner, scale, cell)
 	end
 	return model
 end
+
+-- region sign text (from Minecraft's sign block entities: [x, y, z, front lines, back lines, front colour, back colour,
+-- glowing front, glowing back]): on the board (the biggest piece of the sign's model) like Minecraft writes it
+local setSignText
+do
+	local SIGN_FACES = { Enum.NormalId.Front, Enum.NormalId.Back, Enum.NormalId.Left, Enum.NormalId.Right, Enum.NormalId.Top,
+		Enum.NormalId.Bottom }
+	local SIGN_FACING = { north = Vector3.new(0, 0, -1), south = Vector3.new(0, 0, 1), east = Vector3.new(1, 0, 0),
+		west = Vector3.new(-1, 0, 0) }
+	local function signFront(name)
+		local rotation = tonumber(string.match(name, "rotation=(%d+)"))
+		if rotation then
+			local a = math.rad(rotation * 22.5) -- (Minecraft: 0 = facing south, 4 = west ...)
+			return Vector3.new(-math.sin(a), 0, math.cos(a))
+		end
+		return SIGN_FACING[string.match(name, "facing=(%a+)") or "south"] or Vector3.new(0, 0, 1)
+	end
+	local function rgbOf(value, fallback)
+		local n = tonumber(value)
+		if not n then
+			return fallback
+		end
+		return Color3.fromRGB(bit32.band(bit32.rshift(n, 16), 255), bit32.band(bit32.rshift(n, 8), 255), bit32.band(n, 255))
+	end
+	function setSignText(model, sign)
+		for _, old in ipairs(model:GetDescendants()) do
+			if old:IsA("SurfaceGui") and old.Name == "McSignText" then
+				old:Destroy()
+			end
+		end
+		local board, best = nil, 0
+		for _, piece in ipairs(model:GetChildren()) do
+			if piece:IsA("BasePart") and piece.Name == "Piece" then
+				local size = piece.Size
+				local area = math.max(size.X * size.Y, size.Y * size.Z, size.X * size.Z)
+				if area > best then
+					board, best = piece, area
+				end
+			end
+		end
+		if not board or type(sign) ~= "table" then
+			return
+		end
+		local front = signFront(model.Name)
+		for side = 1, 2 do
+			local lines = sign[3 + side]
+			local any = false
+			for _, line in ipairs(if type(lines) == "table" then lines else {}) do
+				if type(line) == "string" and line ~= "" then
+					any = true
+				end
+			end
+			if not any then
+				continue
+			end
+			local want = if side == 1 then front else -front
+			local face, best2 = Enum.NormalId.Front, -2
+			for _, normal in ipairs(SIGN_FACES) do
+				local d = board.CFrame:VectorToWorldSpace(Vector3.FromNormalId(normal)):Dot(want)
+				if d > best2 then
+					face, best2 = normal, d
+				end
+			end
+			local glow = sign[7 + side] == true
+			local color = rgbOf(sign[5 + side], Color3.new(0, 0, 0))
+			local gui = Instance.new("SurfaceGui")
+			gui.Name = "McSignText"
+			gui.Face = face
+			gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+			gui.PixelsPerStud = 60
+			gui.LightInfluence = if glow then 0 else 1
+			gui.MaxDistance = 60
+			for i = 1, 4 do
+				local label = Instance.new("TextLabel")
+				label.BackgroundTransparency = 1
+				label.Size = UDim2.fromScale(0.96, 0.21)
+				label.Position = UDim2.fromScale(0.02, 0.08 + (i - 1) * 0.215)
+				label.Font = Enum.Font.Arcade
+				label.TextScaled = true
+				label.Text = tostring(lines[i] or "")
+				label.TextColor3 = if glow and color == Color3.new(0, 0, 0) then Color3.fromRGB(240, 235, 200) else color
+				label.TextStrokeTransparency = if glow then 0.2 else 1
+				label.TextStrokeColor3 = Color3.new(color.R * 0.4, color.G * 0.4, color.B * 0.4)
+				label.Parent = gui
+			end
+			gui.Parent = board
+		end
+	end
+end
+
+-- endregion
 
 local function cellIndex(x, y, z) -- 1-based, order y, z, x (as the mod sends it)
 	return y * 256 + z * 16 + x + 1
@@ -677,6 +772,10 @@ local function renderSection(chunk, sectionY, section, force)
 		local corner = Vector3.new(blockX * scale, (blockY - minY) * scale, blockZ * scale)
 		if look and look.cube ~= true then
 			local model = buildModel(name, look, corner, scale, Vector3.new(blockX, blockY, blockZ))
+			local sign = chunk.signs and chunk.signs[blockX .. "," .. blockY .. "," .. blockZ]
+			if sign then
+				setSignText(model, sign)
+			end
 			if look.light then
 				for _, piece in ipairs(model:GetChildren()) do
 					if piece:IsA("BasePart") then
@@ -1123,6 +1222,14 @@ local function applyChunk(data)
 	local folder = if old then old.folder else Instance.new("Folder")
 	folder.Name = "Chunk " .. key
 	local chunk = { x = data.x, z = data.z, dim = dim, sections = {}, folder = folder }
+	if type(data.signs) == "table" then
+		chunk.signs = {}
+		for _, sign in ipairs(data.signs) do
+			if type(sign) == "table" and type(sign[1]) == "number" then
+				chunk.signs[sign[1] .. "," .. sign[2] .. "," .. sign[3]] = sign
+			end
+		end
+	end
 	if data.v == 2 then
 		chunk.sections = decodePacked(data)
 		noticeBlocks(data.palette or {})
@@ -2522,6 +2629,18 @@ inventoryRemote.OnServerEvent:Connect(function(player, op, a, b, c, d)
 		inOrder(player, function()
 			callPlayer(player, "state")
 		end)
+	elseif op == "button" and isWhole(a) and a >= 0 and a <= 64 then
+		-- a button of the open window (enchanting table offer ...): Minecraft's clickMenuButton
+		inOrder(player, function()
+			callPlayer(player, "button", { id = a })
+		end)
+	elseif op == "release" and isWhole(a) and a >= 0 and a <= 8 and type(b) == "number" and b == b then
+		-- a bow / crossbow / trident let go after b seconds (looking c): Minecraft shoots / throws it
+		local look = if typeof(c) == "Vector3" and c.Magnitude > 0.01 then c.Unit else nil
+		inOrder(player, function()
+			callPlayer(player, "release", { slot = a, ticks = math.floor(math.clamp(b, 0, 3600) * 20),
+				feet = feetOf(player), look = if look then { look.X, look.Y, look.Z } else nil })
+		end)
 	elseif op == "eat" and isWhole(a) and a >= 0 and a <= 8 then
 		-- eaten / drunk (his client counted Minecraft's time): Minecraft does the item (effects, bowl ...), the food
 		-- goes into his hunger here (FoodData.eat: food + nutrition, saturation + its saturation, at most the food)
@@ -2591,10 +2710,33 @@ local function onDied(player)
 	local hurtBy = lastHurt[player]
 	local cause = if hurtBy and os.clock() - hurtBy.at < 10 then hurtBy.cause else "other"
 	-- Minecraft's death: the message for everybody, the inventory falls out where he died (unless keepInventory)
-	callPlayer(player, "died", { feet = feetOf(player), cause = cause })
+	local result = callPlayer(player, "died", { feet = feetOf(player), cause = cause })
+	-- he comes back where Minecraft says: his bed / respawn anchor (another dimension too) - or the world spawn
+	if result and type(result.respawn) == "table" then
+		player:SetAttribute("McRespawn", Vector3.new(tonumber(result.respawn[1]) or 0, tonumber(result.respawn[2]) or 0,
+			tonumber(result.respawn[3]) or 0))
+	end
+	if result and result.noBed == true then
+		chatRemote:FireClient(player, "reply", { "You have no home bed or charged respawn anchor, or it was obstructed" })
+	end
 end
 
 local function setupHealth(character)
+	do
+		local owner = Players:GetPlayerFromCharacter(character)
+		local spot = owner and owner:GetAttribute("McRespawn")
+		if owner and typeof(spot) == "Vector3" then
+			owner:SetAttribute("McRespawn", nil)
+			task.defer(function()
+				local root = character:WaitForChild("HumanoidRootPart", 5)
+				if root and root:IsA("BasePart") then
+					root.CFrame = CFrame.new(spot)
+					root.Anchored = true -- (manage() lets go when the ground there is built)
+					root:SetAttribute("McWaitWorld", true)
+				end
+			end)
+		end
+	end
 	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 10)
 	local player = Players:GetPlayerFromCharacter(character)
 	if player then
@@ -2633,20 +2775,24 @@ end
 local exhaustNext = {} -- player -> exhaustion to add (hurt() comes before the hunger region)
 -- Minecraft's armor for the damage Roblox counts itself (lava, fire, a hot floor, cactus): CombatRules.getDamageAfterAbsorb
 -- (hits from Minecraft - mobs, players - come already reduced)
-local ARMORED = { lava = true, fire = true, cactus = true }
-local function afterArmor(player, amount, cause)
-	if not ARMORED[cause] then
-		return amount
+local afterArmor
+do
+	local ARMORED = { lava = true, fire = true, cactus = true }
+	function afterArmor(player, amount, cause)
+		if not ARMORED[cause] then
+			return amount
+		end
+		local armor = tonumber(player:GetAttribute("McArmor")) or 0
+		local toughness = tonumber(player:GetAttribute("McToughness")) or 0
+		if armor <= 0 then
+			return amount
+		end
+		local f = 2 + toughness / 4
+		local g = math.clamp(armor - amount / f, armor * 0.2, 20)
+		return amount * (1 - g / 25)
 	end
-	local armor = tonumber(player:GetAttribute("McArmor")) or 0
-	local toughness = tonumber(player:GetAttribute("McToughness")) or 0
-	if armor <= 0 then
-		return amount
-	end
-	local f = 2 + toughness / 4
-	local g = math.clamp(armor - amount / f, armor * 0.2, 20)
-	return amount * (1 - g / 25)
 end
+
 local function hurt(player, amount, from, cause)
 	amount = afterArmor(player, amount, cause)
 	local character = player.Character
@@ -2768,100 +2914,103 @@ local function hungerTick(player, state, humanoid, root, difficulty)
 end
 
 -- region dangers like Minecraft: below the world (the void), lava, fire, magma, cactus, burning afterwards
-local burning = {} -- player -> os.clock() until he burns (Minecraft: 15 s after lava, 8 s after fire)
-local dangerAt = {} -- player -> os.clock() of the last damage (Minecraft's 10 ticks without new damage)
-local burnAt = {} -- player -> os.clock() of the last burn damage (1 per second)
-local function effectOn(player, id)
-	return string.find(tostring(player:GetAttribute("McEffects") or ""), '"' .. id .. '"', 1, true) ~= nil
-end
-local function dangers(player, mode, humanoid, root)
-	local info = world.info
-	local scale = info.studsPerBlock
-	local p = root.Position
-	local feetY = (p.Y - Character.ROOT_HEIGHT) / scale + info.minY
-	local dim = dimInfo(dimAt(feetY))
-	local now = os.clock()
-	local character = player.Character
-	local protected = mode == "creative" or mode == "spectator"
-	if feetY < dim.minY - 64 and mode ~= "spectator" then
-		-- below the world: Minecraft's "fell out of the world" (4 every tick, in creative too)
-		lastHurt[player] = { cause = "void", at = now }
-		humanoid:TakeDamage(4)
-		return
+local dangers
+do
+	local burning = {} -- player -> os.clock() until he burns (Minecraft: 15 s after lava, 8 s after fire)
+	local dangerAt = {} -- player -> os.clock() of the last damage (Minecraft's 10 ticks without new damage)
+	local burnAt = {} -- player -> os.clock() of the last burn damage (1 per second)
+	local function effectOn(player, id)
+		return string.find(tostring(player:GetAttribute("McEffects") or ""), '"' .. id .. '"', 1, true) ~= nil
 	end
-	if protected then
-		burning[player] = nil
-		if character then
-			character:SetAttribute("McBurning", nil)
+	function dangers(player, mode, humanoid, root)
+		local info = world.info
+		local scale = info.studsPerBlock
+		local p = root.Position
+		local feetY = (p.Y - Character.ROOT_HEIGHT) / scale + info.minY
+		local dim = dimInfo(dimAt(feetY))
+		local now = os.clock()
+		local character = player.Character
+		local protected = mode == "creative" or mode == "spectator"
+		if feetY < dim.minY - 64 and mode ~= "spectator" then
+			-- below the world: Minecraft's "fell out of the world" (4 every tick, in creative too)
+			lastHurt[player] = { cause = "void", at = now }
+			humanoid:TakeDamage(4)
+			return
 		end
-		return
-	end
-	local x, z = math.floor(p.X / scale), math.floor(p.Z / scale)
-	local fy = math.floor(feetY + 0.01)
-	local feetBlock = baseName(blockAt(x, fy, z))
-	local bodyBlock = baseName(blockAt(x, fy + 1, z))
-	local fireProof = effectOn(player, "fire_resistance")
-	local amount, cause = 0, nil
-	if feetBlock == "minecraft:water" or bodyBlock == "minecraft:water" then
-		burning[player] = nil -- (water puts it out)
-	end
-	if feetBlock == "minecraft:lava" or bodyBlock == "minecraft:lava" then
-		amount, cause = 4, "lava"
-		burning[player] = now + 15
-	elseif feetBlock == "minecraft:fire" or feetBlock == "minecraft:soul_fire" or bodyBlock == "minecraft:fire" then
-		amount, cause = if feetBlock == "minecraft:soul_fire" then 2 else 1, "fire"
-		burning[player] = math.max(burning[player] or 0, now + 8)
-	elseif feetBlock == "minecraft:campfire" or feetBlock == "minecraft:soul_campfire" then
-		local lit = string.find(blockAt(x, fy, z) or "", "lit=true", 1, true) ~= nil
-		if lit and not (character and character:GetAttribute("McSneak") == true) then
-			amount, cause = 1, "fire"
+		if protected then
+			burning[player] = nil
+			if character then
+				character:SetAttribute("McBurning", nil)
+			end
+			return
 		end
-	elseif baseName(blockAt(x, math.floor(feetY - 0.05), z)) == "minecraft:magma_block"
-		and not (character and character:GetAttribute("McSneak") == true) then
-		amount, cause = 1, "fire" -- (Minecraft: a hot floor, not while sneaking)
-	else
-		-- a cactus next to him (Minecraft: touching it hurts 1)
-		local fx, fz = p.X / scale - x, p.Z / scale - z
-		local sides = {}
-		if fx < 0.32 then table.insert(sides, { -1, 0 }) end
-		if fx > 0.68 then table.insert(sides, { 1, 0 }) end
-		if fz < 0.32 then table.insert(sides, { 0, -1 }) end
-		if fz > 0.68 then table.insert(sides, { 0, 1 }) end
-		for _, side in ipairs(sides) do
-			for dy = 0, 1 do
-				if baseName(blockAt(x + side[1], fy + dy, z + side[2])) == "minecraft:cactus" then
-					amount, cause = 1, "cactus"
+		local x, z = math.floor(p.X / scale), math.floor(p.Z / scale)
+		local fy = math.floor(feetY + 0.01)
+		local feetBlock = baseName(blockAt(x, fy, z))
+		local bodyBlock = baseName(blockAt(x, fy + 1, z))
+		local fireProof = effectOn(player, "fire_resistance")
+		local amount, cause = 0, nil
+		if feetBlock == "minecraft:water" or bodyBlock == "minecraft:water" then
+			burning[player] = nil -- (water puts it out)
+		end
+		if feetBlock == "minecraft:lava" or bodyBlock == "minecraft:lava" then
+			amount, cause = 4, "lava"
+			burning[player] = now + 15
+		elseif feetBlock == "minecraft:fire" or feetBlock == "minecraft:soul_fire" or bodyBlock == "minecraft:fire" then
+			amount, cause = if feetBlock == "minecraft:soul_fire" then 2 else 1, "fire"
+			burning[player] = math.max(burning[player] or 0, now + 8)
+		elseif feetBlock == "minecraft:campfire" or feetBlock == "minecraft:soul_campfire" then
+			local lit = string.find(blockAt(x, fy, z) or "", "lit=true", 1, true) ~= nil
+			if lit and not (character and character:GetAttribute("McSneak") == true) then
+				amount, cause = 1, "fire"
+			end
+		elseif baseName(blockAt(x, math.floor(feetY - 0.05), z)) == "minecraft:magma_block"
+			and not (character and character:GetAttribute("McSneak") == true) then
+			amount, cause = 1, "fire" -- (Minecraft: a hot floor, not while sneaking)
+		else
+			-- a cactus next to him (Minecraft: touching it hurts 1)
+			local fx, fz = p.X / scale - x, p.Z / scale - z
+			local sides = {}
+			if fx < 0.32 then table.insert(sides, { -1, 0 }) end
+			if fx > 0.68 then table.insert(sides, { 1, 0 }) end
+			if fz < 0.32 then table.insert(sides, { 0, -1 }) end
+			if fz > 0.68 then table.insert(sides, { 0, 1 }) end
+			for _, side in ipairs(sides) do
+				for dy = 0, 1 do
+					if baseName(blockAt(x + side[1], fy + dy, z + side[2])) == "minecraft:cactus" then
+						amount, cause = 1, "cactus"
+					end
 				end
 			end
+			if baseName(blockAt(x, fy, z)) == "minecraft:sweet_berry_bush" and (root.AssemblyLinearVelocity.Magnitude > 0.5) then
+				amount, cause = 1, "cactus"
+			end
 		end
-		if baseName(blockAt(x, fy, z)) == "minecraft:sweet_berry_bush" and (root.AssemblyLinearVelocity.Magnitude > 0.5) then
-			amount, cause = 1, "cactus"
+		if fireProof and cause ~= "cactus" then
+			amount, cause = 0, nil
+			burning[player] = nil
+		end
+		local onFire = burning[player] ~= nil and now < burning[player]
+		if not onFire then
+			burning[player] = nil
+		end
+		if character and (character:GetAttribute("McBurning") == true) ~= onFire then
+			character:SetAttribute("McBurning", if onFire then true else nil) -- (the clients show the flames)
+		end
+		if amount > 0 and now - (dangerAt[player] or 0) >= 0.5 then
+			dangerAt[player] = now
+			hurt(player, amount, nil, cause)
+		elseif amount == 0 and onFire and now - (burnAt[player] or 0) >= 1 then
+			burnAt[player] = now
+			hurt(player, 1, nil, "burn")
 		end
 	end
-	if fireProof and cause ~= "cactus" then
-		amount, cause = 0, nil
+	Players.PlayerRemoving:Connect(function(player)
 		burning[player] = nil
-	end
-	local onFire = burning[player] ~= nil and now < burning[player]
-	if not onFire then
-		burning[player] = nil
-	end
-	if character and (character:GetAttribute("McBurning") == true) ~= onFire then
-		character:SetAttribute("McBurning", if onFire then true else nil) -- (the clients show the flames)
-	end
-	if amount > 0 and now - (dangerAt[player] or 0) >= 0.5 then
-		dangerAt[player] = now
-		hurt(player, amount, nil, cause)
-	elseif amount == 0 and onFire and now - (burnAt[player] or 0) >= 1 then
-		burnAt[player] = now
-		hurt(player, 1, nil, "burn")
-	end
+		dangerAt[player] = nil
+		burnAt[player] = nil
+	end)
 end
-Players.PlayerRemoving:Connect(function(player)
-	burning[player] = nil
-	dangerAt[player] = nil
-	burnAt[player] = nil
-end)
 
 local hungerClock = 0
 RunService.Heartbeat:Connect(function(dt)
@@ -3093,6 +3242,21 @@ client.MessageReceived:Connect(function(message)
 				setState(player, content.state)
 			end
 		end
+	elseif content.type == "mc.title" then
+		-- what Minecraft shows only to him (/title @s, /tellraw @s ...): chat lines into his chat, the rest on screen
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.UserId == content.u then
+				if content.kind == "chat" and type(content.text) == "string" then
+					chatRemote:FireClient(player, "reply", { content.text })
+				else
+					titleRemote:FireClient(player, {
+						kind = tostring(content.kind), text = if type(content.text) == "string" then content.text else "",
+						color = tonumber(content.color), fadeIn = tonumber(content.fadeIn), stay = tonumber(content.stay),
+						fadeOut = tonumber(content.fadeOut), reset = content.reset == true,
+					})
+				end
+			end
+		end
 	elseif content.type == "mc.teleport" and type(content.p) == "table" then
 		-- a portal took him (Minecraft's own portal code found the exit): his character goes there - another
 		-- dimension is another height in this world; it waits there until the ground is built
@@ -3298,46 +3462,50 @@ itemFolder.Parent = workspace
 local itemAnchors = {} -- entity id (text) -> invisible Part where it lies; the clients draw the item there
 
 -- region mobs (topic mcworld.mobs -> every client; their looks once per kind from Minecraft: mcworld.mob {id})
-local mobsRemote = remote("RemoteEvent", "Mobs") -- server -> clients: (list) like the topic
-local mobModel = remote("RemoteFunction", "MobModel") -- client asks: (id, type) -> {parts, textures} or nil
-local mobLooks = {} -- type -> look | false (Minecraft has none) | "waiting"
-if Config.Mobs ~= false then
-	client:Subscribe(nil, MOBS, function(data)
-		if type(data) == "table" and type(data.mobs) == "table" then
-			mobsRemote:FireAllClients(data.mobs)
+do -- (a block: its locals do not count towards the script's 200)
+	local mobsRemote = remote("RemoteEvent", "Mobs") -- server -> clients: (list) like the topic
+	local mobModel = remote("RemoteFunction", "MobModel") -- client asks: (id, type) -> {parts, textures} or nil
+	local mobLooks = {} -- type -> look | false (Minecraft has none) | "waiting"
+	if Config.Mobs ~= false then
+		client:Subscribe(nil, MOBS, function(data)
+			if type(data) == "table" and type(data.mobs) == "table" then
+				mobsRemote:FireAllClients(data.mobs)
+			end
+		end, { Latest = true })
+	end
+	mobModel.OnServerInvoke = function(_player, id, kind)
+		if type(id) ~= "number" or type(kind) ~= "string" or #kind > 100 then
+			return nil
 		end
-	end, { Latest = true })
-end
-mobModel.OnServerInvoke = function(_player, id, kind)
-	if type(id) ~= "number" or type(kind) ~= "string" or #kind > 100 then
-		return nil
-	end
-	local started = os.clock()
-	while mobLooks[kind] == "waiting" and os.clock() - started < 10 do
-		task.wait(0.1)
-	end
-	local known = mobLooks[kind]
-	if known ~= nil and known ~= "waiting" then
-		return known or nil
-	end
-	mobLooks[kind] = "waiting"
-	local ok, result = pcall(client.Call, client, MOB, { id = id }, { Timeout = 15 })
-	if not ok or type(result) ~= "table" or result.ok ~= true then
-		-- a dedicated server has no models: never again; anything else (mob gone, no answer): ask again later
-		local reason = if ok and type(result) == "table" then tostring(result.reason or "") else ""
-		mobLooks[kind] = if string.find(reason, "dedicated", 1, true) then false else nil
-		if Config.Debug then
-			warn("[MinecraftWorld] mob " .. kind .. ": " .. tostring(if ok and type(result) == "table" then result.reason else result))
+		local started = os.clock()
+		while mobLooks[kind] == "waiting" and os.clock() - started < 10 do
+			task.wait(0.1)
 		end
-		return nil
+		local known = mobLooks[kind]
+		if known ~= nil and known ~= "waiting" then
+			return known or nil
+		end
+		mobLooks[kind] = "waiting"
+		local ok, result = pcall(client.Call, client, MOB, { id = id }, { Timeout = 15 })
+		if not ok or type(result) ~= "table" or result.ok ~= true then
+			-- a dedicated server has no models: never again; anything else (mob gone, no answer): ask again later
+			local reason = if ok and type(result) == "table" then tostring(result.reason or "") else ""
+			mobLooks[kind] = if string.find(reason, "dedicated", 1, true) then false else nil
+			if Config.Debug then
+				warn("[MinecraftWorld] mob " .. kind .. ": " .. tostring(if ok and type(result) == "table" then result.reason else result))
+			end
+			return nil
+		end
+		local textures = {}
+		for key, texture in pairs(type(result.textures) == "table" and result.textures or {}) do
+			textures[key] = decodeTexture(texture)
+		end
+		-- (a painting: no parts, its picture + size in blocks)
+		local look = { parts = if type(result.parts) == "table" then result.parts else {}, textures = textures,
+			picture = result.picture, w = result.w, h = result.h }
+		mobLooks[kind] = look
+		return look
 	end
-	local textures = {}
-	for key, texture in pairs(type(result.textures) == "table" and result.textures or {}) do
-		textures[key] = decodeTexture(texture)
-	end
-	local look = { parts = result.parts, textures = textures }
-	mobLooks[kind] = look
-	return look
 end
 -- endregion
 
@@ -3383,55 +3551,57 @@ end, { Latest = true })
 -- endregion
 
 -- region day, night, weather (Minecraft's own sky values -> attributes of Lighting; the clients draw it: MinecraftSky)
-local Lighting = game:GetService("Lighting")
-local function color3(value, fallback)
-	if type(value) == "table" and type(value[1]) == "number" and type(value[2]) == "number" and type(value[3]) == "number" then
-		return Color3.fromRGB(math.clamp(value[1], 0, 255), math.clamp(value[2], 0, 255), math.clamp(value[3], 0, 255))
-	end
-	return fallback
-end
-local function alpha(value)
-	return if type(value) == "table" and type(value[4]) == "number" then math.clamp(value[4] / 255, 0, 1) else 0
-end
-client:Subscribe(nil, SKY, function(data)
-	if type(data) ~= "table" or type(data.t) ~= "number" then
-		return
-	end
-	local scale = world.info and world.info.studsPerBlock or 3
-	local minY = world.info and world.info.minY or -64
-	local values = {
-		McTime = data.t, McTimeRate = tonumber(data.rate) or 20,
-		McSkyColor = color3(data.sky, Color3.fromRGB(120, 167, 255)),
-		McFogColor = color3(data.fog, Color3.fromRGB(192, 216, 255)),
-		McWaterFogColor = color3(data.waterFog, Color3.fromRGB(5, 5, 51)),
-		McSkyLightColor = color3(data.skyLightColor, Color3.new(1, 1, 1)),
-		McBlockLightColor = color3(data.blockLight, Color3.fromRGB(255, 216, 140)),
-		McAmbientColor = color3(data.ambient, Color3.fromRGB(10, 10, 10)),
-		McSunriseColor = color3(data.sunrise, Color3.new(1, 0.8, 0.2)), McSunriseAlpha = alpha(data.sunrise),
-		McCloudColor = color3(data.cloud, Color3.new(1, 1, 1)), McCloudAlpha = alpha(data.cloud),
-		McSunAngle = tonumber(data.sun) or 0, McMoonAngle = tonumber(data.moon) or 180,
-		McStarAngle = tonumber(data.star) or 0, McStarBrightness = tonumber(data.stars) or 0,
-		McMoonPhase = if type(data.phase) == "string" then data.phase else "full_moon",
-		McSkyLight = tonumber(data.skyLight) or 1,
-		McFogEnd = (tonumber(data.fogEnd) or 1024) * scale, McWaterFogEnd = (tonumber(data.waterFogEnd) or 96) * scale,
-		McCloudHeight = ((tonumber(data.cloudHeight) or 192.33) - minY) * scale,
-		McRain = tonumber(data.rain) or 0, McThunder = tonumber(data.thunder) or 0,
-		McPrecipitation = if type(data.precipitation) == "string" then data.precipitation else "none",
-		McWaterColor = color3(data.waterColor, Color3.fromRGB(63, 118, 228)),
-	}
-	-- the sky of the other dimensions (Nether, End) - JSON, the clients there use it instead
-	local dimsText = ""
-	if type(data.dims) == "table" then
-		local ok, text = pcall(HttpService.JSONEncode, HttpService, data.dims)
-		dimsText = if ok then text else ""
-	end
-	values.McDimSky = dimsText
-	for name, value in pairs(values) do
-		if Lighting:GetAttribute(name) ~= value then
-			Lighting:SetAttribute(name, value)
+do
+	local Lighting = game:GetService("Lighting")
+	local function color3(value, fallback)
+		if type(value) == "table" and type(value[1]) == "number" and type(value[2]) == "number" and type(value[3]) == "number" then
+			return Color3.fromRGB(math.clamp(value[1], 0, 255), math.clamp(value[2], 0, 255), math.clamp(value[3], 0, 255))
 		end
+		return fallback
 	end
-end, { Latest = true })
+	local function alpha(value)
+		return if type(value) == "table" and type(value[4]) == "number" then math.clamp(value[4] / 255, 0, 1) else 0
+	end
+	client:Subscribe(nil, SKY, function(data)
+		if type(data) ~= "table" or type(data.t) ~= "number" then
+			return
+		end
+		local scale = world.info and world.info.studsPerBlock or 3
+		local minY = world.info and world.info.minY or -64
+		local values = {
+			McTime = data.t, McTimeRate = tonumber(data.rate) or 20,
+			McSkyColor = color3(data.sky, Color3.fromRGB(120, 167, 255)),
+			McFogColor = color3(data.fog, Color3.fromRGB(192, 216, 255)),
+			McWaterFogColor = color3(data.waterFog, Color3.fromRGB(5, 5, 51)),
+			McSkyLightColor = color3(data.skyLightColor, Color3.new(1, 1, 1)),
+			McBlockLightColor = color3(data.blockLight, Color3.fromRGB(255, 216, 140)),
+			McAmbientColor = color3(data.ambient, Color3.fromRGB(10, 10, 10)),
+			McSunriseColor = color3(data.sunrise, Color3.new(1, 0.8, 0.2)), McSunriseAlpha = alpha(data.sunrise),
+			McCloudColor = color3(data.cloud, Color3.new(1, 1, 1)), McCloudAlpha = alpha(data.cloud),
+			McSunAngle = tonumber(data.sun) or 0, McMoonAngle = tonumber(data.moon) or 180,
+			McStarAngle = tonumber(data.star) or 0, McStarBrightness = tonumber(data.stars) or 0,
+			McMoonPhase = if type(data.phase) == "string" then data.phase else "full_moon",
+			McSkyLight = tonumber(data.skyLight) or 1,
+			McFogEnd = (tonumber(data.fogEnd) or 1024) * scale, McWaterFogEnd = (tonumber(data.waterFogEnd) or 96) * scale,
+			McCloudHeight = ((tonumber(data.cloudHeight) or 192.33) - minY) * scale,
+			McRain = tonumber(data.rain) or 0, McThunder = tonumber(data.thunder) or 0,
+			McPrecipitation = if type(data.precipitation) == "string" then data.precipitation else "none",
+			McWaterColor = color3(data.waterColor, Color3.fromRGB(63, 118, 228)),
+		}
+		-- the sky of the other dimensions (Nether, End) - JSON, the clients there use it instead
+		local dimsText = ""
+		if type(data.dims) == "table" then
+			local ok, text = pcall(HttpService.JSONEncode, HttpService, data.dims)
+			dimsText = if ok then text else ""
+		end
+		values.McDimSky = dimsText
+		for name, value in pairs(values) do
+			if Lighting:GetAttribute(name) ~= value then
+				Lighting:SetAttribute(name, value)
+			end
+		end
+	end, { Latest = true })
+end
 -- endregion
 
 client:Subscribe(nil, CHANGES, function(data)
@@ -3448,6 +3618,24 @@ client:Subscribe(nil, CHANGES, function(data)
 	end
 	if type(data.blocks) == "table" then
 		applyBlocks(data.blocks)
+	end
+	if type(data.signs) == "table" then
+		-- a sign's new text: on its board at once (its model stays)
+		for _, sign in ipairs(data.signs) do
+			if type(sign) == "table" and type(sign[1]) == "number" and type(sign[2]) == "number" and type(sign[3]) == "number" then
+				local chunk = sectionAt(sign[1], sign[2], sign[3], false)
+				if chunk then
+					chunk.signs = chunk.signs or {}
+					chunk.signs[sign[1] .. "," .. sign[2] .. "," .. sign[3]] = sign
+					local at = Vector3.new(sign[1], sign[2], sign[3])
+					for _, model in ipairs(chunk.folder:GetChildren()) do
+						if model:IsA("Model") and model:GetAttribute("McBlock") == at then
+							setSignText(model, sign)
+						end
+					end
+				end
+			end
+		end
 	end
 	if type(data.chunks) == "table" then
 		-- very many changes there (explosion, /fill): those chunks are loaded again (the loaders take them first)

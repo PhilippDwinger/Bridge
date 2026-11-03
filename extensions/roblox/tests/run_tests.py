@@ -167,6 +167,7 @@ def main():
     failed = False
     subprocess.run([sys.executable, os.path.join(HERE, "make_vectors.py"), os.path.join(HERE, "vectors.json")], check=True)
     print("== unit tests")
+    failed |= subprocess.run([LUNE, "run", "test_compile.luau"], cwd=HERE).returncode != 0
     failed |= subprocess.run([LUNE, "run", "test_units.luau"], cwd=HERE).returncode != 0
     print("== MinecraftImages (textures, item icons)")
     failed |= subprocess.run([LUNE, "run", "test_images.luau"], cwd=HERE).returncode != 0
