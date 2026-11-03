@@ -368,7 +368,13 @@ local function hold(key: string, content: Content)
 end
 
 local function turnOf(texture: Texture): number
-	return if texture.Face == Enum.NormalId.Top then TOP_TURN elseif texture.Face == Enum.NormalId.Bottom then BOTTOM_TURN else 0
+	-- (the server's MinecraftWorldConfig TopTurn / BottomTurn, or "/drehen oben 90" live)
+	if texture.Face == Enum.NormalId.Top then
+		return tonumber(ReplicatedStorage:GetAttribute("McTopTurn")) or TOP_TURN
+	elseif texture.Face == Enum.NormalId.Bottom then
+		return tonumber(ReplicatedStorage:GetAttribute("McBottomTurn")) or BOTTOM_TURN
+	end
+	return 0
 end
 
 local function showAgain(key: string)
@@ -2473,6 +2479,15 @@ RunService:BindToRenderStep("MinecraftHurtCamera", Enum.RenderPriority.Camera.Va
 	end
 end)
 -- endregion
+
+-- "/drehen oben 90": every Top / Bottom picture again, turned
+for _, name in ipairs({ "McTopTurn", "McBottomTurn" }) do
+	ReplicatedStorage:GetAttributeChangedSignal(name):Connect(function()
+		if assets then
+			applyAllTextures()
+		end
+	end)
+end
 
 -- region start
 local function useAssets(newAssets)

@@ -36,6 +36,7 @@
 	Needs in ServerStorage: Bridge, MinecraftWorldConfig, MinecraftWorldClient (shared Bridge client), PlayerSyncConfig.
 ]]
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
@@ -117,6 +118,7 @@ local world = {
 	chunks = {}, -- "x,z" -> {x, z, sections = {[sectionY] = {palette, cells, parts}}, folder}
 	generation = 0, -- counts up with every (re)load; an old load stops when it sees a newer one
 	loaded = false,
+	loadStarted = 0, -- os.clock() of the last (re)load
 	-- pictures + items from Minecraft: {available, textures = {key -> {w, h, pixels: buffer}}, blocks, items, gui,
 	-- other = {name -> true} for blocks Minecraft has no cube pictures for (they stay grey), asked = {name -> true}}
 	assets = nil,
@@ -301,6 +303,20 @@ local function cellIndex(x, y, z) -- 1-based, order y, z, x (as the mod sends it
 	return y * 256 + z * 16 + x + 1
 end
 
+-- The blocks of a section: 4096 palette indices (u16) in a buffer - 8 KB instead of a 64 KB table per section, so
+-- real worlds (hundreds of chunks, 24 sections high) fit into the server's memory
+local function newCells()
+	return buffer.create(8192) -- (all 0 = air)
+end
+local function cellAt(cells: buffer, i: number): number
+	return buffer.readu16(cells, i * 2 - 2)
+end
+local function setCell(cells: buffer, i: number, value: number)
+	buffer.writeu16(cells, i * 2 - 2, value)
+end
+
+local queueSection -- below (sections wait to be built, nearest first)
+local buildStats = { count = 0, total = 0, longest = 0, meshTotal = 0 } -- (shown by /welt)
 local TOP = "|top" -- the top of water / lava: lower than a block (Minecraft: amount / 9) - see fluidTop
 
 -- Water / lava with no same fluid above: its own key (the part is lower, like Minecraft's fluid surface)
@@ -311,9 +327,9 @@ local function fluidTop(section, above, i, key)
 	end
 	local aboveName
 	if i + 256 <= 4096 then
-		aboveName = section.palette[section.cells[i + 256] + 1]
+		aboveName = section.palette[cellAt(section.cells, i + 256) + 1]
 	elseif above then
-		aboveName = above.palette[above.cells[i + 256 - 4096] + 1]
+		aboveName = above.palette[cellAt(above.cells, i + 256 - 4096) + 1]
 	end
 	local aboveLook = aboveName and world.assets.blocks[aboveName]
 	if aboveLook and aboveLook.fluid == look.fluid then
@@ -322,13 +338,171 @@ local function fluidTop(section, above, i, key)
 	return key .. TOP
 end
 
---- Greedy meshing of one 16x16x16 section: boxes {x, y, z, w, h, d} of blocks with the same look.
-local function meshSection(section, above)
-	local keys = table.create(4096)
-	for i = 1, 4096 do
-		local key = renderKey(section.palette[section.cells[i] + 1])
-		keys[i] = if key and key ~= "placeholder" then fluidTop(section, above, i, key) else key
+--[[
+	Culling (like Minecraft: only faces you can see are drawn). Per palette entry of a section:
+	  occ = a full, not see-through cube (stone, dirt, planks - and the grey placeholder until its look comes): hides
+	        the face of whatever touches it
+	  grp = glass / leaves / water hide the faces between blocks of their own kind (Minecraft does the same)
+	A block whose six neighbours all hide it is not built at all ("buried": the inside of the ground), its faces get no
+	pictures; buried full cubes may even become part of a neighbour's box (bigger boxes = fewer parts) - nobody can see
+	them anyway, and they collide the same. A chunk that is not loaded yet counts as solid (no wall at the edge of the
+	world); when it comes, the faces toward it are looked at again.
+]]
+local BITS = { up = 1, down = 2, north = 4, south = 8, east = 16, west = 32 }
+
+local function classify(section)
+	local occ, grp, keys = {}, {}, {}
+	local assets = world.assets
+	for p, name in ipairs(section.palette) do
+		local key = renderKey(name)
+		keys[p] = key or false
+		if key == nil then
+			occ[p] = false
+			grp[p] = false
+		elseif key == "placeholder" then
+			occ[p] = true
+			grp[p] = false
+		else
+			local look = assets and assets.blocks[key]
+			if look and look.cube == true then
+				if look.fluid then
+					occ[p] = false
+					grp[p] = "fluid:" .. tostring(look.fluid)
+				elseif look.transparent then
+					occ[p] = false
+					grp[p] = key -- glass next to glass, leaves next to the same leaves: that face is not drawn
+				else
+					occ[p] = true
+					grp[p] = false
+				end
+			else
+				occ[p] = false -- models (stairs, torches, fences ...) never hide anything
+				grp[p] = false
+			end
+		end
 	end
+	return occ, grp, keys
+end
+
+-- The six neighbour sections: a section (table), nil (air: above the top, or no blocks there) or false (solid:
+-- below the bottom of the world, or a chunk that is not loaded)
+local function neighbourSections(chunk, sectionY)
+	local info = world.info
+	local minSection = info.minY // 16
+	local maxSection = (info.maxY - 1) // 16
+	local function side(dx, dz)
+		local other = world.chunks[chunkKey(chunk.x + dx, chunk.z + dz)]
+		if not other then
+			return false
+		end
+		return other.sections[sectionY]
+	end
+	local up = if sectionY + 1 > maxSection then nil else chunk.sections[sectionY + 1]
+	local down = if sectionY - 1 < minSection then false else chunk.sections[sectionY - 1]
+	return up, down, side(0, -1), side(0, 1), side(1, 0), side(-1, 0)
+end
+
+--- Greedy meshing of one 16x16x16 section with culling: boxes {x, y, z, w, h, d, key, faces} of blocks with the same
+--- look (faces = bits of the sides that can be seen somewhere: only those get pictures).
+local function meshSection(chunk, sectionY, section)
+	local cells = section.cells
+	local occ, grp, pkeys = classify(section)
+	local up, down, north, south, east, west = neighbourSections(chunk, sectionY)
+	local neighbour = {}
+	for name, other in pairs({ up = up, down = down, north = north, south = south, east = east, west = west }) do
+		if other then
+			local o, g = classify(other)
+			neighbour[name] = { other.cells, o, g }
+		end
+	end
+	local nUp, nDown, nNorth, nSouth, nEast, nWest = neighbour.up, neighbour.down, neighbour.north, neighbour.south,
+		neighbour.east, neighbour.west
+	-- Does the block at index i of the section (s = {cells, occ, grp}, false = solid, nil = air) hide a face of
+	-- a block of group own?
+	local function hides(s, i, own)
+		local q = cellAt(s[1], i) + 1
+		return s[2][q] or (own and s[3][q] == own)
+	end
+	local keys = table.create(4096, false) -- render key of every block that is built (false: air / buried)
+	local wild = table.create(4096, false) -- buried full cubes: may go into any neighbouring full-cube box
+	local masks = table.create(4096, 0)
+	local waits = nil
+	local here = { cells, occ, grp }
+	for i = 1, 4096 do
+		local p = cellAt(cells, i) + 1
+		local key = pkeys[p]
+		if not key then
+			continue
+		end
+		local own = grp[p]
+		local n = i - 1
+		local x, z, y = n % 16, (n // 16) % 16, n // 256
+		local mask = 0
+		-- up / down
+		if y < 15 then
+			if not hides(here, i + 256, own) then mask += 1 end
+		elseif up == nil then
+			mask += 1
+		elseif nUp and not hides(nUp, i - 3840, own) then
+			mask += 1
+		end
+		if y > 0 then
+			if not hides(here, i - 256, own) then mask += 2 end
+		elseif down == nil then
+			mask += 2
+		elseif nDown and not hides(nDown, i + 3840, own) then
+			mask += 2
+		end
+		-- north (-z) / south (+z)
+		if z > 0 then
+			if not hides(here, i - 16, own) then mask += 4 end
+		elseif north == nil then
+			mask += 4
+		elseif north == false then
+			waits = waits or {}
+			waits.north = true
+		elseif not hides(nNorth, i + 240, own) then
+			mask += 4
+		end
+		if z < 15 then
+			if not hides(here, i + 16, own) then mask += 8 end
+		elseif south == nil then
+			mask += 8
+		elseif south == false then
+			waits = waits or {}
+			waits.south = true
+		elseif not hides(nSouth, i - 240, own) then
+			mask += 8
+		end
+		-- east (+x) / west (-x)
+		if x < 15 then
+			if not hides(here, i + 1, own) then mask += 16 end
+		elseif east == nil then
+			mask += 16
+		elseif east == false then
+			waits = waits or {}
+			waits.east = true
+		elseif not hides(nEast, i - 15, own) then
+			mask += 16
+		end
+		if x > 0 then
+			if not hides(here, i - 1, own) then mask += 32 end
+		elseif west == nil then
+			mask += 32
+		elseif west == false then
+			waits = waits or {}
+			waits.west = true
+		elseif not hides(nWest, i + 15, own) then
+			mask += 32
+		end
+		if mask == 0 and occ[p] then
+			wild[i] = true -- buried: not built (unless a neighbouring box takes it)
+		else
+			keys[i] = if key ~= "placeholder" then fluidTop(section, up or nil, i, key) else key
+			masks[i] = mask
+		end
+	end
+	section.waits = waits
 	local done = {}
 	local boxes = {}
 	for y = 0, 15 do
@@ -338,9 +512,16 @@ local function meshSection(section, above)
 				local key = keys[start]
 				if key and not done[start] then
 					local single = standsAlone(key) -- a model (lever, stairs, ...) or a cube with its own collision: never merged
+					local solid = not single and occ[cellAt(cells, start) + 1] == true
 					local function same(cx, cy, cz)
+						if single then
+							return false
+						end
 						local i = cellIndex(cx, cy, cz)
-						return not single and keys[i] == key and not done[i]
+						if done[i] then
+							return false
+						end
+						return keys[i] == key or (solid and wild[i])
 					end
 					local w = 1
 					while x + w < 16 and same(x + w, y, z) do
@@ -379,14 +560,17 @@ local function meshSection(section, above)
 						end
 						h += 1
 					end
+					local faces = 0
 					for dy = 0, h - 1 do
 						for dz = 0, d - 1 do
 							for dx = 0, w - 1 do
-								done[cellIndex(x + dx, y + dy, z + dz)] = true
+								local i = cellIndex(x + dx, y + dy, z + dz)
+								done[i] = true
+								faces = bit32.bor(faces, masks[i])
 							end
 						end
 					end
-					table.insert(boxes, { x = x, y = y, z = z, w = w, h = h, d = d, key = key })
+					table.insert(boxes, { x = x, y = y, z = z, w = w, h = h, d = d, key = key, faces = faces })
 				end
 			end
 		end
@@ -401,7 +585,7 @@ end
 	pictures from Minecraft: the look of a block kind may have changed).
 ]]
 local function boxId(box)
-	return string.format("%s|%d|%d|%d|%d|%d|%d", box.key, box.x, box.y, box.z, box.w, box.h, box.d)
+	return string.format("%s|%d|%d|%d|%d|%d|%d|%d", box.key, box.x, box.y, box.z, box.w, box.h, box.d, box.faces or 63)
 end
 
 -- Light like Minecraft's block light (torch 14, glowstone / lava 15): a PointLight reaching that many blocks,
@@ -424,7 +608,10 @@ local function renderSection(chunk, sectionY, section, force)
 	local kept = {}
 	local scale = world.info.studsPerBlock
 	local minY = world.info.minY
-	for _, box in ipairs(meshSection(section, chunk.sections[sectionY + 1])) do
+	local meshStarted = os.clock()
+	local boxes = meshSection(chunk, sectionY, section)
+	buildStats.meshTotal += os.clock() - meshStarted
+	for _, box in ipairs(boxes) do
 		local id = boxId(box)
 		local existing = if force then nil else old[id]
 		if existing and existing.Parent then
@@ -491,6 +678,9 @@ local function renderSection(chunk, sectionY, section, force)
 				part:SetAttribute("McFluid", look.fluid)
 			end
 			for _, face in ipairs(FACES) do
+				if bit32.band(box.faces or 63, BITS[face[2]]) == 0 then
+					continue -- (a side nobody can see: no picture)
+				end
 				local key = look.faces[face[2]]
 				local texture = world.assets.textures[key]
 				local span = if texture and texture.span then texture.span else 1
@@ -523,14 +713,17 @@ local function renderSection(chunk, sectionY, section, force)
 end
 
 local function decodeSection(data)
-	local cells = table.create(4096)
+	local cells = newCells()
 	local count = 0
 	local runs = data.runs or {}
 	for i = 1, #runs - 1, 2 do
 		local index, length = runs[i], runs[i + 1]
+		if count + length > 4096 then
+			error("section y=" .. tostring(data.y) .. " has more than 4096 blocks")
+		end
 		for _ = 1, length do
 			count += 1
-			cells[count] = index
+			setCell(cells, count, index)
 		end
 	end
 	if count ~= 4096 then
@@ -539,10 +732,229 @@ local function decodeSection(data)
 	return { palette = data.palette or { "minecraft:air" }, cells = cells, parts = {} }
 end
 
+-- v 2 (packed, mod 20+): one palette for the chunk, the cells of all its sections in one zlib stream (Base64)
+local function decodePacked(data)
+	local raw = Bridge.Inflate(Bridge.Base64Decode(data.data))
+	local wide = data.wide == true
+	local size = if wide then 8192 else 4096
+	local ys = data.ys or {}
+	local source = buffer.fromstring(raw)
+	if buffer.len(source) ~= size * #ys then
+		error(string.format("packed chunk: %d bytes for %d sections", buffer.len(source), #ys))
+	end
+	local palette = data.palette or { "minecraft:air" }
+	local sections = {}
+	for n, sectionY in ipairs(ys) do
+		local cells = newCells()
+		local offset = (n - 1) * size
+		if wide then
+			buffer.copy(cells, 0, source, offset, 8192)
+		else
+			for i = 0, 4095 do
+				buffer.writeu16(cells, i * 2, buffer.readu8(source, offset + i))
+			end
+		end
+		-- (every section its own copy of the palette: blocks placed later add their names to it)
+		sections[sectionY] = { palette = table.clone(palette), cells = cells, parts = {} }
+	end
+	return sections
+end
+
+--[[
+	Building in portions: sections wait in a queue and are built nearest first, at most BuildBudgetMs per frame - a
+	real world (thousands of sections) loads without the server ever standing still. Blocks placed / broken are built
+	at once (applyBlocks), not queued.
+	Vertical window: a section is only built if it is near the ground of its chunk (the lowest surface in the chunk,
+	so cliffs and ravines are there) or not deeper than SectionsBelow below the lowest player - caves deep under
+	everybody wait until somebody goes down there (they are inside the ground: nobody can see them).
+]]
+local VIEW = math.clamp(math.floor(tonumber(Config.ViewChunks) or 6), 1, 16)
+local BELOW = math.max(0, math.floor(tonumber(Config.SectionsBelow) or 3))
+local BUDGET = math.clamp(tonumber(Config.BuildBudgetMs) or 6, 1, 50) / 1000
+local loader = {
+	retryAt = {}, -- chunk key -> os.clock(): ask again from then on (Minecraft is still generating it)
+	inFlight = {}, -- chunk key -> true: asked right now
+	reload = {}, -- chunk key -> true: load again (many changes there)
+	points = nil, -- where the players are: {cx, cz, sy} (the spawn while nobody is there)
+	playerFloor = nil, -- lowest section that has to be built because of the players
+	hasPlayers = false,
+}
+local renderQueue = {} -- {chunk, sy}: nearest at the end
+local queueSorted = true
+local queueSortedAt = 0
+
+local function renderFromOf(chunk)
+	local ground = ((chunk.surface or world.info.minY) - 8) // 16
+	local floor = loader.playerFloor
+	if floor == nil then
+		local spawn = world.info.spawn
+		floor = spawn[2] // 16 - BELOW
+	end
+	return math.min(ground, floor)
+end
+
+local function buildSection(chunk, sectionY, section, force)
+	if sectionY < (chunk.renderFrom or -math.huge) then
+		for _, part in pairs(section.parts) do
+			part:Destroy()
+		end
+		section.parts = {}
+		section.built = false
+		return
+	end
+	renderSection(chunk, sectionY, section, force)
+	section.built = true
+end
+
+queueSection = function(chunk, sectionY, force)
+	local section = chunk.sections[sectionY]
+	if not section then
+		return
+	end
+	if force then
+		section.queuedForce = true
+	end
+	if section.queued then
+		return
+	end
+	section.queued = true
+	table.insert(renderQueue, { chunk = chunk, sy = sectionY })
+	queueSorted = false
+end
+
+-- Lowest top of the ground in a chunk (world block y): per column the highest full cube, the lowest of those
+local function surfaceOf(chunk)
+	local ys = {}
+	for sectionY in pairs(chunk.sections) do
+		table.insert(ys, sectionY)
+	end
+	table.sort(ys, function(a, b)
+		return a > b
+	end)
+	local found = table.create(256, false)
+	local left = 256
+	local lowest = math.huge
+	for _, sectionY in ipairs(ys) do
+		local section = chunk.sections[sectionY]
+		local occ = classify(section)
+		local cells = section.cells
+		for ly = 15, 0, -1 do
+			local base = ly * 256
+			for column = 1, 256 do
+				if not found[column] and occ[cellAt(cells, base + column) + 1] then
+					found[column] = true
+					left -= 1
+					local y = sectionY * 16 + ly
+					if y < lowest then
+						lowest = y
+					end
+				end
+			end
+			if left == 0 then
+				return lowest
+			end
+		end
+	end
+	return world.info.minY -- a column without ground (void, a hole to the bottom): everything from the bottom
+end
+
+-- A chunk arrived: the faces of its neighbours toward it may be seen now (air there) - only those sections again
+local NEIGHBOURS = {
+	-- dx, dz, the neighbour's side that faces the new chunk, the new chunk's border cells (x or z = fixed)
+	{ 1, 0, "west", "x", 15 },
+	{ -1, 0, "east", "x", 0 },
+	{ 0, 1, "north", "z", 15 },
+	{ 0, -1, "south", "z", 0 },
+}
+local function recheckNeighbours(chunk)
+	for _, side in ipairs(NEIGHBOURS) do
+		local other = world.chunks[chunkKey(chunk.x + side[1], chunk.z + side[2])]
+		if not other then
+			continue
+		end
+		for sectionY, section in pairs(other.sections) do
+			if not (section.waits and section.waits[side[3]]) or not section.built then
+				continue
+			end
+			local mine = chunk.sections[sectionY]
+			local open = mine == nil
+			if mine then
+				local occ = classify(mine)
+				local cells = mine.cells
+				for a = 0, 15 do
+					for b = 0, 15 do
+						local i = if side[4] == "x" then cellIndex(side[5], a, b) else cellIndex(b, a, side[5])
+						if not occ[cellAt(cells, i) + 1] then
+							open = true
+							break
+						end
+					end
+					if open then
+						break
+					end
+				end
+			end
+			if open then
+				queueSection(other, sectionY, false)
+			else
+				section.waits[side[3]] = nil -- solid wall there: those faces stay hidden
+			end
+		end
+	end
+end
+
+-- Builds queued sections, nearest first, for at most BUDGET seconds per frame
+RunService.Heartbeat:Connect(function()
+	if #renderQueue == 0 or not world.info then
+		return
+	end
+	local now = os.clock()
+	if not queueSorted and now - queueSortedAt > 0.25 then
+		queueSorted = true
+		queueSortedAt = now
+		local points = loader.points or {}
+		for _, entry in ipairs(renderQueue) do
+			local best = math.huge
+			for _, point in ipairs(points) do
+				local dx, dz, dy = entry.chunk.x - point.cx, entry.chunk.z - point.cz, entry.sy - point.sy
+				local d = dx * dx + dz * dz + dy * dy * 0.25
+				if d < best then
+					best = d
+				end
+			end
+			entry.d = best
+		end
+		table.sort(renderQueue, function(a, b)
+			return a.d > b.d -- far first: the nearest is taken from the end
+		end)
+	end
+	while #renderQueue > 0 and os.clock() - now < BUDGET do
+		local entry = table.remove(renderQueue)
+		local chunk = entry.chunk
+		local section = chunk.sections[entry.sy]
+		if section and section.queued and world.chunks[chunkKey(chunk.x, chunk.z)] == chunk then
+			section.queued = false
+			local force = section.queuedForce == true
+			section.queuedForce = nil
+			local t0 = os.clock()
+			local ok, err = pcall(buildSection, chunk, entry.sy, section, force)
+			local spent = os.clock() - t0
+			buildStats.count += 1
+			buildStats.total += spent
+			buildStats.longest = math.max(buildStats.longest, spent)
+			if not ok then
+				warn("[MinecraftWorld] section " .. chunkKey(chunk.x, chunk.z) .. " y " .. entry.sy .. ": " .. tostring(err))
+			end
+		end
+	end
+end)
+
 local function renderAll(force)
 	for _, chunk in pairs(world.chunks) do
 		for sectionY, section in pairs(chunk.sections) do
-			renderSection(chunk, sectionY, section, force)
+			if section.built or section.queued then
+				queueSection(chunk, sectionY, force)
+			end
 		end
 	end
 end
@@ -652,16 +1064,22 @@ local function applyChunk(data)
 	local folder = if old then old.folder else Instance.new("Folder")
 	folder.Name = "Chunk " .. key
 	local chunk = { x = data.x, z = data.z, sections = {}, folder = folder }
-	for _, sectionData in ipairs(data.sections or {}) do
-		local section = decodeSection(sectionData)
-		local before = old and old.sections[sectionData.y]
+	if data.v == 2 then
+		chunk.sections = decodePacked(data)
+		noticeBlocks(data.palette or {})
+	else
+		for _, sectionData in ipairs(data.sections or {}) do
+			chunk.sections[sectionData.y] = decodeSection(sectionData)
+			noticeBlocks(sectionData.palette or {})
+		end
+	end
+	for sectionY, section in pairs(chunk.sections) do
+		local before = old and old.sections[sectionY]
 		if before then
 			section.parts = before.parts
-			old.sections[sectionData.y] = nil
+			section.built = before.built
+			old.sections[sectionY] = nil
 		end
-		noticeBlocks(section.palette)
-		chunk.sections[sectionData.y] = section
-		renderSection(chunk, sectionData.y, section)
 	end
 	if old then
 		for _, gone in pairs(old.sections) do -- sections that are only air now
@@ -672,6 +1090,14 @@ local function applyChunk(data)
 	end
 	folder.Parent = worldFolder
 	world.chunks[key] = chunk
+	chunk.surface = surfaceOf(chunk)
+	chunk.renderFrom = renderFromOf(chunk)
+	for sectionY, section in pairs(chunk.sections) do
+		if sectionY >= chunk.renderFrom or section.built then
+			queueSection(chunk, sectionY, false) -- (a built section below the window: buildSection takes it away)
+		end
+	end
+	recheckNeighbours(chunk)
 end
 -- endregion
 
@@ -1081,47 +1507,287 @@ getSkin.OnServerInvoke = function(_player, key)
 end
 -- endregion
 
--- region loading
-local function areaChunks(info)
-	local list = {}
-	local radius = info.radius
-	for dx = -radius, radius do
-		for dz = -radius, radius do
-			table.insert(list, { info.center[1] + dx, info.center[2] + dz, dx * dx + dz * dz })
+-- region loading: the chunks around the players (like Minecraft's render distance)
+local LOADERS = 2 -- chunk calls at the same time (one waits for Minecraft, the other one already asks)
+
+-- Where the players are (chunk, section) - the spawn while nobody is there
+local function playerPoints()
+	local info = world.info
+	local scale = info.studsPerBlock
+	local points = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		local character = player.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root and root:IsA("BasePart") then
+			local p = root.Position
+			local bx = math.floor(p.X / scale)
+			local by = math.floor(p.Y / scale) + info.minY
+			local bz = math.floor(p.Z / scale)
+			if p.Y < 1000 then -- (not on the waiting platform)
+				table.insert(points, { cx = bx // 16, cz = bz // 16, sy = by // 16, root = root })
+			end
 		end
 	end
-	table.sort(list, function(a, b)
-		return a[3] < b[3] -- the middle first
-	end)
-	return list
+	local has = #points > 0
+	if not has then
+		local spawn = info.spawn
+		table.insert(points, { cx = spawn[1] // 16, cz = spawn[3] // 16, sy = spawn[2] // 16 })
+	end
+	return points, has
 end
 
---- Loads chunks ({cx, cz} lists) in batches. Returns false if it stopped (error or a newer load started).
-local function loadChunks(list, generation)
-	for i = 1, #list, CHUNKS_PER_CALL do
-		local batch = {}
-		for j = i, math.min(i + CHUNKS_PER_CALL - 1, #list) do
-			table.insert(batch, { list[j][1], list[j][2] })
+-- The chunks that should be there, nearest first: {key, cx, cz, d2}
+local function wantedChunks(points)
+	local info = world.info
+	local list = {}
+	if not info.follow then
+		-- an older mod: only its area around the spawn
+		for dx = -info.radius, info.radius do
+			for dz = -info.radius, info.radius do
+				local cx, cz = info.center[1] + dx, info.center[2] + dz
+				table.insert(list, { chunkKey(cx, cz), cx, cz, dx * dx + dz * dz })
+			end
 		end
-		local ok, result = pcall(client.Call, client, CHUNKS, { chunks = batch }, { Timeout = 30 })
-		if generation ~= world.generation then
-			return false
-		end
-		if not ok or type(result) ~= "table" then
-			warn("[MinecraftWorld] loading chunks failed: " .. tostring(result))
-			return false
-		end
-		for _, data in ipairs(result.chunks or {}) do
-			if not data.outside then
-				local applied, err = pcall(applyChunk, data)
-				if not applied then
-					warn("[MinecraftWorld] chunk " .. chunkKey(data.x, data.z) .. ": " .. tostring(err))
+	else
+		local seen = {}
+		local limit = (VIEW + 0.5) * (VIEW + 0.5)
+		for _, point in ipairs(points) do
+			for dx = -VIEW, VIEW do
+				for dz = -VIEW, VIEW do
+					local d2 = dx * dx + dz * dz
+					if d2 <= limit then
+						local cx, cz = point.cx + dx, point.cz + dz
+						local key = chunkKey(cx, cz)
+						local known = seen[key]
+						if not known then
+							known = { key, cx, cz, d2 }
+							seen[key] = known
+							table.insert(list, known)
+						elseif d2 < known[4] then
+							known[4] = d2
+						end
+					end
 				end
 			end
 		end
 	end
+	table.sort(list, function(a, b)
+		return a[4] < b[4]
+	end)
+	return list
+end
+
+local function pickBatch()
+	local now = os.clock()
+	local batch = {}
+	local points = loader.points or playerPoints()
+	for _, item in ipairs(wantedChunks(points)) do
+		local key = item[1]
+		if (not world.chunks[key] or loader.reload[key]) and not loader.inFlight[key] and (loader.retryAt[key] or 0) <= now then
+			table.insert(batch, item)
+			if #batch >= CHUNKS_PER_CALL then
+				break
+			end
+		end
+	end
+	return batch
+end
+
+local function loaderWorker(generation)
+	while generation == world.generation do
+		local batch = pickBatch()
+		if #batch == 0 then
+			task.wait(0.2)
+			continue
+		end
+		local coords = {}
+		for _, item in ipairs(batch) do
+			loader.inFlight[item[1]] = true
+			table.insert(coords, { item[2], item[3] })
+		end
+		local ok, result = pcall(client.Call, client, CHUNKS, { chunks = coords, v = 2 }, { Timeout = 30 })
+		for _, item in ipairs(batch) do
+			loader.inFlight[item[1]] = nil
+		end
+		if generation ~= world.generation then
+			return
+		end
+		local now = os.clock()
+		if not ok or type(result) ~= "table" then
+			warn("[MinecraftWorld] loading chunks failed: " .. tostring(result))
+			for _, item in ipairs(batch) do
+				loader.retryAt[item[1]] = now + 3
+			end
+			task.wait(1)
+			continue
+		end
+		local answered = {}
+		for _, data in ipairs(result.chunks or {}) do
+			if type(data) == "table" and type(data.x) == "number" and type(data.z) == "number" then
+				local key = chunkKey(data.x, data.z)
+				answered[key] = true
+				if data.later then
+					loader.retryAt[key] = now + 0.3 -- Minecraft loads / generates it meanwhile
+				elseif data.outside then
+					loader.retryAt[key] = now + 10
+				else
+					loader.reload[key] = nil
+					loader.retryAt[key] = nil
+					local applied, err = pcall(applyChunk, data)
+					if not applied then
+						warn("[MinecraftWorld] chunk " .. key .. ": " .. tostring(err))
+						loader.retryAt[key] = now + 5
+					end
+				end
+			end
+		end
+		for _, item in ipairs(batch) do
+			if not answered[item[1]] then
+				loader.retryAt[item[1]] = now + 1
+			end
+		end
+	end
+end
+
+local function unloadChunk(key, chunk)
+	world.chunks[key] = nil
+	loader.reload[key] = nil
+	chunk.folder:Destroy()
+end
+
+-- Is the ground around this place built (the section there, the one below and above)?
+local function placeReady(cx, cz, sy)
+	local chunk = world.chunks[chunkKey(cx, cz)]
+	if not chunk then
+		return false
+	end
+	for y = sy - 1, sy + 1 do
+		local section = chunk.sections[y]
+		if section and (section.queued or (y >= chunk.renderFrom and not section.built)) then
+			return false
+		end
+	end
 	return true
 end
+
+_G.MinecraftWorldBuildStats = buildStats -- (tests read it)
+local function worldStats()
+	local chunks, sections, parts = 0, 0, 0
+	for _, chunk in pairs(world.chunks) do
+		chunks += 1
+		for _, section in pairs(chunk.sections) do
+			if section.built then
+				sections += 1
+				for _ in pairs(section.parts) do
+					parts += 1
+				end
+			end
+		end
+	end
+	return chunks, sections, parts
+end
+
+local function manage()
+	local info = world.info
+	local points, has = playerPoints()
+	loader.points = points
+	loader.hasPlayers = has
+	local floor = math.huge
+	for _, point in ipairs(points) do
+		floor = math.min(floor, point.sy - BELOW)
+	end
+	loader.playerFloor = floor
+	-- the vertical window of every chunk follows the players
+	for _, chunk in pairs(world.chunks) do
+		local from = renderFromOf(chunk)
+		local current = chunk.renderFrom
+		if from < current then
+			chunk.renderFrom = from
+			for sectionY in pairs(chunk.sections) do
+				if sectionY >= from and sectionY < current then
+					queueSection(chunk, sectionY, false)
+				end
+			end
+		elseif from > current + 1 then -- (one section of slack: going up and down a bit builds nothing new)
+			chunk.renderFrom = from
+			for sectionY, section in pairs(chunk.sections) do
+				if sectionY < from and section.built then
+					queueSection(chunk, sectionY, false) -- buildSection takes it away
+				end
+			end
+		end
+	end
+	-- far chunks go (only while somebody is there - nobody there: keep what is built)
+	if has and info.follow then
+		local limit = (VIEW + 2) * (VIEW + 2)
+		for key, chunk in pairs(world.chunks) do
+			local near = false
+			for _, point in ipairs(points) do
+				local dx, dz = chunk.x - point.cx, chunk.z - point.cz
+				if dx * dx + dz * dz <= limit then
+					near = true
+					break
+				end
+			end
+			if not near then
+				unloadChunk(key, chunk)
+			end
+		end
+		for key, at in pairs(loader.retryAt) do
+			if at < os.clock() - 30 then
+				loader.retryAt[key] = nil
+			end
+		end
+	end
+	-- the first time the ground at the spawn is there: the characters come
+	if not world.loaded then
+		local spawn = info.spawn
+		local cx, cz, sy = spawn[1] // 16, spawn[3] // 16, spawn[2] // 16
+		local ready = true
+		for dx = -1, 1 do
+			for dz = -1, 1 do
+				if not placeReady(cx + dx, cz + dz, sy) then
+					ready = false
+				end
+			end
+		end
+		if ready then
+			world.loaded = true
+			local chunks, sections, parts = worldStats()
+			log(string.format("Minecraft world there: %d chunks, %d sections, %d parts, %.1f s (more loads around the players)",
+				chunks, sections, parts, os.clock() - world.loadStarted))
+			onWorldReady()
+		end
+		return
+	end
+	-- a character where the ground is not built yet (teleported, walked fast): it waits there instead of falling
+	for _, point in ipairs(points) do
+		local root = point.root
+		if root then
+			if not placeReady(point.cx, point.cz, point.sy) then
+				if not root.Anchored then
+					root.Anchored = true
+					root:SetAttribute("McWaitWorld", true)
+				end
+			elseif root:GetAttribute("McWaitWorld") then
+				root:SetAttribute("McWaitWorld", nil)
+				root.Anchored = false
+			end
+		end
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.25)
+		if world.info then
+			local ok, err = pcall(manage)
+			if not ok then
+				warn("[MinecraftWorld] world manager: " .. tostring(err))
+			end
+		end
+	end
+end)
 
 local function loadWorld()
 	world.generation += 1
@@ -1149,8 +1815,11 @@ local function loadWorld()
 		chunk.folder:Destroy()
 	end
 	table.clear(world.chunks)
-	local started = os.clock()
-	local list = areaChunks(info)
+	table.clear(renderQueue)
+	table.clear(loader.retryAt)
+	table.clear(loader.inFlight)
+	table.clear(loader.reload)
+	world.loadStarted = os.clock()
 	-- The pictures first (small): the chunks are then built with textures right away
 	loadAssets(generation)
 	task.spawn(loadItemIcons, generation) -- all item icons at the same time as the world (the clients get them at once)
@@ -1158,20 +1827,10 @@ local function loadWorld()
 	if generation ~= world.generation then
 		return
 	end
-	if loadChunks(list, generation) then
-		world.loaded = true
-		local parts = 0
-		for _, chunk in pairs(world.chunks) do
-			parts += #chunk.folder:GetChildren()
-		end
-		log(string.format("Minecraft world loaded: %d chunks, %d parts, %.1f s", #list, parts, os.clock() - started))
-		onWorldReady()
-	else
-		task.delay(3, function()
-			if generation == world.generation then
-				task.spawn(loadWorld) -- try again
-			end
-		end)
+	log(if info.follow then string.format("loading the world around the players (%d chunks around everybody)", VIEW)
+		else "loading the area around the spawn (older mod)")
+	for _ = 1, LOADERS do
+		task.spawn(loaderWorker, generation)
 	end
 end
 -- endregion
@@ -1186,8 +1845,7 @@ local function sectionAt(blockX, blockY, blockZ, create)
 	local sectionY = math.floor(blockY / 16)
 	local section = chunk.sections[sectionY]
 	if not section and create then
-		local cells = table.create(4096, 0)
-		section = { palette = { "minecraft:air" }, cells = cells, parts = {} }
+		section = { palette = { "minecraft:air" }, cells = newCells(), parts = {} }
 		chunk.sections[sectionY] = section
 	end
 	return chunk, sectionY, section
@@ -1207,17 +1865,31 @@ local function applyBlocks(blocks)
 					table.insert(section.palette, name)
 					paletteIndex = #section.palette
 				end
-				section.cells[cellIndex(x - chunk.x * 16, y - sectionY * 16, z - chunk.z * 16)] = paletteIndex - 1
+				local lx, ly, lz = x - chunk.x * 16, y - sectionY * 16, z - chunk.z * 16
+				setCell(section.cells, cellIndex(lx, ly, lz), paletteIndex - 1)
 				dirty[section] = { chunk, sectionY }
-				local below = if y - sectionY * 16 == 0 then chunk.sections[sectionY - 1] else nil
-				if below then
-					dirty[below] = { chunk, sectionY - 1 } -- (water there may now have water above it - or not)
+				-- the neighbours on a border: their faces toward this block may be seen now - or not any more
+				-- (and water below may now have water above it)
+				local function mark(other, otherY)
+					local otherSection = other and other.sections[otherY]
+					if otherSection then
+						dirty[otherSection] = { other, otherY }
+					end
 				end
+				if ly == 0 then mark(chunk, sectionY - 1) end
+				if ly == 15 then mark(chunk, sectionY + 1) end
+				if lx == 0 then mark(world.chunks[chunkKey(chunk.x - 1, chunk.z)], sectionY) end
+				if lx == 15 then mark(world.chunks[chunkKey(chunk.x + 1, chunk.z)], sectionY) end
+				if lz == 0 then mark(world.chunks[chunkKey(chunk.x, chunk.z - 1)], sectionY) end
+				if lz == 15 then mark(world.chunks[chunkKey(chunk.x, chunk.z + 1)], sectionY) end
 			end
 		end
 	end
 	for section, place in pairs(dirty) do
-		renderSection(place[1], place[2], section)
+		if place[2] >= (place[1].renderFrom or -math.huge) then
+			section.queued = false -- (at once, not in the queue)
+			buildSection(place[1], place[2], section, false)
+		end
 	end
 	noticeBlocks(names)
 end
@@ -1227,7 +1899,7 @@ local function blockAt(x, y, z)
 	if not chunk or not section then
 		return "minecraft:air"
 	end
-	local index = section.cells[cellIndex(x - chunk.x * 16, y - sectionY * 16, z - chunk.z * 16)]
+	local index = cellAt(section.cells, cellIndex(x - chunk.x * 16, y - sectionY * 16, z - chunk.z * 16))
 	return section.palette[(index or 0) + 1] or "minecraft:air"
 end
 
@@ -1608,7 +2280,10 @@ local function onEdit(player, action, x, y, z, info)
 					shownBy[key] = nil
 				end
 			end
-			loadChunks({ { chunk.x, chunk.z } }, world.generation)
+			-- (load that chunk again: the loaders take it first)
+			local key = chunkKey(chunk.x, chunk.z)
+			loader.reload[key] = true
+			loader.retryAt[key] = nil
 		end
 		if clickId and player.Parent then
 			editRemote:FireClient(player, "answer", clickId) -- (his client's own block: Minecraft has spoken)
@@ -1881,6 +2556,7 @@ Players.PlayerRemoving:Connect(function(player)
 	chatTokens[player] = nil
 end)
 
+local turnFaces -- below (/drehen)
 local function reply(player, lines)
 	chatRemote:FireClient(player, "reply", lines)
 end
@@ -1893,6 +2569,32 @@ local function setSkin(player, name)
 	else
 		reply(player, { "Skin nicht gefunden: " .. tostring(result) })
 	end
+end
+
+--[[
+	Top / Bottom pictures: Roblox does not document which way a Texture lies on the Top / Bottom face of a part. Minecraft's
+	up face has north at the top of the picture. If the tops look turned in Roblox (an observer's arrow, planks), turn
+	them for everybody: "/drehen oben 90" (0, 90, 180, 270; "unten" for the bottom faces) - try until it looks like in
+	Minecraft, then put the number into MinecraftWorldConfig (TopTurn / BottomTurn) so it stays.
+]]
+ReplicatedStorage:SetAttribute("McTopTurn", tonumber(Config.TopTurn) or 0)
+ReplicatedStorage:SetAttribute("McBottomTurn", tonumber(Config.BottomTurn) or 0)
+
+turnFaces = function(player, rest)
+	local which, amount = string.match(string.lower(rest), "^(%S+)%s+(%-?%d+)$")
+	amount = tonumber(amount)
+	local attribute = if which == "oben" or which == "top" then "McTopTurn"
+		elseif which == "unten" or which == "bottom" then "McBottomTurn" else nil
+	if not attribute or not amount or amount % 90 ~= 0 then
+		reply(player, { "/drehen oben <0|90|180|270>  oder  /drehen unten <0|90|180|270>",
+			string.format("jetzt: oben %d, unten %d", ReplicatedStorage:GetAttribute("McTopTurn") or 0,
+				ReplicatedStorage:GetAttribute("McBottomTurn") or 0) })
+		return
+	end
+	ReplicatedStorage:SetAttribute(attribute, amount % 360)
+	reply(player, { string.format("Bilder %s um %d Grad gedreht (für alle). Passt es? Dann in MinecraftWorldConfig %s = %d eintragen.",
+		if attribute == "McTopTurn" then "oben" else "unten", amount % 360,
+		if attribute == "McTopTurn" then "TopTurn" else "BottomTurn", amount % 360) })
 end
 
 local function runCommand(player, command)
@@ -1947,6 +2649,13 @@ chatRemote.OnServerEvent:Connect(function(player, text)
 		local word, rest = string.match(text, "^/(%S+)%s*(.-)$")
 		if word and string.lower(word) == "skin" then
 			task.spawn(setSkin, player, rest or "")
+		elseif word and string.lower(word) == "drehen" then
+			turnFaces(player, rest or "")
+		elseif word and string.lower(word) == "welt" then
+			local chunks, sections, parts = worldStats()
+			reply(player, { string.format("Welt: %d Chunks, %d Abschnitte gebaut, %d Parts, %d warten noch, Sichtweite %d Chunks",
+				chunks, sections, parts, #renderQueue, VIEW), string.format("Bauen: %d Abschnitte, im Schnitt %.1f ms, längster %.1f ms",
+				buildStats.count, buildStats.total / math.max(1, buildStats.count) * 1000, buildStats.longest * 1000) })
 		elseif word then
 			task.spawn(runCommand, player, string.sub(text, 2))
 		end
@@ -2099,13 +2808,14 @@ client:Subscribe(nil, CHANGES, function(data)
 		applyBlocks(data.blocks)
 	end
 	if type(data.chunks) == "table" then
-		local list = {}
+		-- very many changes there (explosion, /fill): those chunks are loaded again (the loaders take them first)
 		for _, pair in ipairs(data.chunks) do
-			if world.chunks[chunkKey(pair[1], pair[2])] then
-				table.insert(list, { pair[1], pair[2] })
+			local key = type(pair) == "table" and chunkKey(pair[1], pair[2])
+			if key and world.chunks[key] then
+				loader.reload[key] = true
+				loader.retryAt[key] = nil
 			end
 		end
-		task.spawn(loadChunks, list, world.generation)
 	end
 end)
 

@@ -14,6 +14,17 @@ return {
 	BlockMaterial = Enum.Material.SmoothPlastic,
 	-- Studio only: always the same Bridge client instead of a new one per play test (32+ characters)
 	StudioSecret = "2RavZ4TSU65j2ha0whUno65Q7c689arhMk74Szx2",
+	-- Top / Bottom faces: how far their pictures are turned (0, 90, 180, 270) - Roblox does not document how a Texture lies
+	-- there. Try it in the game with "/drehen oben 90" / "/drehen unten 180" (compare an observer's arrow or planks
+	-- with Minecraft), then put the right numbers here
+	TopTurn = 0,
+	BottomTurn = 0,
+	-- Real worlds: chunks around every Roblox player (Minecraft's "render distance"), and how many sections (16 blocks)
+	-- below the lowest player still get built (caves deeper than that only when somebody goes down)
+	ViewChunks = 6,
+	SectionsBelow = 3,
+	-- Milliseconds per frame the server may spend building blocks (more = loads faster, less = never stutters)
+	BuildBudgetMs = 6,
 	-- true: print what the Bridge module does
 	Debug = false,
 }

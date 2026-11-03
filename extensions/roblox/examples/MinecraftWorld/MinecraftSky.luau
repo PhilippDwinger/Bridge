@@ -398,7 +398,10 @@ function Sky.start(options: Options)
 				end
 				texture.StudsPerTileU = scale
 				texture.StudsPerTileV = 4 * scale
-				texture.OffsetStudsV = (fall * 4 * scale + bottom) % (4 * scale) -- (falling down)
+				-- A bigger OffsetStudsV moves the picture UP (Paddy's test: rain flew up with +fall). Picture point
+				-- t = (v + offset) / tile, v = top - y  =>  offset = -top - fall: the picture hangs in the world (does not
+				-- slide when the camera goes up / down) and falls DOWN
+				texture.OffsetStudsV = (-top - fall * 4 * scale) % (4 * scale) -- (falling down)
 				texture.OffsetStudsU = if snow then ((column.drift + time * 0.01 * column.drift) * scale) % scale else 0
 				texture.Transparency = 1 - alpha
 			end
