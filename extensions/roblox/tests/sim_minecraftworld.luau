@@ -40,6 +40,9 @@ local starterScripts = Instance.new("Folder")
 starterScripts.Name = "StarterCharacterScripts"
 starterScripts.Parent = starterPlayer
 shim.services.StarterPlayer = starterPlayer
+local lighting = Instance.new("Folder")
+lighting.Name = "Lighting"
+shim.services.Lighting = lighting
 shim.services.KeyframeSequenceProvider = { RegisterKeyframeSequence = function()
 	return "rbxassetid://0"
 end }
@@ -210,8 +213,10 @@ local function observe()
 					result.grassParts += 1
 					if result.grassParts == 1 then
 						for _, texture in ipairs(part:GetChildren()) do
-							table.insert(result.textures, { texture.Face.Name, texture:GetAttribute("McTexture"),
-								texture.StudsPerTileU, texture.StudsPerTileV })
+							if texture:IsA("Texture") then
+								table.insert(result.textures, { texture.Face.Name, texture:GetAttribute("McTexture"),
+									texture.StudsPerTileU, texture.StudsPerTileV })
+							end
 						end
 					end
 				end
@@ -273,7 +278,9 @@ local function observe()
 						if part.Name == "Piece" then
 							info.textures = {}
 							for _, texture in ipairs(part:GetChildren()) do
-								info.textures[texture.Face.Name] = texture:GetAttribute("McTexture")
+								if texture:IsA("Texture") then
+									info.textures[texture.Face.Name] = texture:GetAttribute("McTexture")
+								end
 							end
 							table.insert(entry.pieces, info)
 						elseif part.Name == "Collision" then
@@ -286,6 +293,33 @@ local function observe()
 				table.insert(result.models, entry)
 			end
 		end
+	end
+	-- water / lava: parts as high as the fluid (McFluid), lights of torches
+	result.fluids = {}
+	if worldFolder then
+		for _, part in ipairs(worldFolder:GetDescendants()) do
+			if part:IsA("BasePart") and part:GetAttribute("McFluid") then
+				local p, size = part.CFrame.Position, part.Size
+				table.insert(result.fluids, { name = part.Name, fluid = part:GetAttribute("McFluid"), y = p.Y, height = size.Y,
+					collide = part.CanCollide, light = part:FindFirstChildOfClass("PointLight") ~= nil })
+			end
+		end
+	end
+	result.lights = {}
+	if worldFolder then
+		for _, light in ipairs(worldFolder:GetDescendants()) do
+			if light:IsA("PointLight") then
+				local holder = light.Parent and light.Parent.Parent
+				table.insert(result.lights, { name = if holder and holder:IsA("Model") then holder.Name else light.Parent.Name,
+					range = light.Range })
+			end
+		end
+	end
+	-- Minecraft's sky (topic mcworld.sky -> attributes of Lighting)
+	result.sky = {}
+	for name, value in pairs(lighting:GetAttributes()) do
+		result.sky[name] = if typeof(value) == "Color3" then { math.floor(value.R * 255 + 0.5), math.floor(value.G * 255 + 0.5),
+			math.floor(value.B * 255 + 0.5) } else value
 	end
 	-- items lying in the world (Minecraft's item entities): one invisible part each, the clients draw them
 	result.items = {}

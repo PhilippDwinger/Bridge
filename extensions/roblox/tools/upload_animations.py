@@ -7,9 +7,11 @@
 - roblox user id: the owner of the animations - the same account that owns the game (animations of another
   account do not play in it).
 
-Uploads every examples/MinecraftWorld/animations/*.rbxm (KeyframeSequences, made by tools/make_animations.luau) as an
-"Animation" asset and writes examples/MinecraftWorld/MinecraftAnimationIds.luau. Rojo then puts the ids into the
-game - nothing else to do. Only Python's standard library is needed.
+Uploads the examples/MinecraftWorld/animations/*.rbxm (KeyframeSequences, made by tools/make_animations.luau) that have
+no asset id yet (0 in MinecraftAnimationIds.luau - new ones like "swim") as "Animation" assets and writes
+examples/MinecraftWorld/MinecraftAnimationIds.luau. "--all" as third argument uploads all of them again (after changes
+to tools/make_animations.luau). Rojo then puts the ids into the game - nothing else to do. Only Python's standard
+library is needed.
 """
 import json
 import os
@@ -24,7 +26,16 @@ ROBLOX = os.path.dirname(HERE)
 ANIMATIONS = os.path.join(ROBLOX, "examples", "MinecraftWorld", "animations")
 IDS = os.path.join(ROBLOX, "examples", "MinecraftWorld", "MinecraftAnimationIds.luau")
 API = "https://apis.roblox.com/assets/v1/"
-ORDER = ["idle", "walk", "sneak", "sneak_walk", "swing", "sneak_swing", "death"]
+ORDER = ["idle", "walk", "sneak", "sneak_walk", "swing", "sneak_swing", "death", "swim"]
+
+
+def known_ids():
+    """The ids already in MinecraftAnimationIds.luau (name -> id, 0 = not uploaded)."""
+    import re
+    if not os.path.exists(IDS):
+        return {}
+    with open(IDS, encoding="utf-8") as handle:
+        return {name: int(value) for name, value in re.findall(r"^\s*(\w+)\s*=\s*(\d+)", handle.read(), re.M)}
 
 
 def request(method, url, key, body=None, content_type=None):
@@ -75,27 +86,31 @@ def upload(name, path, key, user_id):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and sys.argv[3] != "--all"):
         print(__doc__)
         return 2
     key_file, user_id = sys.argv[1], sys.argv[2].strip()
+    everything = len(sys.argv) == 4
     if not user_id.isdigit():
         raise SystemExit("the Roblox user id must be a number")
     with open(key_file, encoding="utf-8-sig") as handle:
         key = handle.read().strip()
     if len(key) < 20:
         raise SystemExit(f"{key_file} has no API key in it")
-    ids = {}
+    ids = known_ids()
     for name in ORDER:
         path = os.path.join(ANIMATIONS, name + ".rbxm")
         if not os.path.exists(path):
             raise SystemExit(f"missing {path} - run: lune run extensions/roblox/tools/make_animations.luau")
+        if not everything and ids.get(name, 0) > 0:
+            print(f"  {name:12} rbxassetid://{ids[name]} (already uploaded)")
+            continue
         ids[name] = upload(name, path, key, user_id)
         print(f"  {name:12} rbxassetid://{ids[name]}")
     lines = ["-- Asset ids of the Minecraft animations (written by tools/upload_animations.py - do not edit by hand)",
              "-- 0 = not uploaded yet: in Studio the KeyframeSequences in ReplicatedStorage.MinecraftAnimations are used.",
              "return {"]
-    lines += [f"\t{name} = {ids[name]}," for name in ORDER]
+    lines += [f"\t{name} = {ids.get(name, 0)}," for name in ORDER]
     lines.append("}")
     with open(IDS, "w", encoding="utf-8", newline="\r\n") as handle:
         handle.write("\n".join(lines) + "\n")

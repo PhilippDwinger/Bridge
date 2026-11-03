@@ -41,6 +41,38 @@ Character.ROOT_SIZE = Vector3.new(1.8, 5.4 - Character.FOOT_GAP, 1.8) -- the top
 Character.ROOT_HEIGHT = Character.FOOT_GAP + (5.4 - Character.FOOT_GAP) / 2 -- middle of the root part above the feet
 Character.EYE_HEIGHT = 1.62 * 3 -- Minecraft's eyes: 1.62 blocks, sneaking 1.27
 Character.SNEAK_EYE_HEIGHT = 1.27 * 3
+Character.SWIM_EYE_HEIGHT = 0.4 * 3 -- swimming (lying in the water): Minecraft's eyes 0.4 blocks above the feet
+
+--[[
+	Which fluid is at a point of the world ("water" | "lava" | nil): the server marks the parts of water / lava with
+	McFluid, each as high as the fluid in Minecraft (a source 8/9 of a block) - only the parts of that chunk are looked
+	at (they never reach into the next chunk).
+]]
+function Character.fluidAt(position: Vector3): string?
+	local world = workspace:FindFirstChild("MinecraftWorld")
+	if not world then
+		return nil
+	end
+	local scale = Character.STUDS_PER_BLOCK
+	local folder = world:FindFirstChild(string.format("Chunk %d,%d", math.floor(position.X / scale / 16),
+		math.floor(position.Z / scale / 16)))
+	if not folder then
+		return nil
+	end
+	for _, part in ipairs(folder:GetChildren()) do
+		if part:IsA("BasePart") then
+			local fluid = part:GetAttribute("McFluid")
+			if fluid then
+				local offset = position - part.Position
+				local half = part.Size / 2
+				if math.abs(offset.X) <= half.X and math.abs(offset.Y) <= half.Y and math.abs(offset.Z) <= half.Z then
+					return fluid
+				end
+			end
+		end
+	end
+	return nil
+end
 -- Minecraft's movement in studs (blocks x 3): walk 4.317, sprint 5.612, sneak 1.295 blocks/s, jump 1.2522 blocks
 Character.WALK_SPEED = 4.317 * 3
 Character.SPRINT_SPEED = 5.612 * 3
@@ -305,10 +337,13 @@ local function animationId(name: string): string?
 end
 Character.animationId = animationId
 
-Character.ANIMATIONS = { "idle", "walk", "sneak", "sneak_walk", "swing", "sneak_swing", "death" }
+Character.ANIMATIONS = { "idle", "walk", "sneak", "sneak_walk", "swing", "sneak_swing", "death", "swim" }
+
+-- Swimming: the head looks forward out of the lying body (Minecraft: head.xRot -45 degrees while swimming)
+Character.SWIM_HEAD_PITCH = -math.pi / 4
 
 export type Animation = {
-	update: (self: Animation, dt: number, state: { speed: number, sneak: boolean? }) -> (),
+	update: (self: Animation, dt: number, state: { speed: number, sneak: boolean?, swim: boolean? }) -> (),
 	swing: (self: Animation) -> (),
 	die: (self: Animation) -> (),
 	destroy: (self: Animation) -> (),
@@ -345,7 +380,7 @@ function Character.animate(model: Model)
 	return self
 end
 
-function Animation:update(dt: number, state: { speed: number, sneak: boolean? })
+function Animation:update(dt: number, state: { speed: number, sneak: boolean?, swim: boolean? })
 	if self.dead then
 		return
 	end
@@ -356,30 +391,39 @@ function Animation:update(dt: number, state: { speed: number, sneak: boolean? })
 	if self.amount < 0.002 then
 		self.amount = 0
 	end
-	local base = if state.sneak then "sneak" else "idle"
-	local move = if state.sneak then "sneak_walk" else "walk"
+	-- swimming (sprinting under water): lying in the water with arm strokes instead of standing / walking - if the
+	-- swim animation is there (it plays with the same speed as walking would: Minecraft's walkAnimationPos)
+	local swimming = state.swim == true and tracks.swim ~= nil
+	local base = if swimming then "swim" elseif state.sneak then "sneak" else "idle"
+	local move = if swimming then nil elseif state.sneak then "sneak_walk" else "walk"
 	if base ~= self.base then
+		-- (into / out of swimming: Minecraft's swimAmount takes ~11 ticks, 0.09 per tick)
+		local fade = if base == "swim" or self.base == "swim" then 0.55 else 0.1
 		if self.base and tracks[self.base] then
-			tracks[self.base]:Stop(0.1)
+			tracks[self.base]:Stop(fade)
 		end
 		if tracks[base] then
-			tracks[base]:Play(0.1)
+			tracks[base]:Play(fade)
 		end
 		self.base = base
 	end
 	if move ~= self.move then
-		if self.move and tracks[self.move] then
-			tracks[self.move]:Stop(0.1)
+		local before = self.move
+		if before and tracks[before] then
+			tracks[before]:Stop(0.1)
 		end
-		if tracks[move] then
+		if move and tracks[move] then
 			tracks[move]:Play(0.1)
 		end
-		self.move = move
+		(self :: any).move = move
 	end
-	local track = tracks[move]
+	local track = if move then tracks[move] else nil
 	if track then
 		track:AdjustWeight(math.max(self.amount, 0.001), 0)
 		track:AdjustSpeed(math.max(self.amount, 0.001))
+	end
+	if swimming then
+		tracks.swim:AdjustSpeed(math.max(self.amount, 0.05))
 	end
 	self.sneaking = state.sneak == true
 end

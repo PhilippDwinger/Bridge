@@ -16,6 +16,8 @@
 	- hitting (6 ticks): body yRot sin(sqrt(t) 2 pi) 0.2, the arms go round with it, the right arm
 	  xRot - (sin(outQuart(t) pi) 1.2 + sin(t pi) 0.525), zRot - sin(t pi) 0.4.
 	- dying: the whole body falls to its side, sqrt((ticks - 1) / 12.5) x 90 degrees.
+	- swimming (setupSwimAnimation + setupRotations): arm strokes of 26, leg kicks 0.3 cos(pos / 3), the body lies in
+	  the water (X - 90 degrees about the feet, then 1 block back and 0.3 up).
 
 	Minecraft model space -> Roblox: x and y flipped (Minecraft: y down, x to the model's left), so a Minecraft rotation
 	(xRot, yRot, zRot, applied Z Y X) is Roblox CFrame.Angles(0, 0, zRot) * CFrame.Angles(0, -yRot, 0) *
@@ -88,6 +90,44 @@ local function attack(pose: Pose, t: number)
 	right.zRot += math.sin(t * math.pi) * -0.4
 end
 
+-- HumanoidModel.setupSwimAnimation (swimAmount 1, no swing): the arms go round in strokes of 26 (walkAnimationPos),
+-- the legs kick with 0.3 cos(pos / 3); the whole body lies in the water (AvatarRenderer.setupRotations: X - 90 degrees,
+-- then 1 block back and 0.3 up). The head is not in it (it looks forward: Character.look, - 45 degrees like Minecraft).
+-- The legs' frequency is moved a tiny bit (4 kicks in 3 strokes: 0.3222 instead of 1/3) so the loop has whole cycles.
+local SWIM_STROKE = 26
+local SWIM_LOOP = 3 * SWIM_STROKE -- ticks (at amount 1)
+local SWIM_KICK = 4 * 2 * math.pi / SWIM_LOOP
+local function quadraticArm(f: number): number
+	return -65 * f + f * f
+end
+local function swim(pose: Pose, position: number)
+	local f = position % SWIM_STROKE
+	local right, left = pose.RightArm, pose.LeftArm
+	if f < 14 then
+		left.xRot, right.xRot = 0, 0
+		left.yRot, right.yRot = math.pi, math.pi
+		left.zRot = math.pi + 1.8707964 * quadraticArm(f) / quadraticArm(14)
+		right.zRot = math.pi - 1.8707964 * quadraticArm(f) / quadraticArm(14)
+	elseif f < 22 then
+		local t = (f - 14) / 8
+		left.xRot, right.xRot = math.pi / 2 * t, math.pi / 2 * t
+		left.yRot, right.yRot = math.pi, math.pi
+		left.zRot = 5.012389 - 1.8707964 * t
+		right.zRot = 1.2707963 + 1.8707964 * t
+	else
+		local t = (f - 22) / 4
+		left.xRot, right.xRot = math.pi / 2 - math.pi / 2 * t, math.pi / 2 - math.pi / 2 * t
+		left.yRot, right.yRot = math.pi, math.pi
+		left.zRot, right.zRot = math.pi, math.pi
+	end
+	pose.LeftLeg.xRot = 0.3 * math.cos(position * SWIM_KICK + math.pi)
+	pose.RightLeg.xRot = 0.3 * math.cos(position * SWIM_KICK)
+	pose.RightLeg.yRot, pose.LeftLeg.yRot = 0.005, -0.005
+	pose.RightLeg.zRot, pose.LeftLeg.zRot = 0.005, -0.005
+	-- lying in the water, face down, the head forward: 1 block back, 0.3 blocks up (Roblox studs: 1 block = 3)
+	pose.ModelRoot.rotated = true
+end
+
 local function crouch(pose: Pose)
 	pose.Body.xRot = 0.5
 	pose.RightArm.xRot += 0.4
@@ -122,8 +162,14 @@ end
 -- endregion
 
 -- region Minecraft -> Roblox
+local BLOCK = 3 -- studs per block
 local function cframeOf(name: string, part: Part)
 	if name == "ModelRoot" then
+		if (part :: any).rotated then
+			-- swimming: Minecraft turns the body about the feet (X - 90 degrees: the head goes forward, the chest down)
+			-- and moves it 1 block back and 0.3 up (translate(0, -1, 0.3) after the turn)
+			return CFrame.Angles(-math.pi / 2, 0, 0) * CFrame.new(0, -1 * BLOCK, 0.3 * BLOCK)
+		end
 		return CFrame.new(part.x, part.y, part.z) * CFrame.Angles(part.xRot, part.yRot, part.zRot)
 	end
 	local d = DEFAULT[name]
@@ -232,6 +278,13 @@ local SPECS: { Spec } = {
 			attack(pose, time / (6 * TICK))
 			crouch(pose)
 			bob(pose, nil)
+			return pose
+		end },
+	{ name = "swim", length = SWIM_LOOP * TICK, rate = 40, loop = true, priority = Enum.AnimationPriority.Movement,
+		parts = { "ModelRoot", "Body", "RightArm", "LeftArm", "RightLeg", "LeftLeg" },
+		at = function(time)
+			local pose = fresh()
+			swim(pose, time * 20)
 			return pose
 		end },
 	{ name = "death", length = 13.5 * TICK, rate = 40, loop = false, priority = Enum.AnimationPriority.Action4,

@@ -249,6 +249,27 @@ und jeder Roblox-Server mit diesem Spiel ist auch einer. Beide nutzen denselben 
   Quake Pro 110) und **Shader**: Aus (das Spiel wie es ist), Sanft (warmes Licht, weiche Schatten, Dunst, Wolken),
   Kräftig (satte Farben, Leuchten, Sonnenstrahlen, goldener Dunst) – `MinecraftShaders`. Nur Aussehen, nur auf dem
   eigenen Client, nichts geht über Bridge oder an andere. Gilt für die Sitzung.
+- **Tag + Nacht + Wetter wie Minecraft** (`MinecraftSky`, ReplicatedStorage; vom Client gestartet): Minecraft
+  schickt seine eigenen Himmelswerte (Topic `mcworld.sky` – aus Minecrafts Zeitleisten „day“/„moon“, dem Biom und
+  der Wetter-Schicht: Zeit, Sonnen-/Mondwinkel, Himmels-, Nebel-, Wolken-, Sonnenaufgangsfarbe, Himmelslicht 1 … 0,24,
+  Regen/Gewitter, Regen oder Schnee hier) → Attribute `Mc…` an `Lighting`. Daraus: die Uhr (`/time set` in Minecraft
+  stellt sie sofort), Helligkeit wie Minecrafts Lightmap (Tag hell, Nacht dunkelblau, Höhlen dunkel), keine
+  Spiegelungen, der Horizont im Nebel- und der Himmel im Himmelsfarbton, Sonnenaufgang glüht, Minecrafts **eckige
+  Sonne** und sein **Mond in der richtigen Phase**, **Wolken** aus Minecrafts Wolkenbild auf Wolkenhöhe (ziehen nach
+  Osten), Sterne nachts, **Regen und Schnee** wie Minecrafts Wetter (pro Blocksäule um die Kamera ein fallendes Bild,
+  am Boden endend). Unter Wasser Minecrafts Wassernebel, in Lava sein Lavanebel. **Licht:** Fackeln, Laternen,
+  Glowstone, Lava … leuchten wie Minecrafts Blocklicht (PointLight, Reichweite = Lichtstufe in Blöcken, warmes
+  #FFD88C). Ein Shader aus dem Menü (M) übernimmt das Licht, Uhr/Sonne/Wolken/Regen bleiben.
+- **Wasser + Lava wie Minecraft:** so hoch wie in Minecraft (Quelle 8/9 Block, fließendes Wasser stufenweise
+  niedriger), Minecrafts bewegte Bilder (Wasser 32 Bilder alle 2 Ticks, fließend auf den Seiten, Lava in ihrer
+  eigenen Reihenfolge), fließt wie in Minecraft (Minecraft rechnet, Roblox zeigt). **Eimer** (Kreativ-Liste: Eimer,
+  Wassereimer, Lavaeimer, dazu Schnee, Eis, Fackel, Laterne, Glowstone, Seelaterne): Rechtsklick gießt / schöpft wie in
+  Minecraft, auch in die Luft. **Schwimmen:** im Wasser Minecrafts Physik (langsam, Leertaste hoch, man sinkt langsam,
+  an Kanten springt man raus, Lava noch zäher), **Sprinten unter Wasser = schwimmen** – liegend mit Minecrafts
+  Schwimm-Animation (Armzüge, Beinschlag), Augen tief, hoch/runter wohin man schaut; alle sehen es (auch Minecraft:
+  das Mannequin schwimmt, und schwimmende Minecraft-Spieler schwimmen in Roblox). **Luftblasen** wie Minecraft (10
+  rechts über der Hotbar, 15 s Luft, platzen, danach 1 Herz pro Sekunde – „ertrunken“ in Minecraft), kein
+  Fallschaden beim Landen im Wasser.
 - **Bauen:** gezielt wird wie in Minecraft von den Augen aus (auch von hinten/vorne), Reichweite 4,5 Blöcke (Kreativ
   5), ein schwarzer Rahmen zeigt den Block bzw. seine Form. **Rechtsklick** = benutzen: Minecraft entscheidet mit
   seinem eigenen Code – Tür/Falltür/Zauntor auf und zu, Hebel umlegen, Knopf drücken (Holz 1,5 s, Stein 1 s an),
@@ -268,9 +289,11 @@ So startest du es:
    die Blöcke einfarbig und Hotbar/Inventar grau – das Output sagt es dann). → **Play**.
 4. Einmalig für die Animationen außerhalb von Studio: Open-Cloud-API-Key (create.roblox.com → Open Cloud → API Keys,
    „Assets“ Read + Write) in eine Datei, dann
-   `python extensions\roblox\tools\upload_animations.py <Key-Datei> <deine UserId>` – die IDs landen in
-   `MinecraftAnimationIds.luau`, Rojo bringt sie ins Spiel. Nach Änderungen an den Animationen:
-   `lune run extensions/roblox/tools/make_animations.luau`, dann wieder hochladen.
+   `python extensions\roblox\tools\upload_animations.py <Key-Datei> <deine UserId>` – lädt die Animationen ohne ID
+   hoch (neue wie „swim“), die IDs landen in `MinecraftAnimationIds.luau`, Rojo bringt sie ins Spiel. Nach Änderungen
+   an den Animationen: `lune run extensions/roblox/tools/make_animations.luau`, dann mit `--all` am Ende alle neu.
+5. Das Licht: `Lighting.Technology` = **Future** (setzt das Projekt; falls Studio es nicht übernimmt: von Hand im
+   Explorer unter Lighting), sonst leuchten Fackeln nicht.
 
 Die Texturen kommen nur, wenn Minecraft selbst läuft (Einzelspieler oder IntelliJ „Minecraft Client“). Ein
 Dedicated Server hat keine Bilder – dann bleibt alles grau, Bauen geht trotzdem.
@@ -288,7 +311,8 @@ python extensions/roblox/tests/run_tests.py C:\Pfad\zu\lune.exe
 - `test_images.luau` – `MinecraftImages`: Hochskalieren (scharfe Pixel), einfarbige Bilder, Block-Icon (3D-Würfel),
   Ausschnitt (eine Fläche aus dem Skin)
 - `test_character.luau` – `MinecraftCharacter`: Minecrafts Maße und Hitbox, Skin-Flächen an der richtigen Stelle,
-  Slim-Arme, die 7 Animationen (Gehen: Bein 1,4 rad nach hinten / Arm nach vorne, Schleichen, Tod auf die linke Seite)
+  Slim-Arme, die 8 Animationen (Gehen: Bein 1,4 rad nach hinten / Arm nach vorne, Schleichen, Tod auf die linke Seite,
+  Schwimmen: liegend, Armzüge), `MinecraftSky`: Uhr aus dem Sonnenwinkel, Minecrafts Lightmap
 - `test_live.luau` – zwei Clients: Topics, Batch-Poll, `PublishLatest` / `Subscribe` mit `Latest` (auch mit einem
   älteren Bridge-Server), direkte Nachrichten (fast/safe/compressed/auto), Commands
   (Fehler, Timeout, späte Antwort, Async), Session-Erneuerung, `SESSION_INVALID`, feste Identität, Server-Reset

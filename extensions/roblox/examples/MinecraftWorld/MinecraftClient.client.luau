@@ -40,11 +40,13 @@ local swingRemote = remotes:WaitForChild("Swing") :: RemoteEvent
 local getSkin = remotes:WaitForChild("GetSkin") :: RemoteFunction
 local inventoryRemote = remotes:WaitForChild("Inventory") :: RemoteEvent
 local miningSpeed = remotes:WaitForChild("MiningSpeed") :: RemoteFunction
+local drownRemote = remotes:WaitForChild("Drown") :: RemoteEvent
 
 local player = Players.LocalPlayer
 local REPEAT_BREAK = 0.25 -- creative: 5 ticks between two blocks while the button is held (also after a block broke)
 local REPEAT_USE = 0.2 -- 4 ticks between two right clicks while the button is held
 local TEXTURE_SCALE = 8 -- world textures: every Minecraft pixel becomes 8x8 (sharp also where Roblox smooths)
+local ANIMATED_SCALE = 4 -- moving pictures (water, lava: up to 32 frames each) a bit smaller
 local ICON_SIZE = 64 -- (a slot is 16 Minecraft pixels, 48 screen pixels at the biggest GUI scale)
 local HOTBAR_KEYS = {
 	[Enum.KeyCode.One] = 1, [Enum.KeyCode.Two] = 2, [Enum.KeyCode.Three] = 3, [Enum.KeyCode.Four] = 4,
@@ -157,10 +159,30 @@ local function makeImage(cacheKey: string, source: string, build: () -> any): Co
 	return content
 end
 
+-- Moving pictures (water, lava - Minecraft's .png.mcmeta): one picture per texture key, its frames written into it
+-- one after the other (every Texture with that picture moves along)
+local animations = {} -- cache key -> {texture, frames = {buffer}, shown = frame index}
+local function frameOf(texture: any, index: number): any
+	-- (texture.h is one frame; the pixels hold all of them one below the other)
+	local strip = { w = texture.w, h = texture.h * texture.frames, pixels = texture.pixels }
+	return Images.crop(strip :: any, 0, index * texture.h, texture.w, texture.h)
+end
+
 local function worldContent(key: any, turn: number?): Content?
 	local texture = type(key) == "string" and assets and assets.textures and assets.textures[key]
 	if not texture then
 		return nil
+	end
+	if texture.frames and texture.frames > 1 and ((turn or 0) // 90) % 4 == 0 then
+		local cacheKey = "anim:" .. tostring(key)
+		local content = makeImage(cacheKey, tostring(texture), function()
+			return Images.upscale(frameOf(texture, 0), ANIMATED_SCALE)
+		end)
+		local entry = animations[cacheKey]
+		if content and (not entry or entry.texture ~= texture) then
+			animations[cacheKey] = { texture = texture, frames = {}, shown = 0 }
+		end
+		return content
 	end
 	local quarter = ((turn or 0) // 90) % 4
 	return makeImage("world:" .. tostring(key) .. (if quarter ~= 0 then "@" .. quarter else ""), buffer.tostring(texture.pixels),
@@ -168,6 +190,32 @@ local function worldContent(key: any, turn: number?): Content?
 			return Images.upscale(if quarter ~= 0 then Images.turn(texture, quarter * 90) else texture, TEXTURE_SCALE)
 		end)
 end
+
+-- Minecraft's animation clock: every frametime ticks the next frame (in the order of the .mcmeta, if it has one)
+RunService.Heartbeat:Connect(function()
+	local tick = math.floor(os.clock() * 20)
+	for cacheKey, entry in pairs(animations) do
+		local texture = entry.texture
+		local cached = cache[cacheKey]
+		if not cached or not cached.image then
+			continue
+		end
+		local order = texture.order
+		local step = tick // texture.frametime
+		local index = if order and #order > 0 then order[step % #order + 1] else step % texture.frames
+		if index ~= entry.shown and index < texture.frames then
+			entry.shown = index
+			local frame = entry.frames[index]
+			if not frame then
+				frame = Images.upscale(frameOf(texture, index), ANIMATED_SCALE)
+				entry.frames[index] = frame
+			end
+			pcall(function()
+				cached.image:WritePixelsBuffer(Vector2.zero, Vector2.new(frame.w, frame.h), frame.pixels)
+			end)
+		end
+	end
+end)
 
 local function guiPicture(key: string): Content?
 	local texture = assets and assets.textures and assets.textures[key]
@@ -1408,6 +1456,13 @@ local function act(action: string, repeated: boolean?)
 		return
 	end
 	if not target then
+		-- into the air: only the item is used (a bucket takes / pours water where you look, a snowball flies)
+		local eye, look = eyeAndLook()
+		if hotbarStack(selected) and eye and look and assets then
+			swingArm()
+			local x, y, z = blockOf(eye)
+			editRemote:FireServer("use", x, y, z, { air = true, slot = selected - 1, look = look, ground = onGround() })
+		end
 		return
 	end
 	-- right click: Minecraft decides (open / press / pull - or place the item in the hand on that face)
@@ -2087,6 +2142,78 @@ local function updateHearts()
 	end
 end
 
+--[[
+	Air under water like Minecraft (LivingEntity.baseTick + Hud.extractAirBubbles): 300 ticks of air, 1 per tick with the
+	eyes in water (survival / adventure), 4 back per tick outside; at -20: 2 damage (Drown) and 0 again. 10 bubbles on
+	the right, one row above the food row: full, popping (the one that just went), empty.
+]]
+local AIR_MAX = 300
+local airSupply = AIR_MAX
+local airClock = 0
+local bubbles = {}
+for index = 1, 10 do
+	bubbles[index] = image(hotbar, "Air" .. index, 182 - (index - 1) * 8 - 9, -17 - 10, 9, 9, 4)
+end
+local random = Random.new()
+local airTicks = 0
+
+local function airBubble(air: number, delta: number): number
+	return math.ceil((air + delta) * 10 / AIR_MAX)
+end
+
+local function airStep(dt: number)
+	local mode = gameMode()
+	local survival = mode == "survival" or mode == "adventure"
+	local underwater = player:GetAttribute("McEyeInWater") == true
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	airClock += dt
+	while airClock >= 0.05 do
+		airClock -= 0.05
+		airTicks += 1
+		if underwater then
+			if survival and humanoid and humanoid.Health > 0 then
+				airSupply -= 1
+				if airSupply <= -20 then
+					airSupply = 0
+					drownRemote:FireServer() -- (the server checks the head is in water, Minecraft: 2 damage)
+				end
+			end
+		elseif airSupply < AIR_MAX then
+			airSupply = math.min(airSupply + 4, AIR_MAX)
+		end
+	end
+	local air = math.clamp(airSupply, 0, AIR_MAX)
+	local shown = survival and (underwater or air < AIR_MAX)
+	local full = airBubble(air, -2)
+	local popping = airBubble(air, 0)
+	local empty = 10 - airBubble(air, if air == 0 or not underwater then 0 else 1)
+	local fullPicture, burstPicture, emptyPicture = gui("air"), gui("air_bursting"), gui("air_empty")
+	for index, bubble in ipairs(bubbles) do
+		bubble.Visible = shown
+		if not shown then
+			continue
+		end
+		local picture, jitter = nil, 0
+		if index <= full then
+			picture = fullPicture
+		elseif full ~= popping and index == popping and underwater then
+			picture = burstPicture
+		elseif index > 10 - empty then
+			picture = emptyPicture
+			if empty == 10 and airTicks % 2 == 0 then
+				jitter = random:NextInteger(0, 1) -- (Minecraft: the empty row shakes when the air is out)
+			end
+		end
+		setPicture(bubble, picture)
+		bubble.Position = UDim2.fromOffset(182 - (index - 1) * 8 - 9, -27 + jitter)
+		bubble.BackgroundTransparency = if picture or not fullPicture then 1 else 1
+	end
+end
+player.CharacterAdded:Connect(function()
+	airSupply = AIR_MAX
+end)
+
 -- Minecraft's fall damage: the server hurts 1 per block over 3
 local fallPeak = nil
 local FALLING = {
@@ -2105,6 +2232,10 @@ local function trackFall()
 	local mode = gameMode()
 	if mode == "creative" or mode == "spectator" or player:GetAttribute("McFlying") == true then
 		fallPeak = nil -- (no fall damage; flying starts the fall new)
+		return
+	end
+	if player:GetAttribute("McFluid") ~= nil then
+		fallPeak = nil -- (Minecraft: in water / lava the fall starts new - landing in water does not hurt)
 		return
 	end
 	local humanoidState = humanoid:GetState()
@@ -2143,6 +2274,7 @@ end)
 RunService:BindToRenderStep("MinecraftHurtCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
 	updateHearts()
 	trackFall()
+	airStep(dt)
 	flash.BackgroundTransparency = math.min(1, flash.BackgroundTransparency + dt * 1.5)
 	if hurtRoll > 0.001 then
 		local camera = workspace.CurrentCamera
@@ -2168,6 +2300,20 @@ local function useAssets(newAssets)
 	if first then
 		showItemName()
 		inventoryRemote:FireServer("state") -- (the server sends it when the character comes too)
+		local ok, problem = pcall(function()
+			require(ReplicatedStorage:WaitForChild("MinecraftSky") :: any).start({
+				picture = guiPicture,
+				assets = function()
+					return assets
+				end,
+				shaderActive = function()
+					return Shaders.current() ~= "off"
+				end,
+			})
+		end)
+		if not ok then
+			warn("[MinecraftWorld] the Minecraft sky could not start: " .. tostring(problem))
+		end
 	end
 end
 

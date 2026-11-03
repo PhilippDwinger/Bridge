@@ -61,6 +61,9 @@
       },
       "MinecraftShaders": {
         "$path": "examples/MinecraftWorld/MinecraftShaders.luau"
+      },
+      "MinecraftSky": {
+        "$path": "examples/MinecraftWorld/MinecraftSky.luau"
       }
     },
     "ServerStorage": {
@@ -85,6 +88,13 @@
       },
       "PlayerSync": {
         "$path": "examples/PlayerSync/PlayerSync.server.luau"
+      }
+    },
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Technology": "Future",
+        "GlobalShadows": true
       }
     }
   }

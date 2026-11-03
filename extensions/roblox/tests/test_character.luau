@@ -111,8 +111,8 @@ for _, name in ipairs(Character.ANIMATIONS) do
 		table.insert(names, name)
 	end
 end
-check("all 7 animations are there as KeyframeSequences (idle, walk, sneak, sneak_walk, swing, sneak_swing, death)",
-	#names == 7, table.concat(names, ","))
+check("all 8 animations are there as KeyframeSequences (idle, walk, sneak, sneak_walk, swing, sneak_swing, death, swim)",
+	#names == 8, table.concat(names, ","))
 local walk = sequence("walk")
 local legPose = poseAt(walk, 1, "RightLeg")
 local legDown = legPose and (CFrame.new() * legPose):VectorToWorldSpace(Vector3.new(0, -1, 0))
@@ -147,6 +147,40 @@ check("death: falls 90 degrees onto its left side (up -> -X) and lies there unti
 local swing = sequence("swing")
 check("swing: 6 ticks (0.3 s), action priority, not looped", swing.Loop == false
 	and swing.Priority == roblox.Enum.AnimationPriority.Action)
+
+-- swimming (Minecraft: setupSwimAnimation + setupRotations)
+local swim = sequence("swim")
+local swimFrames = swim:GetChildren()
+table.sort(swimFrames, function(a, b)
+	return a.Time < b.Time
+end)
+local swimRoot = poseAt(swim, 1, "ModelRoot")
+local bodyAxis = swimRoot and swimRoot:VectorToWorldSpace(Vector3.new(0, 1, 0))
+local chest = swimRoot and swimRoot:VectorToWorldSpace(Vector3.new(0, 0, -1))
+check("swim: the body lies in the water - head forward (up -> -Z), chest down, 1 block back and 0.3 up (about the feet)",
+	bodyAxis and near(bodyAxis.Z, -1, 0.01) and chest and near(chest.Y, -1, 0.01)
+	and near(swimRoot.Position.Z, 3, 0.01) and near(swimRoot.Position.Y, 0.9, 0.01), tostring(swimRoot))
+local strokeArm = poseAt(swim, 1, "RightArm")
+local strokeDown = strokeArm and strokeArm:VectorToWorldSpace(Vector3.new(0, -1, 0))
+check("swim: 3 arm strokes of 26 ticks in the loop (3.9 s, looped); at the start the arms reach over the head (zRot pi)",
+	swim.Loop == true and near(swimFrames[#swimFrames].Time, 3.9, 0.001) and strokeDown and strokeDown.Y > 0.99,
+	tostring(strokeDown))
+local midStroke = poseAt(swim, 1 + math.floor(#swimFrames * (18 / 78)), "RightArm")
+local midDown = midStroke and midStroke:VectorToWorldSpace(Vector3.new(0, -1, 0))
+check("swim: in the middle of a stroke (tick 18 of 26) the arm comes round past the side",
+	midDown and midDown.Y < 0.5, tostring(midDown))
+check("swimming head pitch: -45 degrees (Minecraft: head.xRot -pi/4)", near(Character.SWIM_HEAD_PITCH, -math.pi / 4))
+
+-- MinecraftSky: Minecraft's light map and clock
+shim.services.Lighting = {}
+shim.services.Players = { LocalPlayer = nil }
+shim.services.RunService = { RenderStepped = nil }
+local Sky = luau.load(fs.readFile("../examples/MinecraftWorld/MinecraftSky.luau"), { environment = env })()
+check("sky clock: Minecraft's sun angle 0 = noon (12:00), 90 = sunset (18:00), 180 = midnight, 270 = sunrise (6:00)",
+	near(Sky.clockTime(0), 12) and near(Sky.clockTime(90), 18) and near(Sky.clockTime(180), 0) and near(Sky.clockTime(270), 6))
+check("light map (brightness 50 %): day sky light 1 -> 1.0, night 0.24 -> 0.17, nothing -> 0",
+	near(Sky.brightness(1), 1) and near(Sky.brightness(0.24), 0.172, 0.005) and near(Sky.brightness(0), 0),
+	Sky.brightness(0.24))
 
 print(string.format("\n%d ok, %d failed", results.ok, results.fail))
 process.exit(if results.fail > 0 then 1 else 0)

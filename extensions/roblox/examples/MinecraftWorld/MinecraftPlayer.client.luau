@@ -13,6 +13,9 @@
 	- Game modes (player attribute McGameMode from the server): creative = Space twice to fly (Space up, Shift down,
 	  Ctrl twice as fast, landing stops it), spectator = always flying, through blocks, only other spectators see
 	  him (as a see-through head) - Minecraft players in spectator only spectators see too.
+	- Water / lava like Minecraft (travelInWater / travelInLava): slow, Space swims up, you sink slowly, at an edge you
+	  jump out; sprinting with the eyes under water = swimming (lying in the water with the swim animation, the eyes
+	  low, up / down where you look). Player attributes McFluid / McEyeInWater for MinecraftClient (air, no fall).
 	- Animations: Minecraft's own (MinecraftCharacter.animate) on the own character - Roblox replicates them to the
 	  others; the head follows the look up / down on everybody (attribute McPitch).
 	- Chat: T opens it. Messages go to Minecraft, Minecraft's chat comes in; "/..." runs a Minecraft command (the
@@ -53,7 +56,8 @@ local eyeHeight = Character.EYE_HEIGHT
 local fov = FOV
 local animation = nil
 local animatedCharacter = nil
-local sent = { sneak = nil :: boolean?, sprint = nil :: boolean?, pitch = 0, at = 0, flying = nil :: boolean? }
+local sent = { sneak = nil :: boolean?, sprint = nil :: boolean?, pitch = 0, at = 0, flying = nil :: boolean?,
+	swimming = nil :: boolean? }
 
 -- Roblox's own walking is off: Minecraft walks relative to where the player looks (the camera may face him)
 local controls = nil
@@ -174,6 +178,15 @@ local FLY_VERTICAL = 7.5 * BLOCK -- Space / Shift while flying: 7.5 blocks/s
 local SPRINT_JUMP = 0.2 * TICKS * BLOCK -- jumping while sprinting: + 0.2 blocks/tick forward
 local STEP_HEIGHT = 0.6 * BLOCK -- Minecraft walks up 0.6 blocks without jumping (slabs, trapdoors)
 local DOUBLE_TAP = 0.35 -- 7 ticks: Space twice = fly (creative)
+-- In water / lava, Minecraft's LivingEntity.travelInWater / travelInLava, per tick (blocks / tick):
+-- speed = (speed + keys x 0.02 x 0.98) x keep, up: (up + 0.04 with Space) x keep - gravity / 16 (lava: / 4)
+local FLUID = {
+	water = { keep = 0.8, sprintKeep = 0.9, vertical = 0.8, sink = 0.08 / 16 },
+	lava = { keep = 0.5, sprintKeep = 0.5, vertical = 0.5, sink = 0.08 / 4 },
+}
+local FLUID_ACCEL = 0.02 * 0.98
+local FLUID_UP = 0.04 -- Space held (jumpInLiquid)
+local OUT_OF_FLUID = 0.3 -- blocks / tick up: at an edge Minecraft jumps out (jumpOutOfFluid)
 
 local groundParams = RaycastParams.new()
 groundParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -324,6 +337,48 @@ end)
 local antiGravity: VectorForce? = nil
 local yawAlign: AlignOrientation? = nil
 
+local fluidHere: string? = nil -- the fluid the body is in (any part of the hitbox)
+local eyeFluid: string? = nil -- the fluid the eyes are in
+local swimming = false -- Minecraft's swimming: sprinting under water (lying in the water)
+
+-- Where the body / the eyes are (Minecraft: isInWater = the hitbox touches water, isUnderWater = the eyes)
+local function senseFluids(root: BasePart, eyeHeight: number)
+	local feet = root.Position - Vector3.new(0, Character.ROOT_HEIGHT, 0)
+	local body = nil
+	for _, height in ipairs({ 0.1, 0.9 * BLOCK, 1.7 * BLOCK }) do
+		body = body or Character.fluidAt(feet + Vector3.new(0, height, 0))
+	end
+	fluidHere = body
+	eyeFluid = Character.fluidAt(feet + Vector3.new(0, eyeHeight, 0))
+	if player:GetAttribute("McFluid") ~= body then
+		player:SetAttribute("McFluid", body) -- (MinecraftClient: no fall damage in water)
+	end
+	local underwater = eyeFluid == "water"
+	if player:GetAttribute("McEyeInWater") ~= underwater then
+		player:SetAttribute("McEyeInWater", underwater) -- (MinecraftClient: air bubbles, drowning)
+	end
+end
+
+-- Minecraft's jumpOutOfFluid: pushing against an edge, if the hitbox fits 0.6 blocks higher there - out you go
+local function canJumpOut(root: BasePart, move: Vector3): boolean
+	if move.Magnitude < 0.1 then
+		return false
+	end
+	local direction = Vector3.new(move.X, 0, move.Z).Unit
+	local width = Character.HITBOX.X - 0.1
+	local feet = root.Position - Vector3.new(0, Character.ROOT_HEIGHT, 0)
+	groundParams.FilterDescendantsInstances = { root.Parent :: Instance }
+	local ok, blocked, free = pcall(function()
+		local box = Vector3.new(width, Character.HITBOX.Y - 0.1, width)
+		local here = workspace:Blockcast(CFrame.new(feet + Vector3.new(0, 0.05 + box.Y / 2, 0)), box, direction * 0.3,
+			groundParams)
+		local higher = workspace:Blockcast(CFrame.new(feet + Vector3.new(0, 0.6 * BLOCK + 0.05 + box.Y / 2, 0)), box,
+			direction * 0.3, groundParams)
+		return here, higher
+	end)
+	return ok and blocked ~= nil and free == nil
+end
+
 local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: number)
 	local mode = gameMode()
 	local spectator = mode == "spectator"
@@ -355,21 +410,59 @@ local function walk(humanoid: Humanoid, root: BasePart, free: boolean, dt: numbe
 	if flying and not spectator and grounded and not space and os.clock() - flyingSince > 0.3 then
 		flying = false -- landed: Minecraft stops flying
 	end
-	sneaking = shift and not flying
+	sneaking = shift and not flying and fluidHere == nil
 	-- sprinting: while Ctrl is held or after W twice, only walking forward (and not while sneaking)
 	if ahead <= 0 or sneaking or free then
 		tapSprint = false
 	end
 	sprinting = not free and (keyDown(Enum.KeyCode.LeftControl, Enum.KeyCode.RightControl) or tapSprint) and ahead > 0
 		and not sneaking
+	-- swimming (Minecraft's updateSwimming): starts sprinting with the eyes under water, goes on while sprinting in
+	-- water (also at the surface); not in creative flight, not as a spectator
+	if swimming then
+		swimming = sprinting and fluidHere == "water" and not flying
+	else
+		swimming = sprinting and eyeFluid == "water" and fluidHere == "water" and not flying
+	end
 	humanoid.AutoRotate = false
 	pcall(function()
 		humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false) -- Minecraft climbs only ladders
 	end)
-	humanoid.PlatformStand = flying -- flying: no hip spring, no floor: the speed below is all there is
+	-- flying / in water or lava: no hip spring, no floor, no gravity - the speed below is all there is
+	local fluid = if flying or spectator then nil else fluidHere
+	humanoid.PlatformStand = flying or fluid ~= nil
 	if antiGravity then
 		antiGravity.Force = Vector3.new(0, root.AssemblyMass * workspace.Gravity, 0)
-		antiGravity.Enabled = flying
+		antiGravity.Enabled = flying or fluid ~= nil
+	end
+	if fluid then
+		local physics = FLUID[fluid] or FLUID.water
+		local steps = TICKS * dt
+		local keep = if sprinting or swimming then physics.sprintKeep else physics.keep
+		-- horizontal: the speed it settles at = accel x keep / (1 - keep) (water 1.6, sprinting / swimming 3.5 blocks/s)
+		local horizontal = steer(root, move * (FLUID_ACCEL * keep / (1 - keep) * TICKS * BLOCK), keep ^ steps)
+		local velocity = root.AssemblyLinearVelocity
+		local vy = velocity.Y / (TICKS * BLOCK) -- blocks per tick
+		-- Space: up (jumpInLiquid), Shift: down (LocalPlayer.goDownInWater) - 0.04 blocks per tick each
+		local up = (if space then FLUID_UP else 0) - (if shift then FLUID_UP else 0)
+		local sink = if sprinting or swimming then 0 else physics.sink
+		local target = (up * physics.vertical - sink) / (1 - physics.vertical)
+		vy = target + (vy - target) * physics.vertical ^ steps
+		if swimming then
+			-- Player.travel: swimming goes up / down where he looks (stronger looking down)
+			local lookY = -math.sin(pitch)
+			local strength = if lookY < -0.2 then 0.085 else 0.06
+			if lookY <= 0 or space or eyeFluid == "water" then
+				vy += (lookY - vy) * (1 - (1 - strength) ^ steps)
+			end
+		end
+		if space and fluid == "water" and canJumpOut(root, move) then
+			vy = math.max(vy, OUT_OF_FLUID)
+		end
+		root.AssemblyLinearVelocity = Vector3.new(horizontal.X, vy * TICKS * BLOCK, horizontal.Z)
+		humanoid:Move(Vector3.zero, false)
+		humanoid.Jump = false
+		return
 	end
 	if flying then
 		local speed = FLY_SPEED * (if sprinting then 2 else 1)
@@ -499,7 +592,9 @@ local function lookAll(dt: number)
 	for _, other in ipairs(Players:GetPlayers()) do
 		local character = other.Character
 		if character then
-			apply(character, if other == player then pitch else tonumber(character:GetAttribute("McPitch")) or 0)
+			local swims = if other == player then swimming else character:GetAttribute("McSwimming") == true
+			apply(character, if swims then Character.SWIM_HEAD_PITCH
+				elseif other == player then pitch else tonumber(character:GetAttribute("McPitch")) or 0)
 		end
 	end
 	local npcs = workspace:FindFirstChild("BridgeRemotePlayers")
@@ -507,7 +602,8 @@ local function lookAll(dt: number)
 		for _, folder in ipairs(npcs:GetChildren()) do
 			for _, model in ipairs(folder:GetChildren()) do
 				if model:IsA("Model") then
-					apply(model, tonumber(model:GetAttribute("McPitch")) or 0)
+					apply(model, if model:GetAttribute("McSwimming") == true then Character.SWIM_HEAD_PITCH
+						else tonumber(model:GetAttribute("McPitch")) or 0)
 				end
 			end
 		end
@@ -588,18 +684,22 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 		return
 	end
 	camera.CameraType = Enum.CameraType.Scriptable
+	senseFluids(root, eyeHeight)
 	walk(humanoid, root, free, dt)
 	if yawAlign and yawAlign.Parent == root and humanoid.Health > 0 then
 		yawAlign.CFrame = CFrame.Angles(0, yaw, 0)
 	end
 	if animation and animatedCharacter == character then
 		local velocity = root.AssemblyLinearVelocity
-		animation:update(dt, { speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude, sneak = sneaking })
+		animation:update(dt, { speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude, sneak = sneaking,
+			swim = swimming })
 	end
 	lookAll(dt)
 
-	-- the eyes (lower while sneaking, smoothly - like Minecraft)
-	eyeHeight += ((if sneaking then Character.SNEAK_EYE_HEIGHT else Character.EYE_HEIGHT) - eyeHeight) * (1 - math.exp(-dt * 12))
+	-- the eyes (lower while sneaking, low while swimming, smoothly - like Minecraft)
+	local wantedEye = if swimming then Character.SWIM_EYE_HEIGHT elseif sneaking then Character.SNEAK_EYE_HEIGHT
+		else Character.EYE_HEIGHT
+	eyeHeight += (wantedEye - eyeHeight) * (1 - math.exp(-dt * (if swimming then 4 else 12)))
 	local eye = root.Position + Vector3.new(0, eyeHeight - Character.ROOT_HEIGHT, 0)
 	local rotation = CFrame.Angles(0, yaw, 0) * CFrame.Angles(-pitch, 0, 0)
 	local look = rotation.LookVector
@@ -623,10 +723,11 @@ RunService:BindToRenderStep("MinecraftPlayer", Enum.RenderPriority.Camera.Value,
 
 	-- the others see it: sneaking / sprinting at once, the head pitch a few times per second
 	local now = os.clock()
-	if sneaking ~= sent.sneak or sprinting ~= sent.sprint or isFlying() ~= sent.flying
+	if sneaking ~= sent.sneak or sprinting ~= sent.sprint or isFlying() ~= sent.flying or swimming ~= sent.swimming
 		or (math.abs(pitch - sent.pitch) > 0.03 and now - sent.at > SEND_EVERY) then
 		sent.sneak, sent.sprint, sent.pitch, sent.at, sent.flying = sneaking, sprinting, pitch, now, isFlying()
-		moveRemote:FireServer(sneaking, sprinting, math.floor(pitch * 100 + 0.5) / 100, isFlying())
+		sent.swimming = swimming
+		moveRemote:FireServer(sneaking, sprinting, math.floor(pitch * 100 + 0.5) / 100, isFlying(), swimming)
 	end
 end)
 

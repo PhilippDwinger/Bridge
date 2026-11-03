@@ -351,6 +351,7 @@ local function onSnapshot(data, event)
 			npc.sampleAt = sampleAt
 			npc.yaw = tonumber(player.r) or 0
 			npc.crouch = player.c == true
+			npc.swim = player.sm == true -- swimming (sprinting under water: lying in the water)
 			npc.sprint = player.sp == true
 			npc.rootHeight = tonumber(player.f)
 			npc.pitch = tonumber(player.hp)
@@ -380,6 +381,7 @@ local function onSnapshot(data, event)
 				-- the client scripts show the pose (crouching) - attributes replicate to every player
 				npc.model:SetAttribute("McSneak", npc.crouch)
 				npc.model:SetAttribute("McSprint", npc.sprint)
+				npc.model:SetAttribute("McSwimming", npc.swim)
 				npc.model:SetAttribute("McPitch", npc.pitch)
 				-- his game mode (Minecraft: spectators are only seen by spectators - the game's clients decide)
 				npc.model:SetAttribute("McGameMode", if type(player.gm) == "string" then player.gm else nil)
@@ -407,7 +409,7 @@ end
 
 local function animate(npc, dt)
 	if npc.controller then
-		npc.controller:update(dt, { speed = npc.speed, sneak = npc.crouch })
+		npc.controller:update(dt, { speed = npc.speed, sneak = npc.crouch, swim = npc.swim })
 		-- still swinging (a Minecraft player keeps breaking a block): again every 6 ticks, like Minecraft shows it
 		if npc.swung and os.clock() - (npc.swungAt or 0) >= 0.3 then
 			npc.swungAt = os.clock()
@@ -488,6 +490,7 @@ local function snapshot()
 				c = character:GetAttribute("McSneak") == true, -- sneaking / sprinting (set by a game script, e.g. MinecraftWorld)
 				sp = character:GetAttribute("McSprint") == true,
 				sw = character:GetAttribute("McSwing") == true,
+				sm = character:GetAttribute("McSwimming") == true, -- swimming (set by a game script, e.g. MinecraftWorld)
 				f = round(rootHeightOf(humanoid, rootPart), 0.01), -- root part above the feet: the others put us on the ground
 				hp = round(tonumber(character:GetAttribute("McPitch")) or 0, 0.01), -- head pitch (radians, + = looking down)
 			}
@@ -495,7 +498,7 @@ local function snapshot()
 			-- what counts as "moved": 5 cm, a few degrees, other velocity / air state
 			table.insert(parts, table.concat({ entry.u, steps(position.X, 0.05), steps(position.Y, 0.05),
 				steps(position.Z, 0.05), steps(entry.r, 0.05), steps(velocity.X, 0.5), steps(velocity.Y, 0.5),
-				steps(velocity.Z, 0.5), tostring(entry.a), tostring(entry.c), tostring(entry.sp), tostring(entry.sw),
+				steps(velocity.Z, 0.5), tostring(entry.a), tostring(entry.c), tostring(entry.sp), tostring(entry.sw), tostring(entry.sm),
 				steps(entry.hp, 0.05) }, ":"))
 		end
 	end

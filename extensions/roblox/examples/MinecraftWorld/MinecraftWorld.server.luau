@@ -29,6 +29,9 @@
 	     (topic mcworld.chat) -> everybody's chat
 	  9. items lying around (topic mcworld.items): an invisible part per item in workspace.MinecraftItems (attributes
 	     McItem, McCount), the clients draw it like Minecraft; picked up in Minecraft by whoever is first
+	 10. day, night, weather (topic mcworld.sky): Minecraft's own sky values (time, sun / moon, colours, light, rain /
+	     snow) as attributes of Lighting ("Mc..."), the clients draw the sky like Minecraft (MinecraftSky); water and
+	     lava as high as in Minecraft (McFluid on their parts: the clients swim / lose air there), Drown = air is out
 
 	Needs in ServerStorage: Bridge, MinecraftWorldConfig, MinecraftWorldClient (shared Bridge client), PlayerSyncConfig.
 ]]
@@ -59,6 +62,7 @@ local CHAT = Config.WorldPrefix .. ".chat"
 local COMMAND = Config.WorldPrefix .. ".command"
 local PLAYER = Config.WorldPrefix .. ".player"
 local ITEMS = Config.WorldPrefix .. ".items"
+local SKY = Config.WorldPrefix .. ".sky"
 local CHAT_PER_5S = 6 -- messages / commands per player in 5 seconds
 local MAX_CHAT = 256 -- characters, like Minecraft
 local MAX_HEALTH = 20 -- Minecraft: 10 hearts
@@ -141,6 +145,7 @@ local swingRemote = remote("RemoteEvent", "Swing") -- client: hit into the air (
 -- client: (op, ...) "click" | "close" | "creative" | "pick" | "drop" | "state"; server -> client: ("state", state)
 local inventoryRemote = remote("RemoteEvent", "Inventory")
 local miningSpeed = remote("RemoteFunction", "MiningSpeed") -- client asks: (x, y, z, slot, ground) -> progress per tick
+local drownRemote = remote("RemoteEvent", "Drown") -- client: the air under water is out (Minecraft: 2 damage)
 
 local function log(...)
 	print("[MinecraftWorld]", ...)
@@ -296,11 +301,33 @@ local function cellIndex(x, y, z) -- 1-based, order y, z, x (as the mod sends it
 	return y * 256 + z * 16 + x + 1
 end
 
+local TOP = "|top" -- the top of water / lava: lower than a block (Minecraft: amount / 9) - see fluidTop
+
+-- Water / lava with no same fluid above: its own key (the part is lower, like Minecraft's fluid surface)
+local function fluidTop(section, above, i, key)
+	local look = world.assets and world.assets.blocks[key]
+	if not look or not look.fluid then
+		return key
+	end
+	local aboveName
+	if i + 256 <= 4096 then
+		aboveName = section.palette[section.cells[i + 256] + 1]
+	elseif above then
+		aboveName = above.palette[above.cells[i + 256 - 4096] + 1]
+	end
+	local aboveLook = aboveName and world.assets.blocks[aboveName]
+	if aboveLook and aboveLook.fluid == look.fluid then
+		return key -- (water above: full height)
+	end
+	return key .. TOP
+end
+
 --- Greedy meshing of one 16x16x16 section: boxes {x, y, z, w, h, d} of blocks with the same look.
-local function meshSection(section)
+local function meshSection(section, above)
 	local keys = table.create(4096)
 	for i = 1, 4096 do
-		keys[i] = renderKey(section.palette[section.cells[i] + 1])
+		local key = renderKey(section.palette[section.cells[i] + 1])
+		keys[i] = if key and key ~= "placeholder" then fluidTop(section, above, i, key) else key
 	end
 	local done = {}
 	local boxes = {}
@@ -377,12 +404,27 @@ local function boxId(box)
 	return string.format("%s|%d|%d|%d|%d|%d|%d", box.key, box.x, box.y, box.z, box.w, box.h, box.d)
 end
 
+-- Light like Minecraft's block light (torch 14, glowstone / lava 15): a PointLight reaching that many blocks,
+-- in the warm colour of Minecraft's block light
+local function addLight(part, light, scale)
+	if type(light) ~= "number" or light <= 0 then
+		return
+	end
+	local point = Instance.new("PointLight")
+	point.Name = "McLight"
+	point.Range = math.min(60, light * scale)
+	point.Brightness = 0.6 + light / 15 * 1.2
+	point.Color = Color3.fromRGB(255, 216, 140) -- Minecraft: block_light_tint #FFD88C
+	point.Shadows = true
+	point.Parent = part
+end
+
 local function renderSection(chunk, sectionY, section, force)
 	local old = section.parts
 	local kept = {}
 	local scale = world.info.studsPerBlock
 	local minY = world.info.minY
-	for _, box in ipairs(meshSection(section)) do
+	for _, box in ipairs(meshSection(section, chunk.sections[sectionY + 1])) do
 		local id = boxId(box)
 		local existing = if force then nil else old[id]
 		if existing and existing.Parent then
@@ -393,10 +435,20 @@ local function renderSection(chunk, sectionY, section, force)
 		local blockX = chunk.x * 16 + box.x
 		local blockY = sectionY * 16 + box.y
 		local blockZ = chunk.z * 16 + box.z
-		local look = world.assets and world.assets.blocks[box.key]
+		local top = string.sub(box.key, -#TOP) == TOP
+		local name = if top then string.sub(box.key, 1, -#TOP - 1) else box.key
+		local look = world.assets and world.assets.blocks[name]
 		local corner = Vector3.new(blockX * scale, (blockY - minY) * scale, blockZ * scale)
 		if look and look.cube ~= true then
-			local model = buildModel(box.key, look, corner, scale, Vector3.new(blockX, blockY, blockZ))
+			local model = buildModel(name, look, corner, scale, Vector3.new(blockX, blockY, blockZ))
+			if look.light then
+				for _, piece in ipairs(model:GetChildren()) do
+					if piece:IsA("BasePart") then
+						addLight(piece, look.light, scale) -- (one light per block, in its first part)
+						break
+					end
+				end
+			end
 			model.Parent = chunk.folder
 			kept[id] = model
 			continue
@@ -409,36 +461,48 @@ local function renderSection(chunk, sectionY, section, force)
 		part.Color = Config.BlockColor or Color3.fromRGB(163, 162, 165)
 		part.TopSurface = Enum.SurfaceType.Smooth
 		part.BottomSurface = Enum.SurfaceType.Smooth
-		part.Size = Vector3.new(box.w * scale, box.h * scale, box.d * scale)
+		-- the top of water / lava: Minecraft's height (8/9 of a block for a source, lower for flowing water)
+		local height = box.h
+		if top and look and type(look.fluidHeight) == "number" then
+			height = box.h - 1 + math.clamp(look.fluidHeight / 16, 0.05, 1)
+		end
+		part.Size = Vector3.new(box.w * scale, height * scale, box.d * scale)
 		part.CFrame = CFrame.new(
 			(blockX + box.w / 2) * scale,
-			(blockY - minY + box.h / 2) * scale,
+			(blockY - minY + height / 2) * scale,
 			(blockZ + box.d / 2) * scale
 		)
 		if look then
 			-- Textured cube: the colour shows until the client has made the pictures; one tile = one block.
 			-- Glass / leaves: the part is invisible, only the pictures (with their holes) show.
-			part.Name = box.key
+			part.Name = name
 			part.Color = Color3.fromRGB(look.color[1], look.color[2], look.color[3])
 			if look.transparent then
 				part.Transparency = 1
 				part.CastShadow = false
 			end
 			if look.fluid then
-				-- water / lava: see-through, you go through it, nobody aims at it
+				-- water / lava: see-through, you go through it, nobody aims at it; the clients find it by McFluid
+				-- (swimming, air under water) - the part is as high as the fluid
 				part.CanCollide = false
 				part.CanQuery = false
 				part.CanTouch = false
+				part.CastShadow = false
+				part:SetAttribute("McFluid", look.fluid)
 			end
 			for _, face in ipairs(FACES) do
-				pictureOn(part, face[1], look.faces[face[2]], scale, scale)
+				local key = look.faces[face[2]]
+				local texture = world.assets.textures[key]
+				local span = if texture and texture.span then texture.span else 1
+				pictureOn(part, face[1], key, scale * span, scale * span)
 			end
+			addLight(part, look.light, scale)
 			if look.boxes then
 				-- a cube with its own collision (soul sand): the picture does not collide, its boxes do
 				part.CanCollide = false
 				part.CanQuery = look.outline == nil
 				local holder = Instance.new("Model")
-				holder.Name = box.key
+				holder.Name = name
 				part.Parent = holder
 				boxParts(holder, look.boxes, corner, scale / 16, "Collision", true, true, look.outline ~= nil)
 				if look.outline then
@@ -490,6 +554,7 @@ local askScheduled = false
 local mergeBlocks -- below (adds an assets answer)
 local afterNewPictures -- below (re-render + tell the clients)
 local loadItemIcons -- below
+local loadSkyPictures -- below
 local noticeItems -- below
 
 local function askLater()
@@ -729,10 +794,21 @@ local function decodeTexture(texture)
 	local ok, raw = pcall(function()
 		return Bridge.Inflate(Bridge.Base64Decode(texture.rgba))
 	end)
-	if not ok or #raw ~= texture.w * texture.h * 4 then
+	-- animated (water, lava): h = one frame, the pixels hold all frames one below the other
+	local frames = if type(texture.frames) == "number" and texture.frames > 1 then math.floor(texture.frames) else 1
+	if not ok or #raw ~= texture.w * texture.h * 4 * frames then
 		return nil
 	end
-	return { w = texture.w, h = texture.h, pixels = buffer.fromstring(raw) }
+	local decoded = { w = texture.w, h = texture.h, pixels = buffer.fromstring(raw) }
+	if frames > 1 then
+		decoded.frames = frames
+		decoded.frametime = if type(texture.frametime) == "number" then math.max(1, texture.frametime) else 1
+		decoded.order = if type(texture.order) == "table" then texture.order else nil
+	end
+	if type(texture.span) == "number" and texture.span > 0 then
+		decoded.span = texture.span -- (one picture covers this many blocks: water / lava flowing)
+	end
+	return decoded
 end
 
 -- Adds textures + blocks + items of an assets answer. Blocks whose pictures did not all arrive count as "other" (grey).
@@ -885,6 +961,37 @@ function loadItemIcons(generation)
 	end
 	log(string.format("item icons from Minecraft: %d", count(assets.itemsById)))
 	afterNewPictures()
+end
+
+-- The pictures of the sky (sun, the 8 moon phases, rain, snow, clouds) - also after the world, like the item icons
+function loadSkyPictures(generation)
+	local assets = world.assets
+	if not assets or not assets.available then
+		return
+	end
+	for _ = 1, 3 do
+		local ok, result = pcall(client.Call, client, ASSETS, { sky = true }, { Timeout = 45 })
+		if generation ~= world.generation or world.assets ~= assets then
+			return
+		end
+		if ok and type(result) == "table" then
+			local added = 0
+			for key, texture in pairs(type(result.textures) == "table" and result.textures or {}) do
+				assets.textures[key] = decodeTexture(texture)
+				added += 1
+			end
+			for name, key in pairs(type(result.gui) == "table" and result.gui or {}) do
+				if assets.textures[key] then
+					assets.gui[name] = key
+				end
+			end
+			log(string.format("sky pictures from Minecraft: %d", added))
+			afterNewPictures()
+			return
+		end
+		task.wait(2)
+	end
+	log("sky pictures: Minecraft did not answer - the sky without its pictures")
 end
 
 function afterNewPictures()
@@ -1047,6 +1154,7 @@ local function loadWorld()
 	-- The pictures first (small): the chunks are then built with textures right away
 	loadAssets(generation)
 	task.spawn(loadItemIcons, generation) -- all item icons at the same time as the world (the clients get them at once)
+	task.spawn(loadSkyPictures, generation)
 	if generation ~= world.generation then
 		return
 	end
@@ -1101,6 +1209,10 @@ local function applyBlocks(blocks)
 				end
 				section.cells[cellIndex(x - chunk.x * 16, y - sectionY * 16, z - chunk.z * 16)] = paletteIndex - 1
 				dirty[section] = { chunk, sectionY }
+				local below = if y - sectionY * 16 == 0 then chunk.sections[sectionY - 1] else nil
+				if below then
+					dirty[below] = { chunk, sectionY - 1 } -- (water there may now have water above it - or not)
+				end
 			end
 		end
 	end
@@ -1381,7 +1493,9 @@ local function onEdit(player, action, x, y, z, info)
 	swingArm(player)
 	local hit = typeof(info.hit) == "Vector3" and info.hit or center
 	local slot = if isWhole(info.slot) and info.slot >= 0 and info.slot <= 8 then info.slot else nil
-	if action == "use" then
+	-- right click into the air (no block in reach): only the item is used - a bucket, a snowball (x, y, z = his eyes)
+	local air = action == "use" and info.air == true
+	if action == "use" and not air then
 		guessPlacement(player, x, y, z, info.face, slot, character ~= nil and character:GetAttribute("McSneak") == true)
 	end
 	task.spawn(function()
@@ -1399,6 +1513,7 @@ local function onEdit(player, action, x, y, z, info)
 			slot = slot,
 			sneak = character ~= nil and character:GetAttribute("McSneak") == true,
 			ground = info.ground ~= false,
+			air = if air then true else nil,
 		}, { Timeout = 10 })
 		if ok and type(result) == "table" then
 			if type(result.blocks) == "table" then
@@ -1564,6 +1679,29 @@ fallRemote.OnServerEvent:Connect(function(player, blocks)
 	end
 end)
 
+-- Minecraft: the air under water is out -> 2 damage (every second, the client counts the air like Minecraft). Only
+-- when his head (or, swimming, his body) really is in water here.
+local drownedAt = {}
+drownRemote.OnServerEvent:Connect(function(player)
+	local now = os.clock()
+	local info = world.info
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if now - (drownedAt[player] or 0) < 0.9 or not info or not root then
+		return
+	end
+	local scale = info.studsPerBlock
+	local feetY = (root.Position.Y - Character.ROOT_HEIGHT) / scale + info.minY
+	local x, z = math.floor(root.Position.X / scale), math.floor(root.Position.Z / scale)
+	for _, eye in ipairs({ 1.62, 0.4 }) do -- (standing / swimming: Minecraft's eye heights)
+		if baseName(blockAt(x, math.floor(feetY + eye), z)) == "minecraft:water" then
+			drownedAt[player] = now
+			hurt(player, 2, nil, "drown")
+			return
+		end
+	end
+end)
+
 -- A Roblox player hits a Minecraft player's NPC: Minecraft does the damage (with knockback from our mannequin)
 local attackedAt = {}
 attackRemote.OnServerEvent:Connect(function(player, model)
@@ -1627,10 +1765,11 @@ end)
 -- endregion
 
 -- Sneaking / sprinting / flying: attributes on the character - the client scripts show the pose, PlayerSync sends it
-moveRemote.OnServerEvent:Connect(function(player, sneak, sprint, pitch, flying)
+moveRemote.OnServerEvent:Connect(function(player, sneak, sprint, pitch, flying, swimming)
 	local character = player.Character
 	if character then
 		local mode = gameModeOf(player)
+		character:SetAttribute("McSwimming", swimming == true and mode ~= "spectator") -- (PlayerSync: "sm")
 		character:SetAttribute("McSneak", sneak == true)
 		character:SetAttribute("McSprint", sprint == true and sneak ~= true)
 		character:SetAttribute("McFlying", flying == true and (mode == "creative" or mode == "spectator"))
@@ -1812,6 +1951,51 @@ client:Subscribe(nil, ITEMS, function(data)
 		end
 	end
 	noticeItems(newIds)
+end, { Latest = true })
+-- endregion
+
+-- region day, night, weather (Minecraft's own sky values -> attributes of Lighting; the clients draw it: MinecraftSky)
+local Lighting = game:GetService("Lighting")
+local function color3(value, fallback)
+	if type(value) == "table" and type(value[1]) == "number" and type(value[2]) == "number" and type(value[3]) == "number" then
+		return Color3.fromRGB(math.clamp(value[1], 0, 255), math.clamp(value[2], 0, 255), math.clamp(value[3], 0, 255))
+	end
+	return fallback
+end
+local function alpha(value)
+	return if type(value) == "table" and type(value[4]) == "number" then math.clamp(value[4] / 255, 0, 1) else 0
+end
+client:Subscribe(nil, SKY, function(data)
+	if type(data) ~= "table" or type(data.t) ~= "number" then
+		return
+	end
+	local scale = world.info and world.info.studsPerBlock or 3
+	local minY = world.info and world.info.minY or -64
+	local values = {
+		McTime = data.t, McTimeRate = tonumber(data.rate) or 20,
+		McSkyColor = color3(data.sky, Color3.fromRGB(120, 167, 255)),
+		McFogColor = color3(data.fog, Color3.fromRGB(192, 216, 255)),
+		McWaterFogColor = color3(data.waterFog, Color3.fromRGB(5, 5, 51)),
+		McSkyLightColor = color3(data.skyLightColor, Color3.new(1, 1, 1)),
+		McBlockLightColor = color3(data.blockLight, Color3.fromRGB(255, 216, 140)),
+		McAmbientColor = color3(data.ambient, Color3.fromRGB(10, 10, 10)),
+		McSunriseColor = color3(data.sunrise, Color3.new(1, 0.8, 0.2)), McSunriseAlpha = alpha(data.sunrise),
+		McCloudColor = color3(data.cloud, Color3.new(1, 1, 1)), McCloudAlpha = alpha(data.cloud),
+		McSunAngle = tonumber(data.sun) or 0, McMoonAngle = tonumber(data.moon) or 180,
+		McStarAngle = tonumber(data.star) or 0, McStarBrightness = tonumber(data.stars) or 0,
+		McMoonPhase = if type(data.phase) == "string" then data.phase else "full_moon",
+		McSkyLight = tonumber(data.skyLight) or 1,
+		McFogEnd = (tonumber(data.fogEnd) or 1024) * scale, McWaterFogEnd = (tonumber(data.waterFogEnd) or 96) * scale,
+		McCloudHeight = ((tonumber(data.cloudHeight) or 192.33) - minY) * scale,
+		McRain = tonumber(data.rain) or 0, McThunder = tonumber(data.thunder) or 0,
+		McPrecipitation = if type(data.precipitation) == "string" then data.precipitation else "none",
+		McWaterColor = color3(data.waterColor, Color3.fromRGB(63, 118, 228)),
+	}
+	for name, value in pairs(values) do
+		if Lighting:GetAttribute(name) ~= value then
+			Lighting:SetAttribute(name, value)
+		end
+	end
 end, { Latest = true })
 -- endregion
 
