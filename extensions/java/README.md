@@ -21,7 +21,7 @@ Was die Bibliothek automatisch macht (wie das Roblox-Modul):
 ## Einbauen
 
 Die drei Dateien in `src/main/java/io/github/philippdwinger/bridge/` (`BridgeClient`, `Json`, `BridgeException`)
-gehören in dein Projekt. Mit Gradle direkt aus diesem Ordner, ohne Kopie (so macht es die Minecraft-Mod):
+gehören in dein Projekt. Mit Gradle direkt aus diesem Ordner, ohne Kopie:
 
 ```groovy
 sourceSets {

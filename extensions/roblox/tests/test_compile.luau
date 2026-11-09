@@ -1,5 +1,5 @@
 --[[
-	Every Luau script of the examples compiles (like Roblox does it when the script starts): catches what the type
+	Every Luau script of the extension compiles (like Roblox does it when the script starts): catches what the type
 	check does not - above all Luau's limit of 200 locals in one function (the main chunk of a big script).
 	lune run test_compile.luau
 ]]
@@ -24,7 +24,7 @@ local function walk(dir: string)
 		end
 	end
 end
-walk("../examples")
+walk("../src")
 print(string.format("  %s  %d scripts compile%s", if failures == 0 then "OK  " else "FAIL", count,
 	if failures == 0 then "" else " (" .. failures .. " do not)"))
 process.exit(if failures == 0 then 0 else 1)
