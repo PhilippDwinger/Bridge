@@ -60,6 +60,14 @@ no fixed default password).
 `public_url` is the address clients and other servers use to reach this server. It is part of every client IP and
 realm address, so it must be the real public URL.
 
+### Reserved path `/site`
+
+`/site` (and everything below it) is reserved for a **website next to the server**: a host app such as BridgeControll
+can serve a website under `<server url>/site/` on the same public URL (Tailscale Funnel: `/` → Bridge, `/site` → the
+website). No Bridge route may ever start with `/site` – the server refuses to start if one does
+(`bridge/server/routes/site.py`). Without a website, Bridge answers `/site/` itself with a small "no website assigned"
+page. The admin dashboard (`/admin`) has a **Website** button that opens `/site/`.
+
 ## Addresses
 
 ```

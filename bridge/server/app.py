@@ -23,6 +23,7 @@ from bridge.server.routes.messages import Router as MessageRouter
 from bridge.server.routes.realms import Router as RealmRouter
 from bridge.server.routes.dashboard import Router as DashboardRouter
 from bridge.server.routes.s2s import Router as S2SRouter
+from bridge.server.routes.site import Router as SiteRouter, check_reserved as check_site_reserved
 from bridge.server.routes.status import Router as StatusRouter
 
 
@@ -100,6 +101,11 @@ def create_app(bridge_instance) -> FastAPI:
     app.include_router(FriendsRouter)
     app.include_router(S2SRouter)
     app.include_router(FriendsS2SRouter)
+    # /site belongs to the website a host app (BridgeControll) mounts next to this server - see routes/site.py
+    app.include_router(SiteRouter)
+    check_site_reserved(app, StatusRouter, DashboardRouter, ClientRouter, MessageRouter, RealmRouter, CommandRouter,
+                        ConversationRouter, ExpressRouter, AgentRouter, AdminRouter, FriendsRouter, S2SRouter,
+                        FriendsS2SRouter)
     for router in (StatusRouter, DashboardRouter, ClientRouter, MessageRouter, RealmRouter, CommandRouter, ConversationRouter,
                    ExpressRouter, AgentRouter, AdminRouter, FriendsRouter, S2SRouter, FriendsS2SRouter):
         metrics.known_paths.update(getattr(route, "path", "") for route in router.routes)

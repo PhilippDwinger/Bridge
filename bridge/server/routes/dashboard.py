@@ -48,6 +48,7 @@ _PAGE = r"""<!doctype html>
   .btn{height:44px;padding:0 18px;border-radius:11px;border:1px solid transparent;background:var(--blue);
     color:#fff;font-size:14.5px;font-weight:600;display:inline-flex;align-items:center;gap:8px;justify-content:center;white-space:nowrap;}
   .btn:hover{background:#2a5be6;}
+  a.btn{text-decoration:none;} a.btn:hover{color:#fff;}
   .btn--ghost{background:transparent;border-color:var(--line);color:var(--text2);}
   .btn--ghost:hover{background:var(--blue-50);color:var(--blue-text);border-color:var(--blue);}
   .btn--danger{background:var(--err);} .btn--danger:hover{background:#8C1C25;}
@@ -121,6 +122,7 @@ _PAGE = r"""<!doctype html>
       <div class="sub mono" id="srvUrl"></div>
     </div>
     <span class="grow"></span>
+    <a class="btn" id="siteBtn" href="/site/" target="_blank" rel="noopener" title="Die Website dieses Servers (/site/) in neuem Tab">Website &#8599;</a>
     <button class="btn btn--ghost" id="refreshBtn" type="button">Aktualisieren</button>
     <button class="btn btn--ghost" id="logoutBtn" type="button">Abmelden</button>
   </div>
