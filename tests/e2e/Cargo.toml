@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 bridge-core.workspace = true
 bridge-guard.workspace = true
+bridge-net.workspace = true
 bridge-node.workspace = true
 bridge-sdk.workspace = true
 bridge-transport.workspace = true

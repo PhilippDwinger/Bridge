@@ -2,14 +2,22 @@
 //!
 //! Ties the compartments together: `transport` delivers requests, `guard` decides what may pass, `core` checks every
 //! object, `store` keeps mailboxes. Phase 2 endpoints (docs/04 §7): info, challenge, login, send, poll, ack, card.
+//! Phase 3 (docs/06): a node can belong to one BridgeNet ([`NetConfig`]) - then it follows the network's log, takes
+//! the roles the log gives it (log operator, witness, gateway) and relays envelopes between gateways. A node
+//! without a network behaves exactly as in phase 2.
+//! LAN ([`LanConfig`], docs/06 §2): the same node also listens with TLS and its own certificate (fingerprint in its
+//! card), announces itself via mDNS and reaches other nodes of its network over the pinned LAN path first.
 //! All state hangs on one [`Node`] (no global state, S3) - tests run several nodes in one process.
 //!
 //! What a node knows about a message: network, from, to, time, kind, size. Never the content (Z1).
 //!
 //! Layering (docs/03_ARCHITEKTUR.md): uses all crates below it.
 
+pub mod admin;
 mod error;
 pub mod keyfile;
+mod lan;
+mod network;
 mod sessions;
 
 use std::collections::{BTreeSet, HashMap};
@@ -22,14 +30,17 @@ use bridge_core::json::parse_strict;
 use bridge_core::{Draft, Envelope, Id, Identity, KeyCard, Puzzle, Role, SignedRequest, Statement};
 use bridge_guard::{Guard, GuardError, Limits};
 use bridge_store::{Delivered, Delivery, Store};
-use bridge_transport::{Handler, Method, Request, Response, RunningServer, ServerConfig};
+use bridge_transport::{Handler, LanAnnouncer, Method, Request, Response, RunningServer, ServerConfig, TlsIdentity};
 use rand_core::{OsRng, RngCore};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+pub use bridge_transport::{Discovery, LanHints, LanPeer};
 pub use error::{NodeError, NodeResult};
+pub use lan::LanConfig;
+pub use network::{LanPin, MAX_BOOTSTRAP, MEMBER_LIFETIME_MS, NetConfig, NetStatus, NetTiming};
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
 pub const COMPARTMENT: &str = "bridge-node";
@@ -67,12 +78,21 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     /// Display name on the node's key card.
     pub name: Option<String>,
-    /// Network this node serves (phase 2: default = its own ID, a single-node network).
+    /// Network this node serves (phase 2: default = its own ID, a single-node network). Ignored when
+    /// [`NodeConfig::network`] is set.
     pub net: Option<Id>,
+    /// Membership in a BridgeNet (phase 3). `None`: the membership stored in the data folder, if any.
+    pub network: Option<NetConfig>,
+    /// Public addresses of this node for its key card (1-4). Empty: the ones stored in the data folder; for a node
+    /// of a network without any, `http://<listen address>`.
+    pub urls: Vec<String>,
     /// Guard limits.
     pub limits: Limits,
-    /// Transport limits.
+    /// Transport limits (the LAN listener has the same ones, without trusted proxies).
     pub server: ServerConfig,
+    /// LAN access (`None`: Internet only). With it, the node's card carries the fingerprint of its TLS certificate
+    /// (`tls`, kept in `node-tls.pem` in the data folder).
+    pub lan: Option<LanConfig>,
     /// Session lifetime (ms).
     pub session_lifetime_ms: i64,
     /// Sessions per identity.
@@ -89,8 +109,11 @@ impl NodeConfig {
             data_dir: data_dir.into(),
             name: None,
             net: None,
+            network: None,
+            urls: Vec::new(),
             limits: Limits::default(),
             server: ServerConfig::default(),
+            lan: None,
             session_lifetime_ms: 60 * 60 * 1000,
             sessions_per_identity: 8,
             clock: Arc::new(SystemClock),
@@ -107,6 +130,9 @@ struct Inner {
     sessions: Mutex<sessions::Sessions>,
     waiters: Mutex<HashMap<Id, Weak<Notify>>>,
     clock: Arc<dyn Clock>,
+    network: Option<network::SharedNet>,
+    /// Where other nodes were seen in the LAN (only with LAN on).
+    lan: Option<lan::Directory>,
 }
 
 /// A node (cheap to clone; all clones are the same node).
@@ -119,7 +145,9 @@ pub struct Node {
 pub struct RunningNode {
     node: Node,
     server: RunningServer,
-    janitor: JoinHandle<()>,
+    lan: Option<RunningServer>,
+    announcer: Option<LanAnnouncer>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl RunningNode {
@@ -128,15 +156,41 @@ impl RunningNode {
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.server.local_addr()
     }
+    /// Address of the LAN listener (TLS), if LAN is on.
+    #[must_use]
+    pub fn lan_addr(&self) -> Option<std::net::SocketAddr> {
+        self.lan.as_ref().map(RunningServer::local_addr)
+    }
+    /// Whether the node is announced in the LAN (mDNS). `false` with LAN on means the announcement failed (e.g.
+    /// no multicast): the LAN listener works, but others only find it with the address.
+    #[must_use]
+    pub fn lan_announced(&self) -> bool {
+        self.announcer.is_some()
+    }
     /// The node's key card.
     #[must_use]
     pub fn card(&self) -> &KeyCard {
         &self.node.inner.card
     }
-    /// Stops the node (running requests may finish).
+    /// What the node knows about its network (`None` for a node without a network).
+    #[must_use]
+    pub fn net_status(&self) -> Option<NetStatus> {
+        self.node.net_status()
+    }
+    /// Stops the node: background duties, the mDNS announcement (with a goodbye), then both listeners (running
+    /// requests may finish).
     pub async fn shutdown(self) {
-        self.janitor.abort();
-        self.server.shutdown().await;
+        let Self { server, lan, announcer, tasks, .. } = self;
+        for task in &tasks {
+            task.abort();
+        }
+        drop(announcer);
+        match lan {
+            Some(lan) => {
+                tokio::join!(server.shutdown(), lan.shutdown());
+            }
+            None => server.shutdown().await,
+        }
     }
 }
 
@@ -144,18 +198,40 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Opens the data folder and starts serving on `listener`.
+/// Opens the data folder and starts serving on `listener` (and, with [`NodeConfig::lan`], on the LAN listener).
 pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningNode, String> {
     std::fs::create_dir_all(&config.data_dir).map_err(|e| format!("data folder: {e}"))?;
     let identity = keyfile::load_or_create(&config.data_dir)?;
+    let tls = match &config.lan {
+        Some(_) => Some(keyfile::load_or_create_tls(&config.data_dir)?),
+        None => None,
+    };
     let now = config.clock.now_ms();
-    let card = identity.key_card(Role::Node, config.name.as_deref(), now).map_err(|e| format!("key card: {e}"))?;
     let path = config.data_dir.join(DB_FILE);
     let store = tokio::task::spawn_blocking(move || Store::open(&path))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("database: {e}"))?;
-    let net = config.net.clone().unwrap_or_else(|| identity.id().clone());
+    let local = listener.local_addr().map_err(|e| e.to_string())?;
+    let (network_config, urls) = resolve_network(&store, &config, local)?;
+    let card = identity
+        .key_card_with(Role::Node, config.name.as_deref(), &urls, tls.as_ref().map(TlsIdentity::fingerprint), now)
+        .map_err(|e| format!("key card: {e}"))?;
+    let network = match &network_config {
+        Some(network_config) => Some(Arc::new(network::NetRuntime::open(&store, identity.id(), network_config, now)?)),
+        None => None,
+    };
+    let net = match &network_config {
+        Some(network_config) => network_config.net.clone(),
+        None => config.net.clone().unwrap_or_else(|| identity.id().clone()),
+    };
+    // Bound before anything runs: a LAN port in use stops the start instead of leaving half a node behind.
+    let lan_listener = match &config.lan {
+        Some(lan) => Some(
+            TcpListener::bind(lan.listen).await.map_err(|e| format!("LAN: cannot listen on {}: {e}", lan.listen))?,
+        ),
+        None => None,
+    };
     let node = Node {
         inner: Arc::new(Inner {
             sessions: Mutex::new(sessions::Sessions::new(
@@ -170,12 +246,78 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
             identity,
             card,
             net,
+            network,
+            lan: config.lan.as_ref().map(lan::Directory::new),
         }),
     };
-    let server = bridge_transport::serve(listener, config.server, Arc::new(node.clone())).map_err(|e| e.to_string())?;
-    let janitor = tokio::spawn(janitor(node.clone()));
-    tracing::info!(node = %node.inner.identity.id(), net = %node.inner.net, addr = %server.local_addr(), "node started");
-    Ok(RunningNode { node, server, janitor })
+    let lan_server = match (lan_listener, &tls) {
+        (Some(listener), Some(tls)) => Some(
+            bridge_transport::serve_tls(listener, lan::server_config(&config.server), Arc::new(node.clone()), tls)
+                .map_err(|e| format!("LAN: {e}"))?,
+        ),
+        _ => None,
+    };
+    let server = match bridge_transport::serve(listener, config.server, Arc::new(node.clone())) {
+        Ok(server) => server,
+        Err(error) => {
+            if let Some(lan_server) = lan_server {
+                lan_server.shutdown().await;
+            }
+            return Err(error.to_string());
+        }
+    };
+    let announcer = match (&config.lan, &lan_server) {
+        (Some(lan), Some(lan_server)) if lan.announce => node.announce(lan_server.local_addr().port()),
+        _ => None,
+    };
+    let mut tasks = vec![tokio::spawn(janitor(node.clone()))];
+    tasks.extend(network::spawn(&node));
+    if node.network().is_some() && node.inner.lan.as_ref().is_some_and(lan::Directory::is_on) {
+        tasks.push(tokio::spawn(lan::discover(node.clone())));
+    }
+    node.check_sealed_pin();
+    tracing::info!(
+        node = %node.inner.identity.id(),
+        net = %node.inner.net,
+        addr = %server.local_addr(),
+        lan = ?lan_server.as_ref().map(RunningServer::local_addr),
+        "node started"
+    );
+    Ok(RunningNode { node, server, lan: lan_server, announcer, tasks })
+}
+
+/// Which network the node belongs to (configured, or stored in the data folder) and its addresses. A configured
+/// membership is stored, so the next start without configuration continues in the same network.
+fn resolve_network(
+    store: &Store,
+    config: &NodeConfig,
+    local: std::net::SocketAddr,
+) -> Result<(Option<NetConfig>, Vec<String>), String> {
+    let network = match &config.network {
+        Some(network) => {
+            network::store_membership(store, &network.net, &network.bootstrap, network.lan_bootstrap.as_ref())?;
+            Some(network.clone())
+        }
+        None => network::stored_membership(store)?.map(|stored| NetConfig {
+            bootstrap: stored.bootstrap,
+            lan_bootstrap: stored.lan,
+            ..NetConfig::new(stored.net)
+        }),
+    };
+    let mut urls = config.urls.clone();
+    if urls.is_empty() {
+        if let Some(stored) = store.meta_get(network::META_URLS).map_err(|e| e.to_string())? {
+            urls = network::string_list(&stored)?;
+        }
+    } else {
+        let list = json!(urls).to_string();
+        store.meta_set(network::META_URLS, list.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    if urls.is_empty() && network.is_some() {
+        urls.push(format!("http://{local}"));
+    }
+    urls.truncate(bridge_core::keys::MAX_URLS);
+    Ok((network, urls))
 }
 
 async fn janitor(node: Node) {
@@ -185,8 +327,17 @@ async fn janitor(node: Node) {
         let now = node.now();
         lock(&node.inner.sessions).sweep(now);
         let store = Arc::clone(&node.inner.store);
-        match tokio::task::spawn_blocking(move || store.purge_expired(now)).await {
-            Ok(Ok((envelopes, seen))) if envelopes + seen > 0 => tracing::debug!(envelopes, seen, "purged"),
+        let network = node.network().is_some();
+        let purged = tokio::task::spawn_blocking(move || {
+            let (envelopes, seen) = store.purge_expired(now)?;
+            let (homes, outbox) = if network { store.purge_net(now)? } else { (0, 0) };
+            Ok::<_, bridge_store::StoreError>((envelopes, seen, homes, outbox))
+        })
+        .await;
+        match purged {
+            Ok(Ok((envelopes, seen, homes, outbox))) if envelopes + seen + homes + outbox > 0 => {
+                tracing::debug!(envelopes, seen, homes, outbox, "purged");
+            }
             Ok(Err(error)) => tracing::error!(%error, "purge"),
             _ => {}
         }
@@ -228,6 +379,36 @@ impl Node {
         self.inner.clock.now_ms()
     }
 
+    /// Announces the node in the LAN; a failure (no multicast, firewall) is logged, the node runs on without it.
+    fn announce(&self, port: u16) -> Option<LanAnnouncer> {
+        let net = self.network().map(|network| network.net.to_string());
+        let extra: Vec<(&str, &str)> = net.as_deref().map(|net| vec![("net", net)]).unwrap_or_default();
+        match LanAnnouncer::start(self.inner.identity.id().as_str(), port, &extra) {
+            Ok(announcer) => Some(announcer),
+            Err(error) => {
+                tracing::warn!(%error, "LAN: mDNS announcement failed - others find this node only by its address");
+                None
+            }
+        }
+    }
+
+    /// Other nodes pin the TLS certificate from this node's card in the network log (its seal). Warns when that
+    /// card pins another certificate than the one this node serves (or none) - then they cannot use the LAN path to
+    /// it until it is sealed again with its current card (docs/06 §2).
+    fn check_sealed_pin(&self) {
+        let Some(mine) = self.inner.card.tls().copied() else { return };
+        let me = self.inner.identity.id().clone();
+        let sealed = self.with_core(|core| core.state.card_of(&me).map(|card| card.tls().copied()));
+        if let Ok(Some(sealed)) = sealed {
+            if sealed != Some(mine) {
+                tracing::warn!(
+                    "LAN: the card in this node's seal pins another TLS certificate (or none) - other nodes reach it \
+                     only by its public address until it is sealed again (bridge-node net seal)"
+                );
+            }
+        }
+    }
+
     async fn blocking<T: Send + 'static>(
         &self,
         work: impl FnOnce(&Store) -> Result<T, bridge_store::StoreError> + Send + 'static,
@@ -249,6 +430,9 @@ impl Node {
             (Method::Post, "/v4/poll") => self.poll(&request).await,
             (Method::Post, "/v4/ack") => self.ack(&request, now).await,
             (Method::Post, "/v4/card") => self.card(&request, now).await,
+            (_, path) if path.starts_with("/v4/net/") || path.starts_with("/v4/node/") => {
+                self.route_network(&request, now).await
+            }
             _ => Err(NodeError::not_found()),
         }
     }
@@ -256,7 +440,10 @@ impl Node {
     fn session(&self, request: &Request, now: i64) -> NodeResult<Id> {
         let token = request.bearer.as_deref().ok_or_else(NodeError::no_session)?;
         let token = b64_fixed::<32>(token, "session").map_err(|_| NodeError::no_session())?;
-        lock(&self.inner.sessions).lookup(&token, now).ok_or_else(NodeError::no_session)
+        let id = lock(&self.inner.sessions).lookup(&token, now).ok_or_else(NodeError::no_session)?;
+        // In a network: still a member, not banned, and this node still a gateway (revocations take effect at once).
+        self.net_session_check(&id, now)?;
+        Ok(id)
     }
 
     async fn known_card(&self, id: &Id) -> NodeResult<Option<KeyCard>> {
@@ -269,7 +456,7 @@ impl Node {
 
     fn info(&self, now: i64) -> NodeResult<Vec<u8>> {
         let limits = self.inner.guard.limits();
-        let body = json!({
+        let mut body = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "phase": 2,
             "pow_bits": self.inner.guard.pow_bits(now),
@@ -281,6 +468,15 @@ impl Node {
                 "mailbox_bytes": limits.mailbox.max_bytes,
             },
         });
+        if let Some(status) = self.net_status() {
+            body["phase"] = json!(3);
+            body["network"] = json!({
+                "log_size": status.size,
+                "gateway": status.gateway,
+                "operator": status.operator,
+                "witness": status.witness,
+            });
+        }
         let draft = Draft { kind: "info", net: &self.inner.net, iat: now, exp: now + 10 * 60 * 1000, body };
         let statement = Statement::sign(&draft, &self.inner.identity)?;
         Ok(json!({"card": self.inner.card.to_value(), "info": statement.to_value()}).to_string().into_bytes())
@@ -288,7 +484,16 @@ impl Node {
 
     fn challenge(&self, request: &Request, now: i64) -> NodeResult<Vec<u8>> {
         self.inner.guard.admit_challenge(request.peer, now)?;
-        let bits = self.inner.guard.pow_bits(now);
+        let mut bits = self.inner.guard.pow_bits(now);
+        // A challenge for joining a network carries the proof-of-work the manifest asks for (docs/06 §7). The body
+        // is optional (phase 2 sends `{}`), anything unreadable counts as a login challenge.
+        let for_join = body_object(&request.body, 1024)
+            .is_ok_and(|object| object.get("for").and_then(Value::as_str) == Some("join"));
+        if for_join {
+            if let Ok(join_bits) = self.with_core(|core| core.state.manifest().join.pow_bits) {
+                bits = bits.max(join_bits).min(bridge_core::pow::MAX_POW_BITS);
+            }
+        }
         let puzzle = if bits > 0 { Some(Puzzle::issue(&self.inner.identity, bits, now, &mut OsRng)?) } else { None };
         let mut challenge = [0u8; 32];
         OsRng.fill_bytes(&mut challenge);
@@ -321,6 +526,9 @@ impl Node {
             return Err(NodeError::forbidden("a network master key never logs in"));
         }
         request.verify(&card)?;
+        if self.network().is_some() {
+            self.net_login(&card, request.body().get("home"), now).await?;
+        }
         // No nonce table needed: the challenge above is one-time.
         let (id, bytes, max_cards) =
             (card.id().to_string(), card.to_bytes()?, self.inner.guard.limits().max_identities);
@@ -344,13 +552,26 @@ impl Node {
             return Err(NodeError::forbidden("wrong network"));
         }
         self.inner.guard.admit_send(&caller, now)?;
-        if self.known_card(envelope.to()).await?.is_none() {
+        let route = if self.network().is_some() {
+            self.route_recipient(envelope.to(), now).await?
+        } else if self.known_card(envelope.to()).await?.is_none() {
             return Err(NodeError::new(404, "UNKNOWN_IDENTITY", "recipient unknown here"));
-        }
+        } else {
+            network::Route::Local
+        };
         let sender = self.known_card(&caller).await?.ok_or_else(NodeError::no_session)?;
         envelope.verify(&sender)?;
+        match route {
+            network::Route::Local => self.deliver_local(&envelope, now).await?,
+            network::Route::Relay(target) => self.relay_enqueue(&envelope, &sender, &target, now).await?,
+        }
+        Ok(br#"{"ok":true}"#.to_vec())
+    }
+
+    /// Puts a fully checked envelope into its recipient's mailbox here (quotas, replay) and wakes a waiting poll.
+    async fn deliver_local(&self, envelope: &Envelope, now: i64) -> NodeResult<()> {
         let (recipient, from, env_id, expires_at) =
-            (envelope.to().to_string(), caller.to_string(), *envelope.id(), envelope.expires_at());
+            (envelope.to().to_string(), envelope.from().to_string(), *envelope.id(), envelope.expires_at());
         let bytes = envelope.to_bytes()?;
         let limits = self.inner.guard.mailbox_limits();
         let outcome = self
@@ -375,7 +596,7 @@ impl Node {
         if let Some(waiter) = waiter {
             waiter.notify_waiters();
         }
-        Ok(br#"{"ok":true}"#.to_vec())
+        Ok(())
     }
 
     fn waiter(&self, id: &Id) -> Arc<Notify> {
@@ -459,7 +680,12 @@ impl Node {
         self.session(request, now)?;
         let object = body_object(&request.body, 1024)?;
         let id = Id::parse(object.get("id").and_then(Value::as_str).unwrap_or_default())?;
-        match self.known_card(&id).await? {
+        let card = match self.known_card(&id).await? {
+            Some(card) => Some(card),
+            // A member homed at another gateway: its card came with the exchanged home entry.
+            None => self.home_card(&id, now).await?,
+        };
+        match card {
             Some(card) => Ok(json!({"card": card.to_value()}).to_string().into_bytes()),
             None => Err(NodeError::not_found()),
         }

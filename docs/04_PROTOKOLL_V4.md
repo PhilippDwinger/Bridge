@@ -32,7 +32,10 @@ Prüfung: `id == ID(sign)`, Signatur gültig, `role` erlaubt.
 ```json
 {"v":4,"t":"<art>","net":"<netz-id>","iss":"<id>","iat":0,"exp":0,"body":{},"sig":"<ed25519>"}
 ```
-Mehr-Augen: statt `iss`/`sig` ein Feld `sigs: [{"iss":"<id>","sig":"<...>"}]`.
+Mehr-Augen: statt `iss`/`sig` ein Feld `sigs: [{"iss":"<id>","sig":"<...>"}]` – streng aufsteigend nach `iss`
+(Byte-Reihenfolge der ID, also jeder Unterzeichner höchstens einmal), jeder Eintrag genau `{iss, sig}`. Signiert
+wird das Objekt ohne `sig`/`sigs`. So hat jede signierte Aussage genau eine Byte-Form; ihr Hash (docs/06 §3) lässt
+die Signaturen weg (ADR 0010).
 
 | Art (`t`) | Inhalt (`body`) | Wer darf ausstellen |
 |---|---|---|
@@ -108,7 +111,8 @@ signiert sind, dient die Transport-Verschlüsselung nur dem Schutz der Metadaten
 - Der Client fragt immer selbst (pull-only, wie Bridge 3). Knoten ↔ Knoten: Anfragen in beide Richtungen; jede ist
   eine signierte Aussage/ein Umschlag.
 - Ein Knoten bietet mehrere Transporte gleichzeitig an; seine Schlüsselkarte listet sie (signiert). Clients wählen
-  den besten erreichbaren (LAN vor Internet).
+  den besten erreichbaren (LAN vor Internet). Genau (Pin-Quelle, Suche, Reihenfolge, Grenzen): 06 §2 „LAN im Knoten
+  und im SDK“.
 
 **Endpunkte (Entwurf)**
 | Methode | Pfad | Zweck |
@@ -117,11 +121,11 @@ signiert sind, dient die Transport-Verschlüsselung nur dem Schutz der Metadaten
 | POST | `/v4/auth/challenge` | Anmelde-Rätsel (Zufall, Ablauf, ggf. Proof-of-Work-Schwierigkeit) |
 | POST | `/v4/auth/login` | Schlüsselkarte + signiertes Rätsel (+ PoW-Lösung) → Sitzung (60 min) |
 | POST | `/v4/net/join` | Beitritt: PoW + ggf. Einladungscode → `member`-Aussage |
-| GET | `/v4/net/{netz}/manifest` · `/log?from=n` · `/head` | Netz prüfen, Log nachladen |
+| GET/POST | `/v4/net/{netz}/manifest` · `/head` · `/log` … | Netz prüfen, Log nachladen (genau: 06 §9) |
 | POST | `/v4/send` | Umschlag abgeben |
 | POST | `/v4/poll` | Umschläge abholen (`wait`, `max`) |
 | POST | `/v4/ack` | Abgeholtes bestätigen (wird dann gelöscht) |
-| POST | `/v4/node/relay` | Knoten → Knoten: Umschlag weiterreichen |
+| POST | `/v4/node/relay` · `/v4/node/homes` | Knoten → Knoten: Umschlag weiterreichen, `home`-Einträge (06 §8) |
 | POST | `/v4/node/probe` | Wächter-Proben |
 
 Sitzungen sind nur für Billiges (Abholen). Alles, was etwas verändert, ist zusätzlich signiert (Z2).
@@ -139,8 +143,8 @@ Künftige Operationen, die beides nicht sind, merken sich (`iss`, `n`) im Zeitfe
 | Endpunkt | Eingabe | Antwort | Prüfung (billig zuerst) |
 |---|---|---|---|
 | `GET /v4/info` | – | Aussage `info` des Knotens (`body`: Version, Grenzen) + seine Schlüsselkarte | – |
-| `POST /v4/auth/challenge` | `{}` | `{"challenge","exp","pow"}` (`pow` = Rätsel §8 oder `null`) | Limit pro Adresse |
-| `POST /v4/auth/login` | `rq` mit `op:"login"`, `body:{"challenge","card","pow":"<8 Byte>"?}` | `{"session","exp"}` | Größe → Format → Rätsel offen + einmalig → PoW → Karte (`card.id == iss`, Rolle nicht `net`) → Signatur → Platz für die Identität |
+| `POST /v4/auth/challenge` | `{}` (im Netz für den Beitritt: `{"for":"join"}`, 06 §7) | `{"challenge","exp","pow"}` (`pow` = Rätsel §8 oder `null`) | Limit pro Adresse |
+| `POST /v4/auth/login` | `rq` mit `op:"login"`, `body:{"challenge","card","pow":"<8 Byte>"?,"home":<aussage>?}` (`home` im Netz, 06 §8) | `{"session","exp"}` | Größe → Format → Rätsel offen + einmalig → PoW → Karte (`card.id == iss`, Rolle nicht `net`) → Signatur → im Netz: Knoten ist Empfänger, Mitglied, nicht gesperrt, `home` gültig → Platz für die Identität |
 | `POST /v4/send` | Umschlag | `{"ok":true}` | Sitzung → Größe → Format → Zeit → `from` = Sitzung → Limit → Empfänger bekannt → Kontingent → Signatur → Replay → speichern |
 | `POST /v4/poll` | `{"wait":0–25,"max":1–100}` | `{"envelopes":[…],"cards":{"<id>":<karte>}}` (Umschläge zusammen max. 1 MiB, mindestens einer) | Sitzung → Limit |
 | `POST /v4/ack` | `rq` mit `op:"ack"`, `body:{"acks":[{"from":"<id>","id":"<16 Byte>"},…]}` (max. 100) | `{"removed":n}` | Sitzung → `iss` = Sitzung → Signatur |
@@ -195,5 +199,6 @@ Fehler verraten nicht mehr als nötig (z. B. kein Unterschied „gibt es nicht�
 
 ## 10. Offen in diesem Entwurf
 - Format der Schlüsseldateien (Wiederherstellungs-Wörter: BIP-39, englische Standard-Liste – entschieden).
-- Heim-Empfänger eines Clients finden (Verzeichnis-Eintrag „wohnt bei“) – Teil von Phase 3.
+- ~~Heim-Empfänger eines Clients finden~~ – gelöst in Phase 3: `home`-Aussage beim Login, Austausch zwischen
+  Empfängern (06 §8).
 - Gruppen-Verschlüsselung im Detail.

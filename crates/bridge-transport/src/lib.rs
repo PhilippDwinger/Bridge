@@ -1,15 +1,20 @@
 //! # bridge-transport – moving bytes
 //!
 //! Connections only, no network logic (docs/03, ADR 0004): an HTTP/1.1 server that hands a node plain [`Request`]s,
-//! and a client for SDKs and node-to-node calls. Phase 2: Internet (HTTP behind a TLS proxy such as Tailscale Funnel,
-//! or HTTPS as a client); LAN (mDNS + TLS pinning) follows in phase 3.
+//! and a client for SDKs and node-to-node calls. Internet: HTTP behind a TLS proxy such as Tailscale Funnel, or HTTPS
+//! as a client. LAN ([`lan`]): the same server over TLS with a self-signed certificate ([`serve_tls`]), clients that
+//! trust exactly the pinned certificate ([`HttpClient::new_pinned`]), and mDNS hints where nodes are.
 //!
 //! Zero Trust at the door (Z5): limited connections, a timeout for headers (slowloris), the body size is checked
 //! from `Content-Length` *before* reading and again while reading, every request has a total time limit, and
 //! `X-Forwarded-For` is only believed from configured proxies. The client limits response sizes too - a node can
 //! be malicious as well.
 //!
-//! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core` (for nothing but its name today).
+//! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core` (address keys, hashes, IDs).
+
+pub mod lan;
+
+pub use lan::{Discovery, LanAnnouncer, LanHints, LanPeer, TlsIdentity};
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -25,10 +30,13 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::{GracefulShutdown, Watcher};
 use thiserror::Error;
-use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Semaphore, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
 pub const COMPARTMENT: &str = "bridge-transport";
@@ -148,6 +156,8 @@ pub struct ServerConfig {
     pub max_connections_per_address: usize,
     /// Proxies whose `X-Forwarded-For` is believed (e.g. 127.0.0.1 for Tailscale Funnel).
     pub trusted_proxies: Vec<IpAddr>,
+    /// Max time for the TLS handshake ([`serve_tls`] only): slow or silent handshakes must not hold connection slots.
+    pub tls_handshake_timeout: Duration,
 }
 
 impl Default for ServerConfig {
@@ -160,6 +170,7 @@ impl Default for ServerConfig {
             max_connections: 1024,
             max_connections_per_address: 32,
             trusted_proxies: Vec::new(),
+            tls_handshake_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -187,17 +198,42 @@ impl RunningServer {
     }
 }
 
-/// Starts serving `handler` on `listener`.
+/// Starts serving `handler` on `listener` (plain HTTP, e.g. behind a TLS proxy).
 pub fn serve<H: Handler>(
     listener: TcpListener,
     config: ServerConfig,
     handler: Arc<H>,
 ) -> TransportResult<RunningServer> {
+    run(listener, config, handler, None)
+}
+
+/// Starts serving `handler` on `listener` over TLS with the node's self-signed certificate (LAN, docs/06 §2).
+/// Same limits as [`serve`]; additionally every TLS handshake must finish within `tls_handshake_timeout`.
+pub fn serve_tls<H: Handler>(
+    listener: TcpListener,
+    config: ServerConfig,
+    handler: Arc<H>,
+    identity: &TlsIdentity,
+) -> TransportResult<RunningServer> {
+    let acceptor = TlsAcceptor::from(identity.server_config()?);
+    run(listener, config, handler, Some(acceptor))
+}
+
+/// The accept loop shared by plain and TLS serving: limits are taken before any byte is read or any TLS work is done.
+fn run<H: Handler>(
+    listener: TcpListener,
+    config: ServerConfig,
+    handler: Arc<H>,
+    tls: Option<TlsAcceptor>,
+) -> TransportResult<RunningServer> {
     let local_addr = listener.local_addr().map_err(|e| TransportError::Config(e.to_string()))?;
     let (stop, mut stopped) = oneshot::channel::<()>();
     let config = Arc::new(config);
     let task = tokio::spawn(async move {
-        let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+        let graceful = GracefulShutdown::new();
+        // Connections still in their TLS handshake hold a watcher but no HTTP connection yet: this tells them to give
+        // up, so shutting down never waits for slow handshakes.
+        let (closing, _) = watch::channel(());
         let connections = Arc::new(Semaphore::new(config.max_connections));
         let per_address: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
         loop {
@@ -213,31 +249,72 @@ pub fn serve<H: Handler>(
                         drop(stream); // one address must not take all connections
                         continue;
                     };
-                    let handler = Arc::clone(&handler);
-                    let header_timeout = config.header_timeout;
-                    let config = Arc::clone(&config);
-                    let service = service_fn(move |request| {
-                        let handler = Arc::clone(&handler);
-                        let config = Arc::clone(&config);
-                        async move { Ok::<_, Infallible>(answer(request, peer.ip(), &config, handler).await) }
-                    });
-                    let connection = http1::Builder::new()
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(header_timeout)
-                        .max_buf_size(64 * 1024)
-                        .serve_connection(TokioIo::new(stream), service);
-                    let connection = graceful.watch(connection);
+                    let connection = Connection {
+                        peer: peer.ip(),
+                        config: Arc::clone(&config),
+                        handler: Arc::clone(&handler),
+                        watcher: graceful.watcher(),
+                    };
+                    let tls = tls.clone();
+                    let closing = closing.subscribe();
                     tokio::spawn(async move {
-                        let _ = connection.await;
+                        connection.run(stream, tls, closing).await;
                         drop(per_address);
                         drop(permit);
                     });
                 }
             }
         }
+        drop(listener);
+        let _ = closing.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), graceful.shutdown()).await;
     });
     Ok(RunningServer { local_addr, stop: Some(stop), task })
+}
+
+/// One accepted connection: optionally a bounded TLS handshake, then HTTP/1.1 on the resulting byte stream.
+struct Connection<H> {
+    peer: IpAddr,
+    config: Arc<ServerConfig>,
+    handler: Arc<H>,
+    watcher: Watcher,
+}
+
+impl<H: Handler> Connection<H> {
+    async fn run(self, stream: TcpStream, tls: Option<TlsAcceptor>, mut closing: watch::Receiver<()>) {
+        let Some(acceptor) = tls else {
+            self.serve_http(stream).await;
+            return;
+        };
+        let handshake = tokio::time::timeout(self.config.tls_handshake_timeout, acceptor.accept(stream));
+        let stream = tokio::select! {
+            done = handshake => match done {
+                Ok(Ok(stream)) => stream,
+                _ => return, // failed or too slow: drop the connection and free its slots (Z5, Z8)
+            },
+            _ = closing.changed() => return, // shutting down: no new sessions
+        };
+        self.serve_http(stream).await;
+    }
+
+    async fn serve_http<S>(self, stream: S)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let Self { peer, config, handler, watcher } = self;
+        let header_timeout = config.header_timeout;
+        let service = service_fn(move |request| {
+            let handler = Arc::clone(&handler);
+            let config = Arc::clone(&config);
+            async move { Ok::<_, Infallible>(answer(request, peer, &config, handler).await) }
+        });
+        let connection = http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(header_timeout)
+            .max_buf_size(64 * 1024)
+            .serve_connection(TokioIo::new(stream), service);
+        let _ = watcher.watch(connection).await;
+    }
 }
 
 /// One open connection counted against its address; dropping it frees the slot.
@@ -376,6 +453,11 @@ fn to_http(response: Response) -> http::Response<Full<Bytes>> {
     out
 }
 
+/// Max response body the client accepts (a node can be malicious too, Z5).
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// Max length of a base URL.
+const MAX_BASE_URL: usize = 512;
+
 /// HTTP client for SDKs and node-to-node calls. Only `http://` and `https://` URLs; responses are size-limited.
 #[derive(Clone)]
 pub struct HttpClient {
@@ -397,17 +479,20 @@ impl HttpClient {
     /// A client for the node at `base_url` (e.g. `https://pc.tail91b057.ts.net/node1`).
     pub fn new(base_url: &str, timeout: Duration) -> TransportResult<Self> {
         let base = base_url.trim_end_matches('/').to_owned();
-        if !(base.starts_with("http://") || base.starts_with("https://")) || base.len() > 512 {
+        if !(base.starts_with("http://") || base.starts_with("https://")) || base.len() > MAX_BASE_URL {
             return Err(TransportError::Config("URL must start with http:// or https://".into()));
         }
-        let inner = reqwest::Client::builder()
+        let inner = Self::builder(timeout).build().map_err(|e| TransportError::Config(e.to_string()))?;
+        Ok(Self { inner, base, max_response_bytes: MAX_RESPONSE_BYTES })
+    }
+
+    /// Settings every client shares: timeouts, no redirects (a node must not send us elsewhere), our user agent.
+    fn builder(timeout: Duration) -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("bridge4/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| TransportError::Config(e.to_string()))?;
-        Ok(Self { inner, base, max_response_bytes: 2 * 1024 * 1024 })
     }
 
     /// GET `path`.
@@ -426,13 +511,13 @@ impl HttpClient {
     }
 
     async fn finish(&self, request: reqwest::RequestBuilder) -> TransportResult<ClientResponse> {
-        let mut response = request.send().await.map_err(|e| TransportError::Connection(e.to_string()))?;
+        let mut response = request.send().await.map_err(|e| connection_error(&e))?;
         let status = response.status().as_u16();
         if response.content_length().is_some_and(|length| length > self.max_response_bytes as u64) {
             return Err(TransportError::TooLarge);
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|e| TransportError::Connection(e.to_string()))? {
+        while let Some(chunk) = response.chunk().await.map_err(|e| connection_error(&e))? {
             if body.len() + chunk.len() > self.max_response_bytes {
                 return Err(TransportError::TooLarge);
             }
@@ -440,6 +525,26 @@ impl HttpClient {
         }
         Ok(ClientResponse { status, body })
     }
+}
+
+/// The error with its causes (e.g. "… : invalid peer certificate: …"), bounded in depth and length.
+fn connection_error(error: &dyn std::error::Error) -> TransportError {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    for _ in 0..4 {
+        let Some(inner) = cause else { break };
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    if text.len() > 400 {
+        let mut end = 400;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    TransportError::Connection(text)
 }
 
 #[cfg(test)]

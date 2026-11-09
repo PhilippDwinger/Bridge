@@ -4,6 +4,11 @@
 //! with numbered schema migrations. Stores only what a node may see: key cards (public), encrypted envelopes in
 //! mailboxes, and the IDs of accepted envelopes for replay protection. Nothing here can decrypt anything.
 //!
+//! Since schema 3 also what a node of a BridgeNet keeps (docs/06): the log entries it follows, the latest heads of
+//! the log operators with their cosignatures, split-view evidence, the `home` entries of members, and the outbox of
+//! envelopes waiting to be relayed to another gateway; since schema 4 the transition heads of changes of the log
+//! rules. All of it is public or encrypted - still nothing to decrypt.
+//!
 //! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core`.
 //! Quotas are passed in by the caller (`bridge-guard` decides them) and checked atomically with the insert, so two
 //! parallel deliveries can never exceed them together.
@@ -13,6 +18,13 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
+
+mod net;
+
+pub use net::{
+    HeadRow, HomeRow, HomeStored, MAX_EVIDENCE_PER_NET, MAX_HEAD_ROWS_PER_NET, Outgoing, RelayItem, RelayLimits,
+    TransitionRow,
+};
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
 pub const COMPARTMENT: &str = "bridge-store";
@@ -35,6 +47,32 @@ const MIGRATIONS: &[&str] = &[
     // 2: running totals, so a delivery never has to scan all mailboxes
     "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
      INSERT INTO counters (name, value) SELECT 'mailbox_bytes', COALESCE(SUM(size), 0) FROM mailbox;",
+    // 3: BridgeNet (docs/06): log entries per network, latest heads per operator and role (+ cosignatures),
+    // split-view evidence, one `home` entry per member (newest wins), relay outbox
+    "CREATE TABLE net_log (net TEXT NOT NULL, idx INTEGER NOT NULL, entry BLOB NOT NULL,
+                           PRIMARY KEY (net, idx)) WITHOUT ROWID;
+     CREATE TABLE net_heads (net TEXT NOT NULL, operator TEXT NOT NULL, role TEXT NOT NULL, size INTEGER NOT NULL,
+                             head BLOB NOT NULL, cosigns BLOB NOT NULL, updated INTEGER NOT NULL,
+                             PRIMARY KEY (net, operator, role)) WITHOUT ROWID;
+     CREATE TABLE net_evidence (net TEXT NOT NULL, operator TEXT NOT NULL, evidence BLOB NOT NULL,
+                                received INTEGER NOT NULL, PRIMARY KEY (net, operator)) WITHOUT ROWID;
+     CREATE TABLE net_homes (net TEXT NOT NULL, member TEXT NOT NULL, node TEXT NOT NULL, iat INTEGER NOT NULL,
+                             exp INTEGER NOT NULL, seq INTEGER NOT NULL, home BLOB NOT NULL, card BLOB NOT NULL,
+                             PRIMARY KEY (net, member)) WITHOUT ROWID;
+     CREATE INDEX net_homes_by_node ON net_homes (net, node, seq);
+     CREATE INDEX net_homes_by_exp ON net_homes (exp);
+     CREATE TABLE relay_outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT NOT NULL, sender TEXT NOT NULL,
+                                env_id BLOB NOT NULL, expires_at INTEGER NOT NULL, next_attempt INTEGER NOT NULL,
+                                attempts INTEGER NOT NULL, size INTEGER NOT NULL, envelope BLOB NOT NULL,
+                                card BLOB NOT NULL, UNIQUE (sender, env_id));
+     CREATE INDEX relay_by_due ON relay_outbox (next_attempt);
+     CREATE INDEX relay_by_expiry ON relay_outbox (expires_at);
+     CREATE INDEX relay_by_target ON relay_outbox (target);
+     INSERT INTO counters (name, value) VALUES ('relay_bytes', 0), ('home_seq', 0);",
+    // 4: BridgeNet transition heads (docs/06 §5 "Übergänge beim Aufholen"): the witnessed head that ends with each
+    // change of the log rules, kept for good (bounded per network) and served to followers that catch up
+    "CREATE TABLE net_transitions (net TEXT NOT NULL, size INTEGER NOT NULL, head BLOB NOT NULL,
+                                   cosigns BLOB NOT NULL, PRIMARY KEY (net, size)) WITHOUT ROWID;",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

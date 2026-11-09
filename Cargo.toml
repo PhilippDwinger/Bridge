@@ -49,6 +49,8 @@ x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+# BIP-39 recovery words (docs/06 §1): rust-bitcoin's crate, English word list only, secrets wiped on drop.
+bip39 = { version = "2", default-features = false, features = ["std", "zeroize"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 base64 = "0.22"
@@ -66,3 +68,21 @@ bytes = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# LAN transport (ADR 0004, docs/06 §2): pinned TLS on rustls with the ring provider only (never aws-lc),
+# self-signed node certificates (rcgen), discovery hints via mDNS/DNS-SD.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "zeroize"] }
+mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
+# `net rescue`: the terminal echo off while the 24 words are typed (safe termios API; already in the tree via
+# tempfile). Only the binary uses it, only on Unix.
+rustix = { version = "1", default-features = false, features = ["std", "termios", "process"] }
+
+# Tests verify many signatures; unoptimized curve arithmetic makes each check ~10 ms in debug builds. Optimize only
+# these crypto dependencies in dev/test builds (Bridge's own code and release builds are unchanged).
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3

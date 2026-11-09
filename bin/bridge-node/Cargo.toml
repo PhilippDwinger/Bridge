@@ -16,7 +16,13 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+bridge-core.workspace = true
+bridge-net.workspace = true
 bridge-node.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true

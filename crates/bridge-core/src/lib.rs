@@ -1,7 +1,8 @@
 //! # bridge-core – the foundation
 //!
 //! Data types, strict and canonical JSON (RFC 8785), the crypto suite B4-1 (Ed25519, X25519, HKDF-SHA256,
-//! ChaCha20-Poly1305, SHA-256), identities and key cards, signed statements, envelopes, error codes.
+//! ChaCha20-Poly1305, SHA-256), identities and key cards, master keys from 24 BIP-39 words, signed statements,
+//! envelopes, error codes.
 //! No I/O, no clock and no randomness unless passed in - fully testable. All cryptography of Bridge lives here
 //! (Zero Trust rule Z10, nonce invariant N1 in ADR 0008).
 //!
@@ -15,6 +16,8 @@ pub mod error;
 pub mod id;
 pub mod json;
 pub mod keys;
+pub mod link;
+pub mod mnemonic;
 pub mod pow;
 pub mod request;
 pub mod statement;
@@ -25,6 +28,8 @@ pub use envelope::{Address, Envelope, Kind};
 pub use error::{CoreError, CoreResult};
 pub use id::Id;
 pub use keys::{Identity, KeyCard, Role};
+pub use link::JoinLink;
+pub use mnemonic::Mnemonic;
 pub use pow::Puzzle;
 pub use request::SignedRequest;
 pub use statement::{Draft, Statement};

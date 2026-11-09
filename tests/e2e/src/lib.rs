@@ -1,4 +1,7 @@
 //! Helpers for the cross-compartment tests: start nodes in temporary folders, make clients, send raw requests.
+//! Module [`net`]: networks of several nodes (phase 3).
+
+pub mod net;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

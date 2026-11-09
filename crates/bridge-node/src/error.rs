@@ -2,6 +2,7 @@
 
 use bridge_core::CoreError;
 use bridge_guard::GuardError;
+use bridge_net::NetError;
 use bridge_store::StoreError;
 use bridge_transport::Response;
 
@@ -69,6 +70,47 @@ impl From<GuardError> for NodeError {
             GuardError::Replay => Self::new(409, error.code(), "already used"),
         }
     }
+}
+
+impl From<NetError> for NodeError {
+    fn from(error: NetError) -> Self {
+        let status = match &error {
+            NetError::BadFormat(_) => 400,
+            NetError::TooLarge(_) => 413,
+            NetError::BadSignature | NetError::Expired | NetError::NotYetValid => 401,
+            NetError::Forbidden(_) | NetError::NotMember | NetError::Banned => 403,
+            NetError::NotFound(_) => 404,
+            NetError::QuotaExceeded(_) => {
+                return Self { retry_after: Some(60), ..Self::new(429, error.code(), error.to_string()) };
+            }
+            NetError::Core(inner) => return inner.clone().into(),
+        };
+        Self::new(status, error.code(), error.to_string())
+    }
+}
+
+/// The fixed code for a code another node sent (docs/04 §9) - unknown codes become `UNAVAILABLE`.
+pub(crate) fn known_code(code: &str) -> &'static str {
+    const CODES: [&str; 17] = [
+        "BAD_FORMAT",
+        "TOO_LARGE",
+        "BAD_SIGNATURE",
+        "EXPIRED",
+        "NOT_YET_VALID",
+        "REPLAY",
+        "CANNOT_OPEN",
+        "NO_SESSION",
+        "UNKNOWN_IDENTITY",
+        "NOT_MEMBER",
+        "FORBIDDEN",
+        "RATE_LIMITED",
+        "QUOTA_EXCEEDED",
+        "POW_REQUIRED",
+        "BANNED",
+        "NOT_FOUND",
+        "UNAVAILABLE",
+    ];
+    CODES.into_iter().find(|known| *known == code).unwrap_or("UNAVAILABLE")
 }
 
 impl From<StoreError> for NodeError {

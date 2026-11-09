@@ -120,10 +120,59 @@ pub(crate) fn agree_static(secret: &StaticSecret, peer: &[u8; 32]) -> CoreResult
 }
 
 /// HKDF-SHA256 to a 32-byte key.
-pub(crate) fn derive_key(ikm: &[u8; 32], salt: &[u8], info: &[u8]) -> CoreResult<SecretKey> {
+pub(crate) fn derive_key(ikm: &[u8], salt: &[u8], info: &[u8]) -> CoreResult<SecretKey> {
     let mut key = Zeroizing::new([0u8; 32]);
     Hkdf::<Sha256>::new(Some(salt), ikm).expand(info, key.as_mut_slice()).map_err(|_| CoreError::CannotOpen)?;
     Ok(key)
+}
+
+/// Longest English BIP-39 word (8 letters) times 24 words plus separators - enough to never reallocate (a
+/// reallocation would leave an unwiped copy of the words behind).
+const BIP39_WORDS_CAPACITY: usize = 24 * 9;
+
+/// The 24 English BIP-39 words (checksum included) for 32 bytes of entropy, separated by single spaces.
+/// 256 bits is a valid BIP-39 size, so this cannot fail; should the library ever refuse, the result is empty and
+/// every later parse of it fails (fail closed).
+pub(crate) fn bip39_words(entropy: &[u8; 32]) -> Zeroizing<String> {
+    let mut words = Zeroizing::new(String::with_capacity(BIP39_WORDS_CAPACITY));
+    if let Ok(mnemonic) = bip39::Mnemonic::from_entropy_in(bip39::Language::English, entropy) {
+        for (index, word) in mnemonic.words().enumerate() {
+            if index > 0 {
+                words.push(' ');
+            }
+            words.push_str(word);
+        }
+    }
+    words
+}
+
+/// The 32 bytes of entropy behind normalized English words (lower case, single spaces, exactly 24 words).
+/// Checks every word against the list and the BIP-39 checksum. Errors never contain the words themselves.
+pub(crate) fn bip39_entropy(normalized: &str) -> CoreResult<Zeroizing<[u8; 32]>> {
+    let mnemonic =
+        bip39::Mnemonic::parse_in_normalized(bip39::Language::English, normalized).map_err(|error| match error {
+            bip39::Error::UnknownWord(index) => {
+                CoreError::format(format!("mnemonic: word {} is not in the word list", index + 1))
+            }
+            bip39::Error::InvalidChecksum => CoreError::format("mnemonic: checksum does not match (typo?)"),
+            _ => CoreError::format("mnemonic: invalid"),
+        })?;
+    let (bytes, length) = mnemonic.to_entropy_array();
+    let bytes = Zeroizing::new(bytes);
+    if length != 32 {
+        return Err(CoreError::format("mnemonic: expected 256 bits"));
+    }
+    let mut entropy = Zeroizing::new([0u8; 32]);
+    entropy.copy_from_slice(&bytes[..32]);
+    Ok(entropy)
+}
+
+/// BIP-39 seed (PBKDF2-HMAC-SHA512, 2048 rounds, salt "mnemonic" + passphrase, 64 bytes) of the English words for
+/// `entropy`. `passphrase` must already be NFKD-normalized (Bridge only uses "").
+pub(crate) fn bip39_seed(entropy: &[u8; 32], passphrase: &str) -> CoreResult<Zeroizing<[u8; 64]>> {
+    let mnemonic = bip39::Mnemonic::from_entropy_in(bip39::Language::English, entropy)
+        .map_err(|_| CoreError::format("mnemonic: invalid entropy"))?;
+    Ok(Zeroizing::new(mnemonic.to_seed_normalized(passphrase)))
 }
 
 /// A fresh random 32-byte key (stream content keys; created only inside this crate - N1).
@@ -201,6 +250,21 @@ mod tests {
         assert_eq!(aead_open(&key, &nonce, &sealed, b"aad")?, b"hello");
         assert!(aead_open(&key, &nonce, &sealed, b"aaD").is_err());
         assert!(aead_open(&[8u8; 32], &nonce, &sealed, b"aad").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn bip39_official_vector() -> CoreResult<()> {
+        // Official BIP-39 test vector (trezor/python-mnemonic, vectors.json): entropy 0x00 * 32, passphrase "TREZOR".
+        let words = bip39_words(&[0u8; 32]);
+        let expected_words = ["abandon"; 23].join(" ") + " art";
+        assert_eq!(words.as_str(), expected_words);
+        let seed = bip39_seed(&[0u8; 32], "TREZOR")?;
+        let expected = "bda85446c68413707090a52022edd26a1c9462295029f2e60cd7c4f2bbd3097170af7a4d73245cafa9c3cca8d561a7c3\
+                        de6f5d4a10be8ed2a5e608d68f92fcc8";
+        let hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, expected);
+        assert_eq!(*bip39_entropy(&words)?, [0u8; 32]);
         Ok(())
     }
 

@@ -11,6 +11,7 @@ Zuerst lesen: `docs/00_GRUNDSAETZE.md` (Zero Trust Z1–Z10, Struktur S1–S6, C
   Kein globaler Zustand. `#![forbid(unsafe_code)]` überall. `sdk/rust` nutzt nur `bridge-core` + `bridge-transport`;
   `tests/e2e` (Crate `bridge-tests`) testet über alle Abteile.
 - Krypto-Bausteine nur über `bridge-core::crypto`; andere Module rufen die Krypto-Bibliotheken nie direkt auf.
+  Einzige Ausnahme: TLS-Verbindungen im Abteil `transport` (rustls mit ring, rcgen; ADR 0011).
 - **Spezifikation vor Code**: erst `docs/` ändern, dann bauen. Größere Entscheidungen als ADR in `docs/adr/`.
 - **Tests**: jede Funktion mit normalen Tests **und** Angriffs-Tests; `cargo fmt`, `cargo clippy -- -D warnings`,
   `cargo test` müssen grün sein.

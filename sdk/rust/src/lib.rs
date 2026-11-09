@@ -1,9 +1,16 @@
 //! # bridge-sdk – Bridge 4 for Rust programs
 //!
-//! A client that logs in at its node, sends end-to-end encrypted messages and receives them (docs/04).
+//! A client that logs in at its node, sends end-to-end encrypted messages and receives them (docs/04). In a
+//! BridgeNet (docs/06) a client joins once with a join link ([`Client::join`]) and registers its node as its home
+//! gateway with every login; sending to members of other gateways needs nothing else - the gateways relay.
 //! Zero Trust from the client side as well: the node's card is checked against its ID, the node's `info` statement
 //! is verified, every received envelope is verified with the sender's (self-certifying) card and opened locally,
 //! duplicates are dropped, answers from the node are size-limited and parsed strictly.
+//!
+//! LAN before Internet (docs/04 §7, docs/06 §2): with the node's ID and the TLS pin from its signed card (or from a
+//! join link with `node` and `tls`), [`Client::connect_auto`] and [`Client::join`] look for the node in the LAN
+//! first and connect with exactly that certificate; only if that does not work, they use the Internet address.
+//! Everything above the connection is checked the same way on both paths.
 //!
 //! Depends only on the protocol (`bridge-core`) and `bridge-transport` - never on node internals.
 
@@ -12,12 +19,13 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bridge_core::encoding::b64;
+use bridge_core::encoding::{b64, b64_var};
 use bridge_core::json::parse_strict;
 use bridge_core::{
-    Address, Content, CoreError, Envelope, Id, Identity, KeyCard, Kind, Puzzle, Role, SignedRequest, Statement,
+    Address, Content, CoreError, Draft, Envelope, Id, Identity, JoinLink, KeyCard, Kind, Puzzle, Role, SignedRequest,
+    Statement,
 };
-use bridge_transport::{ClientResponse, HttpClient, TransportError};
+use bridge_transport::{ClientResponse, Discovery, HttpClient, TransportError};
 use rand_core::OsRng;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -77,7 +85,51 @@ pub struct Inbox {
 
 /// How many received envelope IDs are remembered (replay protection; per (sender, ID) until they expire).
 pub const SEEN_MEMORY: usize = 100_000;
+/// Lifetime of the `home` statement sent with every login in a network (docs/06 §8: at most 30 days).
+pub const HOME_LIFETIME_MS: i64 = 30 * 24 * 3600 * 1000 - 60_000;
+/// How many log entries a join looks through to find the gateway's seal.
+pub const JOIN_CHECK_MAX_ENTRIES: u64 = 4096;
 const MAX_PENDING_ACKS: usize = 1_000;
+/// Timeout of the connection used for everything after connecting (long polls wait up to 25 s).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
+/// Most LAN addresses tried for one node.
+pub const MAX_LAN_TRIES: usize = 8;
+
+/// How to reach a node: its ID (always pinned), the TLS pin for the LAN, the Internet address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeAddress {
+    /// The node's ID: a node with another ID is refused on every path.
+    pub node: Id,
+    /// Fingerprint of the node's TLS certificate (`tls` of its signed card, or of a join link). Without it the LAN
+    /// is not tried.
+    pub tls: Option<[u8; 32]>,
+    /// The Internet address (fallback; `None`: LAN only).
+    pub url: Option<String>,
+}
+
+impl NodeAddress {
+    /// From a node's verified key card: its ID, its TLS pin and its first address.
+    #[must_use]
+    pub fn from_card(card: &KeyCard) -> Self {
+        Self { node: card.id().clone(), tls: card.tls().copied(), url: card.urls().first().cloned() }
+    }
+}
+
+/// How a client looks for its node in the LAN.
+#[derive(Debug, Clone)]
+pub struct ConnectOptions {
+    /// Where to look (default: mDNS, up to 2 s - it returns as soon as the node was seen). `Discovery::Off`: never
+    /// the LAN.
+    pub lan: Discovery,
+    /// Time limit for trying one LAN address.
+    pub probe_timeout: Duration,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self { lan: Discovery::mdns(), probe_timeout: Duration::from_secs(5) }
+    }
+}
 
 type SeenKey = (Id, [u8; 16]);
 
@@ -90,6 +142,8 @@ pub struct Client {
     identity: Identity,
     card: KeyCard,
     http: HttpClient,
+    /// The connection is a pinned LAN connection (with this pin).
+    lan_pin: Option<[u8; 32]>,
     expected_node: Option<Id>,
     node: Option<KeyCard>,
     net: Option<Id>,
@@ -107,9 +161,14 @@ pub struct Client {
 impl Client {
     /// A client for the node at `node_url`. `expected_node`: the node's ID if known (pinning - recommended).
     pub fn new(identity: Identity, node_url: &str, expected_node: Option<Id>) -> SdkResult<Self> {
+        Self::with_http(identity, HttpClient::new(node_url, REQUEST_TIMEOUT)?, expected_node)
+    }
+
+    fn with_http(identity: Identity, http: HttpClient, expected_node: Option<Id>) -> SdkResult<Self> {
         let card = identity.key_card(Role::Client, None, now_ms())?;
         Ok(Self {
-            http: HttpClient::new(node_url, Duration::from_secs(40))?,
+            http,
+            lan_pin: None,
             identity,
             card,
             expected_node,
@@ -150,6 +209,50 @@ impl Client {
     pub fn session_token(&self) -> Option<&str> {
         self.session.as_deref()
     }
+    /// Whether this client talks to its node over the LAN (pinned TLS) rather than the Internet address.
+    #[must_use]
+    pub fn via_lan(&self) -> bool {
+        self.lan_pin.is_some()
+    }
+
+    /// LAN before Internet: looks for the node in the LAN (if `address` has a TLS pin), tries each address found
+    /// with exactly that certificate and takes the first one where the node proves itself (card with the pinned
+    /// ID and this TLS pin, valid `info`); otherwise the Internet address. Then logs in like [`Client::connect`].
+    pub async fn connect_auto(identity: Identity, address: &NodeAddress, options: &ConnectOptions) -> SdkResult<Self> {
+        let mut client = Self::reach(identity, address, options).await?;
+        client.connect().await?;
+        Ok(client)
+    }
+
+    /// A client for `address` with the connection chosen (LAN first), not logged in yet.
+    async fn reach(identity: Identity, address: &NodeAddress, options: &ConnectOptions) -> SdkResult<Self> {
+        let mut last: Option<SdkError> = None;
+        if let Some(pin) = address.tls {
+            let peers = options.lan.find(address.node.as_str()).await;
+            let urls: Vec<String> =
+                peers.iter().flat_map(bridge_transport::LanPeer::urls).take(MAX_LAN_TRIES).collect();
+            for url in urls {
+                let probe = HttpClient::new_pinned(&url, pin, options.probe_timeout);
+                let checked = match &probe {
+                    Ok(probe) => Self::info_of(probe, Some(&address.node), Some(&pin)).await.map(|_| ()),
+                    Err(_) => Err(SdkError::Untrusted(format!("bad LAN address {url}"))),
+                };
+                match checked {
+                    Ok(()) => {
+                        let http = HttpClient::new_pinned(&url, pin, REQUEST_TIMEOUT)?;
+                        let mut client = Self::with_http(identity, http, Some(address.node.clone()))?;
+                        client.lan_pin = Some(pin);
+                        return Ok(client);
+                    }
+                    Err(error) => last = Some(error), // a stale or foreign announcement: next address
+                }
+            }
+        }
+        match &address.url {
+            Some(url) => Self::new(identity, url, Some(address.node.clone())),
+            None => Err(last.unwrap_or_else(|| SdkError::Untrusted("node not found in the LAN".into()))),
+        }
+    }
 
     fn check(answer: ClientResponse) -> SdkResult<serde_json::Map<String, Value>> {
         let value =
@@ -169,30 +272,24 @@ impl Client {
     }
 
     /// Fetches and verifies the node's info, then logs in (solving a proof-of-work puzzle if the node asks for one).
+    /// In a network the login carries a `home` statement: this node is the client's home gateway.
     pub async fn connect(&mut self) -> SdkResult<()> {
-        let info = Self::check(self.http.get("/v4/info").await?)?;
-        let card = KeyCard::from_value(info.get("card").cloned().unwrap_or(Value::Null))?;
-        if self.expected_node.as_ref().is_some_and(|expected| expected != card.id()) {
-            return Err(SdkError::Untrusted("node ID does not match".into()));
-        }
-        let statement = Statement::from_value(info.get("info").cloned().unwrap_or(Value::Null))?;
-        statement.verify(&[&card], 1)?;
-        statement.check_time(now_ms())?;
-        if statement.kind() != "info" {
-            return Err(SdkError::Untrusted("info statement expected".into()));
-        }
-        self.net = Some(statement.net().clone());
-        self.node = Some(card.clone());
-
+        let card = self.fetch_info().await?;
+        let net = self.net.clone().ok_or_else(|| SdkError::Untrusted("no network".into()))?;
         let challenge = Self::check(self.http.post("/v4/auth/challenge", None, b"{}".to_vec()).await?)?;
-        let challenge_text = challenge.get("challenge").and_then(Value::as_str).unwrap_or_default().to_owned();
-        let mut body = json!({"challenge": challenge_text, "card": self.card.to_value()});
-        if let Some(puzzle) = challenge.get("pow").filter(|value| !value.is_null()) {
-            let puzzle = Puzzle::from_value(puzzle.clone())?;
-            puzzle.verify(&card)?;
-            let solution =
-                puzzle.solve(self.max_pow_tries).ok_or_else(|| SdkError::Untrusted("proof of work too hard".into()))?;
-            body["pow"] = json!(b64(&solution));
+        let mut body = json!({"challenge": challenge.get("challenge").cloned().unwrap_or(Value::Null),
+                              "card": self.card.to_value()});
+        self.solve_puzzle(&challenge, &card, &mut body)?;
+        if &net != card.id() {
+            let now = now_ms();
+            let home = Draft {
+                kind: "home",
+                net: &net,
+                iat: now,
+                exp: now + HOME_LIFETIME_MS,
+                body: json!({"node": card.id().as_str()}),
+            };
+            body["home"] = Statement::sign(&home, &self.identity)?.to_value();
         }
         let login = SignedRequest::sign(&self.identity, card.id(), "login", body, now_ms(), &mut OsRng)?;
         let session = Self::check(self.http.post("/v4/auth/login", None, login.to_bytes()?).await?)?;
@@ -202,6 +299,134 @@ impl Client {
         }
         self.session = Some(token.to_owned());
         Ok(())
+    }
+
+    /// Joins a network with a join link (docs/06 §7): checks that the gateway belongs to the network of the link
+    /// (its info, the genesis manifest up to the network ID, and that the log lists the gateway), solves the
+    /// proof-of-work if asked, presents the invite code if the link has one, verifies the membership it gets and
+    /// logs in. From then on the gateway's ID is pinned. A link with `node` pins it from the start; with `node` and
+    /// `tls` the gateway is looked for in the LAN first (mDNS, see [`ConnectOptions`]).
+    pub async fn join(identity: Identity, link: &str) -> SdkResult<Self> {
+        Self::join_with(identity, link, &ConnectOptions::default()).await
+    }
+
+    /// [`Client::join`] with options for the LAN.
+    pub async fn join_with(identity: Identity, link: &str, options: &ConnectOptions) -> SdkResult<Self> {
+        let link = JoinLink::parse(link)?;
+        let mut client = match &link.node {
+            Some(node) => {
+                let address = NodeAddress { node: node.clone(), tls: link.tls, url: Some(link.gateway.clone()) };
+                Self::reach(identity, &address, options).await?
+            }
+            None => Self::new(identity, &link.gateway, None)?,
+        };
+        let node = client.fetch_info().await?;
+        if client.net.as_ref() != Some(&link.net) {
+            return Err(SdkError::Untrusted("the gateway belongs to another network".into()));
+        }
+        client.check_gateway_in_log(&link.net, node.id()).await?;
+        let challenge =
+            Self::check(client.http.post("/v4/auth/challenge", None, br#"{"for":"join"}"#.to_vec()).await?)?;
+        let mut body = json!({"challenge": challenge.get("challenge").cloned().unwrap_or(Value::Null),
+                              "card": client.card.to_value()});
+        if let Some(code) = &link.code {
+            body["code"] = json!(code);
+        }
+        client.solve_puzzle(&challenge, &node, &mut body)?;
+        let request = SignedRequest::sign(&client.identity, node.id(), "join", body, now_ms(), &mut OsRng)?;
+        let answer = Self::check(client.http.post("/v4/net/join", None, request.to_bytes()?).await?)?;
+        if let Some(member) = answer.get("member").filter(|value| !value.is_null()) {
+            let statement = Statement::from_value(member.clone())?;
+            statement.verify(&[&node], 1)?;
+            let named = statement.body().get("member").and_then(Value::as_str);
+            if statement.kind() != "member"
+                || statement.net() != &link.net
+                || named != Some(client.identity.id().as_str())
+            {
+                return Err(SdkError::Untrusted("the gateway answered with another membership".into()));
+            }
+        }
+        client.expected_node = Some(node.id().clone());
+        client.connect().await?;
+        Ok(client)
+    }
+
+    /// Fetches `/v4/info`: the node's card (checked against the pinned ID and, over the LAN, against the TLS pin)
+    /// and its signed info statement.
+    async fn fetch_info(&mut self) -> SdkResult<KeyCard> {
+        let (card, net) = Self::info_of(&self.http, self.expected_node.as_ref(), self.lan_pin.as_ref()).await?;
+        self.net = Some(net);
+        self.node = Some(card.clone());
+        Ok(card)
+    }
+
+    /// `/v4/info` of the node behind `http`, verified: the card has the `expected` ID and - over the LAN - pins the
+    /// certificate `pin` the connection was made with; the `info` statement is signed by that card and fresh.
+    /// Returns the card and the network.
+    async fn info_of(http: &HttpClient, expected: Option<&Id>, pin: Option<&[u8; 32]>) -> SdkResult<(KeyCard, Id)> {
+        let info = Self::check(http.get("/v4/info").await?)?;
+        let card = KeyCard::from_value(info.get("card").cloned().unwrap_or(Value::Null))?;
+        if expected.is_some_and(|expected| expected != card.id()) {
+            return Err(SdkError::Untrusted("node ID does not match".into()));
+        }
+        if pin.is_some() && card.tls() != pin {
+            // The certificate matched, but the node's signed card does not pin it: not the node we were told about.
+            return Err(SdkError::Untrusted("the node's card does not pin this TLS certificate".into()));
+        }
+        let statement = Statement::from_value(info.get("info").cloned().unwrap_or(Value::Null))?;
+        statement.verify(&[&card], 1)?;
+        statement.check_time(now_ms())?;
+        if statement.kind() != "info" {
+            return Err(SdkError::Untrusted("info statement expected".into()));
+        }
+        Ok((card, statement.net().clone()))
+    }
+
+    /// Solves the proof-of-work puzzle of a challenge answer, if there is one (verified as the node's first).
+    fn solve_puzzle(
+        &self,
+        challenge: &serde_json::Map<String, Value>,
+        node: &KeyCard,
+        body: &mut Value,
+    ) -> SdkResult<()> {
+        if let Some(puzzle) = challenge.get("pow").filter(|value| !value.is_null()) {
+            let puzzle = Puzzle::from_value(puzzle.clone())?;
+            puzzle.verify(node)?;
+            let solution =
+                puzzle.solve(self.max_pow_tries).ok_or_else(|| SdkError::Untrusted("proof of work too hard".into()))?;
+            body["pow"] = json!(b64(&solution));
+        }
+        Ok(())
+    }
+
+    /// The part of the network's log a client can check without replaying it (see [`gateway_in_log`]), on the
+    /// first 4,096 entries fetched from the gateway itself.
+    async fn check_gateway_in_log(&self, net: &Id, node: &Id) -> SdkResult<()> {
+        let untrusted = |what: &str| SdkError::Untrusted(format!("network log: {what}"));
+        let mut entries: Vec<Statement> = Vec::new();
+        let mut from = 0u64;
+        while from < JOIN_CHECK_MAX_ENTRIES {
+            let query = json!({"from": from, "max": 256}).to_string().into_bytes();
+            let page = Self::check(self.http.post(&format!("/v4/net/{net}/log"), None, query).await?)?;
+            let list = page.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+            if list.is_empty() || list.len() > 256 {
+                break;
+            }
+            for item in &list {
+                from += 1;
+                let bytes = b64_var(item.as_str().unwrap_or_default(), "entry", 64 * 1024)?;
+                // Garbage entries do not count (docs/06 §6), and they do not stop the check either.
+                if let Ok(statement) = Statement::parse(&bytes) {
+                    entries.push(statement);
+                } else if from == 1 {
+                    return Err(untrusted("entry 0 is not a statement"));
+                }
+            }
+            if page.get("size").and_then(Value::as_u64).is_some_and(|size| from >= size) {
+                break;
+            }
+        }
+        gateway_in_log(net, node, &entries)
     }
 
     fn node_id(&self) -> SdkResult<&Id> {
@@ -366,9 +591,126 @@ impl Client {
     }
 }
 
+/// What a client checks in a network's log before it joins at the gateway `node` (docs/06 §7): entry 0 is the
+/// genesis manifest of `net`, signed by the network key (the trust anchor is the network ID), and `node` is a start
+/// gateway of that manifest or has a `gateway` seal (level ≥ 2) **of this network**, signed by the network key or
+/// only by admins whose delegation (by the network key, for this network) contains the right `seals`. Revocations,
+/// expiry and multi-admin approvals are the nodes' business (they replay the whole log).
+pub fn gateway_in_log(net: &Id, node: &Id, entries: &[Statement]) -> SdkResult<()> {
+    let untrusted = |what: &str| SdkError::Untrusted(format!("network log: {what}"));
+    let genesis = entries.first().ok_or_else(|| untrusted("empty"))?;
+    let master = KeyCard::from_value(genesis.body().get("card").cloned().unwrap_or(Value::Null))?;
+    if genesis.kind() != "manifest"
+        || genesis.net() != net
+        || master.id() != net
+        || master.role() != Role::Net
+        || genesis.body().get("version").and_then(Value::as_u64) != Some(1)
+        || genesis.claimed_signers() != [net]
+    {
+        return Err(untrusted("entry 0 is not the genesis manifest of this network"));
+    }
+    genesis.verify(&[&master], 1)?;
+    let listed =
+        genesis.body().get("gateways").and_then(Value::as_array).is_some_and(|list| {
+            list.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(node.as_str()))
+        });
+    if listed {
+        return Ok(());
+    }
+    // Who may seal: the network key, and admins it delegated the right `seals` to in this network.
+    let mut cards = vec![master.clone()];
+    for statement in
+        entries.iter().filter(|s| s.kind() == "delegation" && s.net() == net && s.claimed_signers() == [net])
+    {
+        let body = statement.body();
+        let seals = body
+            .get("rights")
+            .and_then(Value::as_array)
+            .is_some_and(|rights| rights.iter().any(|right| right.as_str() == Some("seals")));
+        if !seals || statement.verify(&[&master], 1).is_err() {
+            continue;
+        }
+        if let Ok(card) = KeyCard::from_value(body.get("card").cloned().unwrap_or(Value::Null)) {
+            let admin = body.get("admin").and_then(Value::as_str);
+            if card.role() == Role::Admin && admin == Some(card.id().as_str()) && cards.len() < 10_000 {
+                cards.push(card);
+            }
+        }
+    }
+    let card_refs: Vec<&KeyCard> = cards.iter().collect();
+    let sealed = entries.iter().filter(|s| s.kind() == "seal" && s.net() == net).any(|seal| {
+        let body = seal.body();
+        body.get("subject").and_then(Value::as_str) == Some(node.as_str())
+            && body.get("level").and_then(Value::as_u64).is_some_and(|level| level >= 2)
+            && body
+                .get("services")
+                .and_then(Value::as_array)
+                .is_some_and(|services| services.iter().any(|s| s.as_str() == Some("gateway")))
+            // Every signer must be one of the cards above (an unknown signer fails the check).
+            && seal.verify(&card_refs, seal.claimed_signers().len()).is_ok()
+    });
+    if sealed { Ok(()) } else { Err(untrusted("the gateway is not a gateway of this network")) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (review 3, finding 9): the join check only takes gateway seals of this network, signed by the
+    /// network key or by admins that have the right `seals`.
+    #[test]
+    fn join_check_takes_only_seals_of_this_network_by_sealing_admins() -> SdkResult<()> {
+        let now = now_ms();
+        let master = Identity::generate(&mut OsRng);
+        let net = master.id().clone();
+        let statement = |kind: &str, net: &Id, body: Value, signer: &Identity| {
+            Statement::sign(&Draft { kind, net, iat: now, exp: now + 86_400_000, body }, signer)
+        };
+        let card = |who: &Identity, role: Role| who.key_card(role, None, now);
+        let start = Identity::generate(&mut OsRng).id().clone();
+        let genesis = statement(
+            "manifest",
+            &net,
+            json!({"version": 1, "card": card(&master, Role::Net)?.to_value(), "gateways": [{"id": start.as_str()}]}),
+            &master,
+        )?;
+        let delegation = |admin: &Identity, rights: &[&str], net: &Id| -> SdkResult<Statement> {
+            let body =
+                json!({"admin": admin.id().as_str(), "rights": rights, "card": card(admin, Role::Admin)?.to_value()});
+            Ok(statement("delegation", net, body, &master)?)
+        };
+        let seal = |node: &Id, level: u8, net: &Id, signer: &Identity| -> SdkResult<Statement> {
+            let body = json!({"subject": node.as_str(), "level": level, "services": ["gateway"]});
+            Ok(statement("seal", net, body, signer)?)
+        };
+        let (sealer, banner) = (Identity::generate(&mut OsRng), Identity::generate(&mut OsRng));
+        let other_net = Identity::generate(&mut OsRng).id().clone();
+        let log = |extra: Vec<Statement>| -> SdkResult<Vec<Statement>> {
+            let mut entries =
+                vec![genesis.clone(), delegation(&sealer, &["seals"], &net)?, delegation(&banner, &["bans"], &net)?];
+            entries.extend(extra);
+            Ok(entries)
+        };
+        let node = Identity::generate(&mut OsRng).id().clone();
+        let ok = |entries: &[Statement]| gateway_in_log(&net, &node, entries).is_ok();
+
+        assert!(gateway_in_log(&net, &start, &log(vec![])?).is_ok(), "start gateway of the genesis");
+        assert!(ok(&log(vec![seal(&node, 2, &net, &master)?])?), "sealed by the network key");
+        assert!(ok(&log(vec![seal(&node, 2, &net, &sealer)?])?), "sealed by an admin with seals");
+        assert!(!ok(&log(vec![])?), "not sealed at all");
+        assert!(!ok(&log(vec![seal(&node, 2, &net, &banner)?])?), "an admin without seals");
+        assert!(!ok(&log(vec![seal(&node, 1, &net, &sealer)?])?), "level 1 is no gateway");
+        // The same admin key seals the node in another network: that seal does not count here.
+        assert!(!ok(&log(vec![seal(&node, 2, &other_net, &sealer)?])?), "a seal of another network");
+        // A delegation the network key gave for another network does not make an admin here.
+        let foreign_admin = Identity::generate(&mut OsRng);
+        let mut entries = log(vec![seal(&node, 2, &net, &foreign_admin)?])?;
+        entries.push(delegation(&foreign_admin, &["seals"], &other_net)?);
+        assert!(!ok(&entries), "a delegation of another network");
+        // A wrong network ID: entry 0 is not its genesis.
+        assert!(gateway_in_log(&other_net, &node, &log(vec![seal(&node, 2, &net, &master)?])?).is_err());
+        Ok(())
+    }
 
     #[test]
     fn seen_file_survives_a_restart_and_drops_expired_and_broken_lines() -> SdkResult<()> {

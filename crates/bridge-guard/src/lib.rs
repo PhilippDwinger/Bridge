@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use bridge_core::pow::{MAX_POW_BITS, POW_LIFETIME_MS};
 use bridge_core::{Id, Puzzle};
-use bridge_store::MailboxLimits;
+use bridge_store::{MailboxLimits, RelayLimits};
 use thiserror::Error;
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
@@ -81,10 +81,14 @@ pub struct Limits {
     pub per_address: Rate,
     /// Login challenges per address.
     pub challenges_per_address: Rate,
+    /// Merkle proofs, consistency proofs and evidence per address (unauthenticated, docs/06 §9).
+    pub proofs_per_address: Rate,
     /// Sent envelopes per identity.
     pub sends_per_identity: Rate,
     /// Mailbox quotas.
     pub mailbox: MailboxLimits,
+    /// Quotas of the relay outbox (envelopes waiting for another gateway, docs/06 §8).
+    pub relay: RelayLimits,
     /// Concurrent long polls per identity.
     pub polls_per_identity: u32,
     /// Identities (key cards) a node remembers at most (phase 3: membership replaces this).
@@ -100,6 +104,7 @@ impl Default for Limits {
         Self {
             per_address: Rate { per_second: 20, burst: 40 },
             challenges_per_address: Rate { per_second: 2, burst: 10 },
+            proofs_per_address: Rate { per_second: 5, burst: 10 },
             sends_per_identity: Rate { per_second: 10, burst: 30 },
             mailbox: MailboxLimits {
                 max_envelopes: 1_000,
@@ -108,6 +113,7 @@ impl Default for Limits {
                 max_node_bytes: 1024 * 1024 * 1024,
                 max_seen_per_sender: 20_000,
             },
+            relay: RelayLimits { max_entries: 10_000, max_bytes: 256 * 1024 * 1024, max_per_target: 5_000 },
             max_identities: 100_000,
             polls_per_identity: 2,
             max_tracked: 100_000,
@@ -298,6 +304,7 @@ pub struct Guard {
     limits: Limits,
     per_address: RateLimiter<IpAddr>,
     challenges_per_address: RateLimiter<IpAddr>,
+    proofs_per_address: RateLimiter<IpAddr>,
     sends: RateLimiter<Id>,
     nonces: Mutex<NonceTable>,
     challenges: Mutex<ChallengeTable>,
@@ -312,6 +319,7 @@ impl Guard {
         Self {
             per_address: RateLimiter::new(limits.per_address, limits.max_tracked),
             challenges_per_address: RateLimiter::new(limits.challenges_per_address, limits.max_tracked),
+            proofs_per_address: RateLimiter::new(limits.proofs_per_address, limits.max_tracked),
             sends: RateLimiter::new(limits.sends_per_identity, limits.max_tracked),
             nonces: Mutex::new(NonceTable::new(limits.max_tracked)),
             challenges: Mutex::new(ChallengeTable {
@@ -341,6 +349,11 @@ impl Guard {
         self.challenges_per_address.check(&address_key(ip), now_ms)?;
         lock(&self.load).record(now_ms);
         Ok(())
+    }
+
+    /// A Merkle proof, consistency proof or evidence request for this address (tighter than the general bucket)?
+    pub fn admit_proof(&self, ip: IpAddr, now_ms: i64) -> GuardResult<()> {
+        self.proofs_per_address.check(&address_key(ip), now_ms)
     }
 
     /// How many proof-of-work bits a new challenge needs right now (0 = none).
@@ -424,6 +437,12 @@ impl Guard {
     #[must_use]
     pub fn mailbox_limits(&self) -> MailboxLimits {
         self.limits.mailbox
+    }
+
+    /// Relay outbox quotas for `bridge-store`.
+    #[must_use]
+    pub fn relay_limits(&self) -> RelayLimits {
+        self.limits.relay
     }
 }
 
@@ -529,6 +548,20 @@ mod tests {
         assert_eq!(guard.pow_bits(10 * 60_000), 0, "load gone");
         let always = Guard::new(Limits { pow: PowPolicy { always_bits: 40, ..limits.pow }, ..limits });
         assert_eq!(always.pow_bits(0), MAX_POW_BITS, "capped");
+    }
+
+    /// Regression (review 3, finding 4): the unauthenticated proof endpoints have their own, tighter bucket.
+    #[test]
+    fn proofs_have_a_tighter_bucket_per_address() {
+        let guard = Guard::new(Limits::default());
+        let burst = Limits::default().proofs_per_address.burst;
+        for _ in 0..burst {
+            assert_eq!(guard.admit_proof(ip(1), 0), Ok(()));
+        }
+        assert!(matches!(guard.admit_proof(ip(1), 0), Err(GuardError::RateLimited { .. })));
+        assert_eq!(guard.admit_address(ip(1), 0), Ok(()), "the general bucket is separate");
+        assert_eq!(guard.admit_proof(ip(2), 0), Ok(()), "per address");
+        assert_eq!(guard.admit_proof(ip(1), 1_000), Ok(()), "refills (5/s)");
     }
 
     #[test]

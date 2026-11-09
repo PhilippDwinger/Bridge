@@ -132,6 +132,17 @@ Log-Versionen** zeigen (Split-View). Deshalb:
 - **Regel**: Knoten und Clients akzeptieren Siegel, Sperren und Widerrufe nur mit Inclusion Proof gegen einen
   ausreichend bezeugten Kopf (Z9). Widerrufe wirken spätestens nach dem nächsten Kopf (Ziel: unter 60 s).
 - Log-Kopien liegen bei allen Zeugen; jeder kann das ganze Log nachrechnen.
+- **Wechsel der Zeugen oder Log-Führer** (per Manifest) gelten für einen Knoten erst, wenn der Kopf, der mit dem Wechsel
+  endet, noch von der **alten** Besetzung bezeugt ist (ADR 0010, 0013): signiert von einem alten Log-Führer **und**
+  mit-signiert von der alten Zeugen-Mehrheit (`witness_threshold`). Einzige Ausnahme ist die Not-Wiederherstellung
+  (ADR 0012, 0014): ein Manifest allein vom Hauptschlüssel, dessen Übergangs-Kopf der **erste** alte Log-Führer
+  (`logs[0]`) signiert und der Hauptschlüssel mit-signiert – ein zweiter oder dritter Log-Führer zählt dafür nie.
+  Eine Gabelung eines Knotens, der schon folgt, braucht also entweder einen alten Log-Führer und die alte
+  Zeugen-Mehrheit, oder die 24 Wörter und den Schlüssel des ersten alten Log-Führers. Mit dem Hauptschlüssel oder den
+  Admins allein – auch nicht über einen vorher selbst eingetragenen zweiten Log-Führer (Prüfung 6) – kann niemand eine
+  neue Besetzung erfinden und Knoten auf eine Gabelung führen; wer sich mit den Wörtern zum ersten Log-Führer macht,
+  tut das sichtbar im echten Log, bezeugt von den alten Zeugen. Ganz neue Knoten (erster Kontakt) haben als Anker nur
+  die Netz-ID (06 §10).
 
 ## 9. Kontingente und Limits (Grundgerüst)
 - **Token-Bucket** je (Identität, Aktion), je (IP, Aktion) und je (Netz, Aktion).

@@ -19,6 +19,23 @@ use crate::{PROTOCOL_VERSION, field_i64, field_str};
 pub const MAX_KEY_CARD_BYTES: usize = 2048;
 /// Maximum length of the optional display name.
 pub const MAX_NAME_CHARS: usize = 64;
+/// Maximum number of addresses (`urls`) on a node card (docs/06 §2).
+pub const MAX_URLS: usize = 4;
+/// Maximum length of one address in characters.
+pub const MAX_URL_CHARS: usize = 200;
+
+/// Checks one address (key cards, manifests - one rule, S5): starts with `https://` or `http://`, something follows,
+/// at most 200 characters, printable ASCII only (no whitespace, no control characters).
+pub fn check_url(url: &str) -> CoreResult<()> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
+    let ok = url.len() <= MAX_URL_CHARS
+        && rest.is_some_and(|rest| !rest.is_empty())
+        && url.bytes().all(|b| b.is_ascii_graphic());
+    if !ok {
+        return Err(CoreError::format("url: expected http(s)://..., at most 200 printable ASCII characters"));
+    }
+    Ok(())
+}
 
 /// What an identity is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,8 +117,21 @@ impl Identity {
         crypto::box_public(&self.receiving)
     }
 
-    /// Creates the self-signed key card of this identity.
+    /// Creates the self-signed key card of this identity (no addresses).
     pub fn key_card(&self, role: Role, name: Option<&str>, iat_ms: i64) -> CoreResult<KeyCard> {
+        self.key_card_with(role, name, &[], None, iat_ms)
+    }
+
+    /// Creates the self-signed key card with addresses (`urls`, 0-4) and the TLS pin (`tls`, SHA-256 of the DER
+    /// certificate) - both only allowed for role `node` (docs/06 §2). Both are signed like every other field.
+    pub fn key_card_with(
+        &self,
+        role: Role,
+        name: Option<&str>,
+        urls: &[String],
+        tls: Option<[u8; 32]>,
+        iat_ms: i64,
+    ) -> CoreResult<KeyCard> {
         let mut object = Map::new();
         object.insert("v".into(), json!(PROTOCOL_VERSION));
         object.insert("t".into(), json!("key"));
@@ -111,6 +141,12 @@ impl Identity {
         object.insert("role".into(), json!(role.as_str()));
         if let Some(name) = name {
             object.insert("name".into(), json!(name));
+        }
+        if !urls.is_empty() {
+            object.insert("urls".into(), json!(urls));
+        }
+        if let Some(tls) = tls {
+            object.insert("tls".into(), json!(b64(&tls)));
         }
         object.insert("iat".into(), json!(iat_ms));
         let signature = self.sign_canonical("key", &canonical(&Value::Object(object.clone()))?);
@@ -151,6 +187,8 @@ pub struct KeyCard {
     receive: [u8; 32],
     role: Role,
     iat: i64,
+    urls: Vec<String>,
+    tls: Option<[u8; 32]>,
 }
 
 impl KeyCard {
@@ -184,12 +222,22 @@ impl KeyCard {
         if iat < 0 {
             return Err(CoreError::format("iat: negative"));
         }
+        let urls = parse_urls(raw.get("urls"))?;
+        let tls = match raw.get("tls") {
+            None => None,
+            Some(value) => {
+                Some(b64_fixed::<32>(value.as_str().ok_or_else(|| CoreError::format("tls: not a string"))?, "tls")?)
+            }
+        };
+        if (!urls.is_empty() || tls.is_some()) && role != Role::Node {
+            return Err(CoreError::format("urls/tls: only on node cards"));
+        }
         let signature = b64_fixed::<64>(field_str(&raw, "sig")?, "sig")?;
         if Id::of_sign_key(&sign) != id {
             return Err(CoreError::BadSignature);
         }
         crypto::verify(&sign, "key", &canonical_without(&raw, &["sig"])?, &signature)?;
-        Ok(Self { raw, id, sign, receive, role, iat })
+        Ok(Self { raw, id, sign, receive, role, iat, urls, tls })
     }
 
     /// ID of the identity.
@@ -217,6 +265,16 @@ impl KeyCard {
     pub fn iat(&self) -> i64 {
         self.iat
     }
+    /// Addresses of a node (empty if none).
+    #[must_use]
+    pub fn urls(&self) -> &[String] {
+        &self.urls
+    }
+    /// TLS pin of a node: SHA-256 of its DER certificate.
+    #[must_use]
+    pub fn tls(&self) -> Option<&[u8; 32]> {
+        self.tls.as_ref()
+    }
     /// The card as JSON value (exactly as signed).
     #[must_use]
     pub fn to_value(&self) -> Value {
@@ -226,6 +284,27 @@ impl KeyCard {
     pub fn to_bytes(&self) -> CoreResult<Vec<u8>> {
         canonical(&self.to_value())
     }
+}
+
+/// `urls`: absent, or 1-4 distinct valid addresses.
+fn parse_urls(value: Option<&Value>) -> CoreResult<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let list = value
+        .as_array()
+        .filter(|list| (1..=MAX_URLS).contains(&list.len()))
+        .ok_or_else(|| CoreError::format("urls: 1..=4 addresses"))?;
+    let mut urls: Vec<String> = Vec::with_capacity(list.len());
+    for item in list {
+        let url = item.as_str().ok_or_else(|| CoreError::format("urls: not a string"))?;
+        check_url(url)?;
+        if urls.iter().any(|known| known == url) {
+            return Err(CoreError::format("urls: duplicate"));
+        }
+        urls.push(url.to_owned());
+    }
+    Ok(urls)
 }
 
 #[cfg(test)]
@@ -260,6 +339,70 @@ mod tests {
         let mut value = card.to_value();
         value["v"] = json!(3);
         assert!(KeyCard::from_value(value).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn urls_and_tls_are_signed_and_checked() -> CoreResult<()> {
+        let node = Identity::generate(&mut OsRng);
+        let urls = vec!["https://pc.tail91b057.ts.net:8443/n1".to_string(), "http://192.168.1.20:7700".to_string()];
+        let pin = crypto::sha256(b"certificate");
+        let card = node.key_card_with(Role::Node, Some("Knoten"), &urls, Some(pin), 5)?;
+        assert_eq!(card.urls(), urls.as_slice());
+        assert_eq!(card.tls(), Some(&pin));
+        assert_eq!(KeyCard::parse(&card.to_bytes()?)?, card);
+        // Without addresses: the old builder still works and gives none.
+        let plain = node.key_card(Role::Node, None, 5)?;
+        assert!(plain.urls().is_empty() && plain.tls().is_none());
+
+        // Tamper: change, add or drop an address, change the pin -> signature no longer fits.
+        for change in [
+            json!(["https://evil.example"]),
+            json!(["https://pc.tail91b057.ts.net:8443/n1", "http://192.168.1.20:7700", "https://evil.example"]),
+            json!(["https://pc.tail91b057.ts.net:8443/n1"]),
+        ] {
+            let mut value = card.to_value();
+            value["urls"] = change;
+            assert_eq!(KeyCard::from_value(value), Err(CoreError::BadSignature));
+        }
+        let mut value = card.to_value();
+        value["tls"] = json!(b64(&crypto::sha256(b"other certificate")));
+        assert_eq!(KeyCard::from_value(value), Err(CoreError::BadSignature));
+        let mut value = card.to_value();
+        value.as_object_mut().map(|object| object.remove("tls"));
+        assert_eq!(KeyCard::from_value(value), Err(CoreError::BadSignature));
+
+        // Bad values are refused by the builder and by the parser (before the signature).
+        let long = format!("https://{}", "a".repeat(MAX_URL_CHARS));
+        let five: Vec<String> = (0..5).map(|i| format!("https://n{i}.example")).collect();
+        for bad in [
+            vec!["ftp://x.example".to_string()],
+            vec!["https://".to_string()],
+            vec!["https://a b.example".to_string()],
+            vec!["https://a.example/\u{7}".to_string()],
+            vec!["https://ä.example".to_string()],
+            vec![long],
+            vec!["https://same.example".to_string(), "https://same.example".to_string()],
+            five,
+        ] {
+            assert!(node.key_card_with(Role::Node, None, &bad, None, 0).is_err(), "{bad:?}");
+            let mut value = card.to_value();
+            value["urls"] = json!(bad);
+            assert!(matches!(KeyCard::from_value(value), Err(CoreError::BadFormat(_))));
+        }
+        for bad in [json!([]), json!("https://x.example"), json!([1])] {
+            let mut value = card.to_value();
+            value["urls"] = bad;
+            assert!(matches!(KeyCard::from_value(value), Err(CoreError::BadFormat(_))));
+        }
+        for bad in [json!(b64(&[1u8; 31])), json!(b64(&[1u8; 33])), json!(7), json!("not base64!")] {
+            let mut value = card.to_value();
+            value["tls"] = bad;
+            assert!(KeyCard::from_value(value).is_err());
+        }
+        // Only node cards carry addresses or pins.
+        assert!(node.key_card_with(Role::Client, None, &urls, None, 0).is_err());
+        assert!(node.key_card_with(Role::Admin, None, &[], Some(pin), 0).is_err());
         Ok(())
     }
 
