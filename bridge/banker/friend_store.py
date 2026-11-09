@@ -24,10 +24,10 @@ def _now():
 
 
 def is_blocked(server_url):
-    """Blocked by host and port - https://evil.example:443/x is the same server as https://evil.example."""
+    """Blocked if an entry hits this server: an entry without a path blocks the whole host and port
+    (https://evil.example blocks https://evil.example:443/x too), an entry with a path exactly that server."""
     from bridge.core import address
-    key = address.server_key(server_url)
-    return any(address.server_key(url) == key for url in blocked)
+    return any(address.block_covers(url, server_url) for url in blocked)
 
 
 # region friendships

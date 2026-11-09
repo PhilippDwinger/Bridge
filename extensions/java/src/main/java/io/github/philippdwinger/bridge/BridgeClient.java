@@ -60,7 +60,7 @@ public final class BridgeClient implements AutoCloseable {
     private static final Set<String> FATAL = Set.of("INVALID_CREDENTIALS", "ALREADY_EXISTS", "ARGUMENT_ERROR",
             "DESTROYED", "BRIDGE_URL_MISSING");
     private static final Set<String> BRIDGE_ROUTES = Set.of("admin", "server", "s2s", "client", "message", "command",
-            "realm", "express", "agent", "conversation", "friends");
+            "realm", "express", "agent", "conversation", "friends", "site");
     private static final String PUBLIC = "public";
 
     public enum State { IDLE, CONNECTING, CONNECTED, RECONNECTING, FAILED, CLOSED }

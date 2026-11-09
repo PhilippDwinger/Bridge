@@ -87,6 +87,10 @@ public final class LiveTest {
         check("normalizeServer: https, /admin cut, :443 dropped",
                 BridgeClient.normalizeServer(" Muttchen.ts.net:443/admin/ ").equals("https://muttchen.ts.net"),
                 BridgeClient.normalizeServer(" Muttchen.ts.net:443/admin/ "));
+        check("normalizeServer: keeps a server id path, cuts /admin and /site",
+                BridgeClient.normalizeServer("https://pc.ts.net:10000/momentum/admin").equals("https://pc.ts.net:10000/momentum")
+                        && BridgeClient.normalizeServer("https://pc.ts.net/momentum/site/").equals("https://pc.ts.net/momentum"),
+                BridgeClient.normalizeServer("https://pc.ts.net/momentum/site/"));
         // endregion
 
         List<String> errors = new CopyOnWriteArrayList<>();

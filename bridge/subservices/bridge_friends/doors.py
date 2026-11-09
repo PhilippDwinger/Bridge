@@ -258,7 +258,7 @@ def _fake(key, purpose):
 
 def _limit_key(requester_server, requester_ip):
     """Hellos are limited per other server - our own clients one by one (one client must not block all)."""
-    return requester_ip if requester_server == url_env.base_root else address.server_key(requester_server)
+    return requester_ip if requester_server == url_env.base_root else address.server_identity(requester_server)
 
 def _hello_allowed(requester_server, requester_ip):
     key = _limit_key(requester_server, requester_ip)
@@ -325,8 +325,8 @@ def _guessing_stopped(key, requester_ip, requester_server):
     if sum(1 for fail in recent if fail[1] == requester_ip) >= protocol.friend_attempts_per_client:
         return True
     if requester_server != url_env.base_root:
-        server = address.server_key(requester_server)
-        if sum(1 for fail in recent if address.server_key(fail[2]) == server) >= protocol.friend_attempts_per_server:
+        server = address.server_identity(requester_server)
+        if sum(1 for fail in recent if address.server_identity(fail[2]) == server) >= protocol.friend_attempts_per_server:
             return True
     return False
 

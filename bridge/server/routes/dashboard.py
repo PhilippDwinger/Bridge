@@ -9,8 +9,13 @@ Self-contained on purpose: the HTML/CSS/JS is inline (brand colours as values, s
 outside dependency and works even when Bridge runs completely on its own. Every control calls the existing
 password-protected /admin/* endpoints.
 """
+import html
+import json
+
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
+
+from bridge.server import url_env
 
 Router = APIRouter()
 
@@ -122,7 +127,7 @@ _PAGE = r"""<!doctype html>
       <div class="sub mono" id="srvUrl"></div>
     </div>
     <span class="grow"></span>
-    <a class="btn" id="siteBtn" href="/site/" target="_blank" rel="noopener" title="Die Website dieses Servers (/site/) in neuem Tab">Website &#8599;</a>
+    <a class="btn" id="siteBtn" href="__BASE_HTML__/site/" target="_blank" rel="noopener" title="Die Website dieses Servers (/site/) in neuem Tab">Website &#8599;</a>
     <button class="btn btn--ghost" id="refreshBtn" type="button">Aktualisieren</button>
     <button class="btn btn--ghost" id="logoutBtn" type="button">Abmelden</button>
   </div>
@@ -202,7 +207,11 @@ _PAGE = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-let PW=sessionStorage.getItem("bridge-admin-pw")||"";
+// Base path of this server ("" or e.g. "/momentum" when several servers share one host and port). The password is
+// remembered per server: servers on the same host and port share the browser's storage.
+const BASE=__BASE_JS__;
+const PW_KEY="bridge-admin-pw:"+BASE;
+let PW=sessionStorage.getItem(PW_KEY)||"";
 let timer=null, busy=false;
 
 function fmtTime(iso){ if(!iso) return "–"; try{return new Date(iso).toLocaleString("de-DE");}catch(e){return iso;} }
@@ -218,9 +227,9 @@ function msg(kind, text){
 }
 
 async function admin(path, body){
-  const r=await fetch("/admin/"+path,{method:"POST",headers:{"content-type":"application/json"},
+  const r=await fetch(BASE+"/admin/"+path,{method:"POST",headers:{"content-type":"application/json"},
     body:JSON.stringify(Object.assign({password:PW}, body||{}))});
-  if(r.status===403||r.status===401){ PW=""; sessionStorage.removeItem("bridge-admin-pw"); showLogin("Falsches Passwort oder Sitzung abgelaufen."); throw new Error("auth"); }
+  if(r.status===403||r.status===401){ PW=""; sessionStorage.removeItem(PW_KEY); showLogin("Falsches Passwort oder Sitzung abgelaufen."); throw new Error("auth"); }
   let data=null; try{ data=await r.json(); }catch(e){}
   if(!r.ok){
     let m="Fehler "+r.status; const d=data&&data.detail;
@@ -382,22 +391,30 @@ document.addEventListener("click", ev=>{
     act(()=>admin("settings",body), "Einstellungen gespeichert."); }
   else if(a==="pw-change"){ const np=($("pw-new").value||"").trim(); if(np.length<4){msg("err","Neues Passwort ist zu kurz.");return;}
     if(confirm("Admin-Passwort wirklich ändern?")) act(async()=>{ await admin("password/change",{new_password:np});
-      PW=np; sessionStorage.setItem("bridge-admin-pw",np); $("pw-new").value=""; }, "Passwort geändert."); }
+      PW=np; sessionStorage.setItem(PW_KEY,np); $("pw-new").value=""; }, "Passwort geändert."); }
   else if(a==="agent-reset"){ if(confirm("BridgeAgent auf die Grundwerte zurücksetzen?"))
     act(()=>admin("agent",{action:"reset"}), "Agent zurückgesetzt."); }
   else if(a==="reset"){ if(confirm("Server wirklich zurücksetzen? Clients, Nachrichten und Realms werden gelöscht (vertraute Server bleiben)."))
     act(()=>admin("reset"), "Server zurückgesetzt."); }
 });
 
-$("loginForm").addEventListener("submit",e=>{e.preventDefault();PW=$("pw").value;sessionStorage.setItem("bridge-admin-pw",PW);load();});
+$("loginForm").addEventListener("submit",e=>{e.preventDefault();PW=$("pw").value;sessionStorage.setItem(PW_KEY,PW);load();});
 $("refreshBtn").addEventListener("click",load);
-$("logoutBtn").addEventListener("click",()=>{PW="";sessionStorage.removeItem("bridge-admin-pw");showLogin();});
+$("logoutBtn").addEventListener("click",()=>{PW="";sessionStorage.removeItem(PW_KEY);showLogin();});
 if(PW) load(); else showLogin();
 </script>
 </body>
 </html>"""
 
 
+def render_page() -> str:
+    """The dashboard with the server's base path filled in (links and API calls work behind a path prefix)."""
+    base = url_env.base_path()
+    return _PAGE.replace("__BASE_JS__", json.dumps(base).replace("<", "\\u003c")).replace("__BASE_HTML__", html.escape(base, quote=True))
+
+
+# "/admin/" too: behind a path prefix the automatic slash redirect would point at the wrong address
 @Router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+@Router.get("/admin/", response_class=HTMLResponse, include_in_schema=False)
 async def admin_dashboard() -> str:
-    return _PAGE
+    return render_page()

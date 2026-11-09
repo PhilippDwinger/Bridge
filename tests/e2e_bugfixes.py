@@ -279,10 +279,16 @@ def scenarios():
     a2c, ta2c = register("A", "a-code")
     status, door = post("A", "/friends/invite", {"session_token": ta2c, "name": "sandra22", "password": "passwort-1"})
     check("names that look like a code are allowed", status == 200, door)
+    # Another server under a path on C's host and port is ANOTHER server (several servers per host:port) - no block
     status, data = post("A", "/admin/blocked/add", {"password": PASSWORD["A"], "url": URL["C"] + "/irgendwas/"})
     friend = {f["friend_ip"]: f for f in post("A", "/friends/list", {"session_token": ta1})[1]["friends"]}.get(c1, {})
-    check("blocking another spelling of C's URL blocks C", status == 200 and friend.get("via") == "blocked", (data, friend.get("via")))
+    check("blocking another server on C's host (other path) does not block C", status == 200 and friend.get("via") != "blocked", (data, friend.get("via")))
     post("A", "/admin/blocked/remove", {"password": PASSWORD["A"], "url": URL["C"] + "/irgendwas/"})
+    # Another spelling of C itself (Bridge route at the end, upper case, trailing /) blocks C
+    status, data = post("A", "/admin/blocked/add", {"password": PASSWORD["A"], "url": URL["C"] + "/ADMIN/"})
+    friend = {f["friend_ip"]: f for f in post("A", "/friends/list", {"session_token": ta1})[1]["friends"]}.get(c1, {})
+    check("blocking another spelling of C's URL blocks C", status == 200 and friend.get("via") == "blocked", (data, friend.get("via")))
+    post("A", "/admin/blocked/remove", {"password": PASSWORD["A"], "url": URL["C"] + "/"})
     status, data = post("A", "/friends/add", {"session_token": ta1, "address": "x@https://zzä..example.com", "password": ""})
     check("a broken server URL -> 400, no 500", status == 400, data)
 

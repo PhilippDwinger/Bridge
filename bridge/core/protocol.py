@@ -36,6 +36,8 @@ def compatible(peer_version):
 # limits see the real client address instead of the proxy. Set via BRIDGE_TRUST_PROXY. Only turn this on when a
 # trusted proxy sits in front - otherwise clients could fake their address.
 trust_proxy = False
+# Only these proxy addresses are believed (comma separated, "*" = any). BRIDGE_TRUST_PROXY_IPS, e.g. "127.0.0.1,::1"
+trust_proxy_ips = "*"
 # endregion wire protocol
 
 # region server limits (not part of the wire protocol)

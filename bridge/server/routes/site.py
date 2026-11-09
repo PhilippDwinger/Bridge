@@ -1,7 +1,8 @@
 """The reserved path /site - where a host app (e.g. BridgeControll) can mount a website next to this server.
 
 A Bridge server owns its whole URL (the start page, /admin, /server, /client, /message, ...). A host app may put a
-website in front of the SAME public URL under /site/ (BridgeControll does that with Tailscale Funnel: "/" goes to
+website in front of the SAME public URL under /site/ (always relative to the server's own URL: for
+https://pc.ts.net:10000/momentum it is https://pc.ts.net:10000/momentum/site/) (BridgeControll does that with Tailscale Funnel: "/" goes to
 Bridge, "/site" to the website). Two rules make that safe:
 
   1. /site belongs to the website, never to Bridge: no Bridge route may ever start with /site. create_app() checks
@@ -11,8 +12,12 @@ Bridge, "/site" to the website). Two rules make that safe:
 
 Bridge itself knows nothing about the website (it runs fine without any host app).
 """
+import html
+
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
+
+from bridge.server import url_env
 
 SITE_PATH = "/site"
 
@@ -41,12 +46,13 @@ _PAGE = """<!doctype html>
  <h1>Diesem Server ist keine Website zugewiesen</h1>
  <p>Unter /site/ liegt die Website, die der Host (z.&nbsp;B. BridgeControll) diesem Bridge-Server zuweist.
     Gerade ist hier keine eingerichtet &ndash; oder sie ist gestoppt.</p>
- <a href="/admin">&larr; Zum Server-Dashboard</a>
+ <a href="__BASE__/admin">&larr; Zum Server-Dashboard</a>
 </div></body></html>"""
 
 
 def _placeholder() -> HTMLResponse:
-    return HTMLResponse(_PAGE, status_code=404, headers={"Cache-Control": "no-store"})
+    page = _PAGE.replace("__BASE__", html.escape(url_env.base_path(), quote=True))
+    return HTMLResponse(page, status_code=404, headers={"Cache-Control": "no-store"})
 
 
 @Router.get(SITE_PATH, include_in_schema=False)

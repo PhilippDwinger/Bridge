@@ -41,10 +41,10 @@ def is_trusted(server_url):
     return server_url in trusted_servers
 
 def matches_trusted(server_url):
-    """True if a trusted server has the same host and port, ignoring the scheme and path."""
+    """True if a block of server_url would hit a trusted server: same server (host, port and path, any scheme) - or,
+    for a URL without a path, any trusted server on that host and port."""
     from bridge.core import address
-    key = address.server_key(server_url)
-    return any(address.server_key(url) == key for url in trusted_servers)
+    return any(address.block_covers(server_url, url) for url in trusted_servers)
 
 def get_token(server_url):
     entry = trusted_servers.get(server_url)

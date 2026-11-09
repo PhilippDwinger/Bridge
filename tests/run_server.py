@@ -15,7 +15,8 @@ protocol.debug = False
 # Optional limits for tests, e.g. BRIDGE_TEST_OVERRIDES='{"max_registrations_per_host": 6}'
 for name, value in json.loads(os.getenv("BRIDGE_TEST_OVERRIDES", "{}")).items():
     setattr(protocol, name, value)
-app = bridge.Bridge("127.0.0.1", port, password, f"http://127.0.0.1:{port}")
+# BRIDGE_TEST_PUBLIC_URL: public URL with a path, behind the path proxy of e2e_paths.py
+app = bridge.Bridge("127.0.0.1", port, password, os.getenv("BRIDGE_TEST_PUBLIC_URL") or f"http://127.0.0.1:{port}")
 for url in sys.argv[3:]:
     app.add_trusted_server(password, url)
 

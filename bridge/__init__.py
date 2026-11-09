@@ -67,7 +67,13 @@ class Bridge:
         if public_url is None:
             public_url = _default_public_url(host, port)
             errors.debug_print(f"No public_url given, using {public_url} - set it if other servers should reach this one")
+        if address.has_reserved_segment(public_url):
+            # https://x/client would be cut to https://x by normalize_url - the server would claim another's URL
+            raise ValueError(f"public_url {public_url!r}: its path must not contain a Bridge route name "
+                             f"({', '.join(sorted(address.BRIDGE_ROUTES))})")
         self.public_url = address.normalize_url(public_url)
+        if self.public_url is None:
+            raise ValueError(f"public_url {public_url!r} is not a valid http(s) URL")
         url_env.set_base_root(self.public_url)
         self._metadata = {
             "initialization_time": datetime.datetime.now(datetime.timezone.utc),
@@ -158,7 +164,8 @@ class Bridge:
     # Trusted servers cannot be blocked (remove the trust first). The block list is part of the backup.
     def _block_server(self, url):
         server_url = address.normalize_url(url)
-        if server_url is None or server_url == self.public_url:
+        # Never block ourselves - also not with a whole-host entry for our own host and port
+        if server_url is None or address.block_covers(server_url, self.public_url):
             errors.handle_error(Exceptions.ARGUMENT_ERROR, f"Invalid server URL to block: {url!r}")
             return Exceptions.ARGUMENT_ERROR
         if trust_store.matches_trusted(server_url):
@@ -167,7 +174,9 @@ class Bridge:
             return Exceptions.ARGUMENT_ERROR
         from bridge.subservices.bridge_friends import link as friend_link
         friend_store.blocked.add(server_url)
-        friend_link.drop(server_url)
+        for linked_url in list(friend_link.links()):
+            if address.block_covers(server_url, linked_url):
+                friend_link.drop(linked_url)
         return sorted(friend_store.blocked)
 
     def _unblock_server(self, url):
@@ -175,11 +184,15 @@ class Bridge:
         if server_url is None:
             errors.handle_error(Exceptions.ARGUMENT_ERROR, f"Invalid server URL: {url!r}")
             return Exceptions.ARGUMENT_ERROR
-        # Unblock by host and port, so any spelling of the same server (scheme, port, path) removes the block.
-        key = address.server_key(server_url)
-        matches = [blocked_url for blocked_url in friend_store.blocked if address.server_key(blocked_url) == key]
+        # Removes every entry this URL covers: a URL without a path all entries of that host and port, a URL with
+        # a path exactly that server (any spelling: scheme, default port, trailing /).
+        matches = [blocked_url for blocked_url in friend_store.blocked if address.block_covers(server_url, blocked_url)]
         if not matches:
-            errors.handle_error(Exceptions.KEY_ERROR, f"{url!r} is not blocked")
+            covering = sorted(b for b in friend_store.blocked if address.block_covers(b, server_url))
+            if covering:
+                errors.handle_error(Exceptions.KEY_ERROR, f"{url!r} is blocked by the whole-host entry {covering[0]!r} - unblock that")
+            else:
+                errors.handle_error(Exceptions.KEY_ERROR, f"{url!r} is not blocked")
             return Exceptions.KEY_ERROR
         for blocked_url in matches:
             friend_store.blocked.discard(blocked_url)

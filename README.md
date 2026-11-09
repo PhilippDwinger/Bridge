@@ -51,7 +51,7 @@ app.start_server(ConnectionMode.UNSAFE)   # SAFE = TLS with localhost+2.pem / lo
 ```
 
 Or `python main.py` with the environment variables `BRIDGE_PASSWORD`, `BRIDGE_PUBLIC_URL`, `BRIDGE_TRUSTED`,
-`BRIDGE_BLOCKED`, `PORT`. Without `BRIDGE_PASSWORD` a random password is made for this start and printed once (there is
+`BRIDGE_BLOCKED`, `BRIDGE_TRUST_PROXY`, `BRIDGE_TRUST_PROXY_IPS`, `PORT`. Without `BRIDGE_PASSWORD` a random password is made for this start and printed once (there is
 no fixed default password).
 
 `app.stop_server()` stops the server normally from another thread, like Ctrl+C: waiting long polls answer right away
@@ -60,11 +60,31 @@ no fixed default password).
 `public_url` is the address clients and other servers use to reach this server. It is part of every client IP and
 realm address, so it must be the real public URL.
 
+### Several servers behind one host and port
+
+A public URL may have a **path**: `https://pc.ts.net:10000/momentum` and `https://pc.ts.net:10000/rika-ai` are two
+different servers on one host and port (BridgeControll puts every server under `/<server id>` on one of the three
+Tailscale Funnel ports). Everything works below that path: `…/momentum/admin`, `…/momentum/client/login`,
+`…/momentum/site/`.
+
+- The proxy in front may strip the path (Tailscale does) or keep it – Bridge accepts both
+  (`bridge/server/base_path.py`). Requests straight to the local port work with and without it.
+- The pages (`/`, `/admin`, `/site` placeholder) link with the path; the dashboard remembers its password per server.
+- No segment of the path may be a Bridge route name (`admin`, `server`, `s2s`, `client`, `message`, `command`,
+  `realm`, `express`, `agent`, `conversation`, `friends`, `site`) – a server URL is cut at those
+  (`https://x/momentum/admin` = `https://x/momentum`). A public URL like `https://x/client` is refused at start.
+- Identity of a server = host, port and path (the scheme does not matter). Trust, friend limits and block entries go
+  by that. A **block entry without a path** blocks the whole host and port (every server there), one with a path only
+  that server.
+- Behind a proxy on the same machine use `BRIDGE_TRUST_PROXY=1` with `BRIDGE_TRUST_PROXY_IPS=127.0.0.1,::1`: the rate
+  limits see the real clients, and nobody who calls the port directly can fake an address.
+
 ### Reserved path `/site`
 
-`/site` (and everything below it) is reserved for a **website next to the server**: a host app such as BridgeControll
-can serve a website under `<server url>/site/` on the same public URL (Tailscale Funnel: `/` → Bridge, `/site` → the
-website). No Bridge route may ever start with `/site` – the server refuses to start if one does
+`/site` (and everything below it, always relative to the server's own URL) is reserved for a **website next to the
+server**: a host app such as BridgeControll
+can serve a website under `<server url>/site/` on the same public URL (BridgeControll with Tailscale Funnel:
+`/<server id>` → Bridge, `/<server id>/site` → the website). No Bridge route may ever start with `/site` – the server refuses to start if one does
 (`bridge/server/routes/site.py`). Without a website, Bridge answers `/site/` itself with a small "no website assigned"
 page. The admin dashboard (`/admin`) has a **Website** button that opens `/site/`.
 
@@ -439,8 +459,9 @@ At school: /friends/add {"address": "paddy-home@bridge.example.com", "password":
   `friend_removed` (with `friend_ip`, `label`, `server`, `via`).
 - `via` of a friend: `local` · `trusted` · `neutral` · `blocked`.
 - **Block list** (admin): `/admin/blocked/add|remove|list` or `Bridge.block_server()` / env `BRIDGE_BLOCKED`. A blocked
-  server gets no friendships and no friend connection, and its relayed messages are refused. It is blocked by host and
-  port (`https://evil.example/x` = `https://evil.example:443`). Trusted servers cannot be blocked (remove the trust first).
+  server gets no friendships and no friend connection, and its relayed messages are refused. An entry without a path
+  (`https://evil.example`) blocks the whole host and port, one with a path (`https://pc.ts.net:10000/x`) only that
+  server. Trusted servers – and this server itself – cannot be blocked (remove the trust first).
 - **Limits:** 500 friends and 20 invitations per client, 10 friend requests and 10 invitations per minute per client.
 - Friendships, invitations (only `K`), presence and the block list are part of the backup.
 - Without https someone in the network can read along – use https in production.
@@ -569,6 +590,8 @@ python tests/e2e_hardening.py
 python tests/e2e_friends.py
 python tests/e2e_bugfixes.py
 python tests/e2e_roblox.py
+python tests/e2e_site.py
+python tests/e2e_paths.py
 python extensions/roblox/tests/run_tests.py   # needs Lune 0.8.9, see extensions/roblox/README.md
 python extensions/java/run_tests.py           # needs a JDK 21+ (javac)
 ```
@@ -598,6 +621,9 @@ broken unicode, huge bodies), limits, planned messages over a restart and a back
 locks, codes, roles, BridgeExpress budget, BridgeFriends during a restore, fake hello, big backup).
 `e2e_roblox.py` checks what the Roblox extension needs: batch poll (`max_messages`), `include_self`, `/client/delete`,
 publish inside a poll (`publish`) and the limits in `/server/status`.
+`e2e_site.py` checks the reserved path `/site` (placeholder, start check, dashboard button). `e2e_paths.py` puts two
+servers behind ONE host and port (`/alpha`, `/beta`) with a proxy like Tailscale (`tests/path_proxy.py`, path stripped
+and kept) and checks pages, admin API, client IPs, trust, messages across them and block entries per server / per host.
 `e2e_friends.py` starts A ↔ B (trusted) and C (neutral) and checks friendships with name / code + password, wrong
 passwords and guessing, manual accept, friend messages in all modes, faked tokens and connections, status (presence,
 idle, slow line, waiting messages), the block list, `friends_mode`, removing and a restart with backup.

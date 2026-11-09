@@ -25,6 +25,8 @@ local n = Bridge.NormalizeServer
 check("normalize: adds https, cuts /admin, drops :443", n(" Muttchen.tail91b057.ts.net:443/admin/ ") == "https://muttchen.tail91b057.ts.net", n(" Muttchen.tail91b057.ts.net:443/admin/ "))
 check("normalize: keeps other ports", n("https://x.ts.net:10000") == "https://x.ts.net:10000")
 check("normalize: keeps a sub path, cuts Bridge routes", n("https://host/bridge/server/status") == "https://host/bridge", n("https://host/bridge/server/status"))
+check("normalize: keeps a server id path (several servers per port)", n("https://pc.ts.net:10000/momentum/admin") == "https://pc.ts.net:10000/momentum", n("https://pc.ts.net:10000/momentum/admin"))
+check("normalize: cuts the website path /site", n("https://pc.ts.net/momentum/site/") == "https://pc.ts.net/momentum", n("https://pc.ts.net/momentum/site/"))
 check("ErrorId", Bridge.ErrorId("[Bridge] RECIPIENT_NOT_FOUND: nope (/message/send -> 404)") == "RECIPIENT_NOT_FOUND")
 print(string.format("\n%d ok, %d failed", ok, fail))
 if fail > 0 then

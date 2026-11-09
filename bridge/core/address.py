@@ -14,8 +14,12 @@ DEFAULT_PORTS = {"http": 80, "https": 443}
 # Top-level routes of a Bridge server. A server address never ends in one of them - if someone pastes e.g.
 # "https://x.ts.net/admin" (copied from the dashboard's address bar), the server is "https://x.ts.net".
 # Without this, "https://x.ts.net/admin" would count as a different server and trust could never connect.
-_BRIDGE_ROUTES = {"admin", "server", "s2s", "client", "message", "command", "realm", "express", "agent",
-                  "conversation", "friends"}
+# "site" is the reserved path of the website next to the server (bridge/server/routes/site.py).
+# A server URL may have a path of its own (several servers behind one host and port, e.g.
+# https://pc.ts.net:10000/momentum) - but none of its segments may be one of these names.
+BRIDGE_ROUTES = frozenset({"admin", "server", "s2s", "client", "message", "command", "realm", "express", "agent",
+                           "conversation", "friends", "site"})
+_BRIDGE_ROUTES = BRIDGE_ROUTES
 
 
 def normalize_url(url):
@@ -62,12 +66,47 @@ def normalize_url(url):
 
 
 def server_key(url):
-    """Host and port of a server URL (without scheme and path) - for the block list and limits per server:
-    https://evil.example and http://evil.example/x are the same server for them."""
+    """Host and port of a server URL (without scheme and path): the MACHINE behind it. Several Bridge servers can
+    share one host and port (each under its own path), so this is not the identity of one server - see
+    server_identity()."""
     normalized = normalize_url(url) if isinstance(url, str) else None
     if normalized is None:
         return url
     return urlsplit(normalized).netloc
+
+
+def server_identity(url):
+    """One Bridge server: host, port and path, without the scheme. https://pc.ts.net/a and https://pc.ts.net/b are
+    two servers; http://pc.ts.net/a and https://pc.ts.net/a are the same one."""
+    normalized = normalize_url(url) if isinstance(url, str) else None
+    if normalized is None:
+        return url
+    parts = urlsplit(normalized)
+    return parts.netloc + parts.path
+
+
+def path_of(url):
+    """The path part of a (normalized) server URL: "" for https://x, "/momentum" for https://x:10000/momentum."""
+    normalized = normalize_url(url) if isinstance(url, str) else None
+    return urlsplit(normalized).path if normalized else ""
+
+
+def block_covers(block_url, server_url):
+    """True if a block-list entry hits a server. An entry WITHOUT a path blocks the whole host and port (every
+    server there); an entry with a path blocks exactly that one server."""
+    if not path_of(block_url):
+        return server_key(block_url) == server_key(server_url)
+    return server_identity(block_url) == server_identity(server_url)
+
+
+def has_reserved_segment(url):
+    """True if the path of a URL contains a Bridge route name (normalize_url would cut the URL there). Used to refuse
+    a public URL like https://x/client - the server could never be told apart from https://x."""
+    try:
+        path = urlsplit(url.strip()).path
+    except (ValueError, AttributeError):
+        return False
+    return any(segment.lower() in BRIDGE_ROUTES for segment in path.split("/"))
 
 
 def make_address(server_url, local_id):

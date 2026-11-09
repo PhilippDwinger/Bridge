@@ -12,6 +12,7 @@ from bridge.messenger import outbox, service as messenger_service
 from bridge.realm import sync as realm_sync
 from bridge.subservices.bridge_agent import routing, service as agent_service  # noqa: F401 (registers the task expiry hook)
 from bridge.server import compression, runtime, s2s_client
+from bridge.server.base_path import BasePathMiddleware
 from bridge.server.routes.admin import Router as AdminRouter
 from bridge.server.routes.agent import Router as AgentRouter
 from bridge.server.routes.client import Router as ClientRouter
@@ -87,6 +88,10 @@ def create_app(bridge_instance) -> FastAPI:
                 return JSONResponse(status_code=200, content={
                     "ok": False, "error": get_exception_id(error), "message": error.default_message})
         return await call_next(request)
+
+    # Outermost (added last): a public URL with a path (https://pc.ts.net:10000/momentum) - requests may come with or
+    # without that path in front; everything inside sees the plain Bridge path (see base_path.py)
+    app.add_middleware(BasePathMiddleware)
 
     app.include_router(StatusRouter)
     app.include_router(DashboardRouter)

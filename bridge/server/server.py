@@ -37,7 +37,9 @@ def start_server(bridge_instance, host: str, port: int, connection_mode: Connect
     if protocol.trust_proxy:
         # Behind a trusted TLS proxy: believe X-Forwarded-For so the rate limits see the real client address
         options["proxy_headers"] = True
-        options["forwarded_allow_ips"] = "*"
+        # Whose X-Forwarded-For to believe: "*" (default, e.g. a proxy on another machine) or only the local
+        # proxy ("127.0.0.1,::1" - Tailscale Funnel on the same PC; a direct caller cannot fake its address then)
+        options["forwarded_allow_ips"] = protocol.trust_proxy_ips or "*"
     if connection_mode == ConnectionMode.SAFE:
         options.update(ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
 

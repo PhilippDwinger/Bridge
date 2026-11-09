@@ -1,3 +1,5 @@
+import html
+
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
@@ -18,6 +20,8 @@ async def root_page() -> str:
     dot = "#2ECC71" if ready else "#F5A623"
     version = protocol.current_protocol.version
     url = url_env.base_root or ""
+    # Links with the server's base path (several servers behind one host and port: https://pc.ts.net/momentum)
+    base = html.escape(url_env.base_path(), quote=True)
     return f"""<!doctype html>
 <html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -42,9 +46,9 @@ async def root_page() -> str:
 <body><div class="card">
  <div class="mark">br<b>.</b></div>
  <div class="state"><span class="dot"></span>Bridge {state}</div>
- <a class="dash" href="/admin">Server-Dashboard →</a>
- <div class="meta">Protokoll {version}{("<br>" + url) if url else ""}<br>
-   <a class="j" href="/server/status">Status (JSON)</a></div>
+ <a class="dash" href="{base}/admin">Server-Dashboard →</a>
+ <div class="meta">Protokoll {version}{("<br>" + html.escape(url)) if url else ""}<br>
+   <a class="j" href="{base}/server/status">Status (JSON)</a></div>
 </div></body></html>"""
 
 

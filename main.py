@@ -8,6 +8,7 @@ from bridge.core import protocol
 # Behind a TLS proxy (nginx/caddy on a VM, or a platform that terminates TLS): read X-Forwarded-For so the rate
 # limits see the real client address. Only turn this on when a trusted proxy sits in front.
 protocol.trust_proxy = os.getenv("BRIDGE_TRUST_PROXY", "").strip().lower() in ("1", "true", "yes")
+protocol.trust_proxy_ips = os.getenv("BRIDGE_TRUST_PROXY_IPS", "").strip() or "*"
 
 # Start a Bridge server.
 #   BRIDGE_PASSWORD    - password to control this server (without it a random one is made and printed)
@@ -15,6 +16,8 @@ protocol.trust_proxy = os.getenv("BRIDGE_TRUST_PROXY", "").strip().lower() in ("
 #   BRIDGE_TRUSTED     - comma separated URLs of other Bridge servers this server trusts
 #   BRIDGE_BLOCKED     - comma separated URLs of Bridge servers this server blocks (BridgeFriends, relaying)
 #   BRIDGE_TRUST_PROXY - "1" when a trusted TLS proxy sits in front (read X-Forwarded-For for the rate limits)
+#   BRIDGE_TRUST_PROXY_IPS - only believe these proxy addresses, e.g. "127.0.0.1,::1" (default "*")
+#   BRIDGE_PUBLIC_URL may have a path (several servers behind one host and port): https://pc.ts.net:10000/momentum
 #   PORT               - port (default 8000)
 
 host = "0.0.0.0"

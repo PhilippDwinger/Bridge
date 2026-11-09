@@ -561,7 +561,7 @@ end
 
 local BRIDGE_ROUTES = {
 	admin = true, server = true, s2s = true, client = true, message = true, command = true, realm = true,
-	express = true, agent = true, conversation = true, friends = true,
+	express = true, agent = true, conversation = true, friends = true, site = true,
 }
 
 --- "my-pc.ts.net/admin/" -> "https://my-pc.ts.net" (scheme added, Bridge paths like /admin cut, no trailing /)
