@@ -90,6 +90,10 @@ def online_checks():
                   and response.headers.get("content-type", "").startswith("text/html"),
                   (response.status_code, response.text[:80]))
 
+        js = httpx.get(URL + "/server/extensions/bridge.js", timeout=5)
+        check("the server serves the JavaScript extension for its website", js.status_code == 200
+              and js.headers.get("content-type", "").startswith("text/javascript")
+              and "export class BridgeClient" in js.text, (js.status_code, js.headers.get("content-type")))
         admin = httpx.get(URL + "/admin", timeout=5).text
         check("dashboard has the Website button to /site/", 'id="siteBtn"' in admin and 'href="/site/"' in admin)
 

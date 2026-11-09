@@ -1,0 +1,16 @@
+{
+  "name": "bridge-client",
+  "version": "1.0.0",
+  "description": "Bridge client for browsers and Node 18+ - one file (bridge.js), ES module, no dependencies",
+  "type": "module",
+  "main": "bridge.js",
+  "exports": "./bridge.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "python run_tests.py"
+  },
+  "license": "MIT",
+  "private": true
+}

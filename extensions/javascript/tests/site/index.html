@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge JS Browsertest</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; background: #0E1A33; color: #F7F8FB; }
+  pre { background: #16264a; padding: 12px; border-radius: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Bridge JS Browsertest</h1>
+<p>Liegt unter <code>&lt;Server-URL&gt;/site/tests/site/</code> – deshalb ist der Import relativ.</p>
+<pre id="log"></pre>
+<script type="module">
+  // Relativ importieren: die Seite liegt unter <server>/site/tests/site/, bridge.js unter <server>/site/bridge.js
+  import { BridgeClient } from "../../bridge.js";
+
+  const log = (text) => { document.getElementById("log").textContent += text + "\n"; };
+  window.BridgeClient = BridgeClient;
+  window.got = { events: [], messages: [], ipChanged: [], errors: [] };
+  try {
+    const client = new BridgeClient({ server: BridgeClient.serverFromPage(), name: "Browser", warn: log });
+    window.client = client;
+    client.onMessage((message) => window.got.messages.push(
+      { mode: message.mode, encoding: message.meta.encoding ?? null, content: message.content }));
+    client.onClientIpChanged((now, old) => window.got.ipChanged.push([now, old]));
+    client.onError((error) => window.got.errors.push(error.message));
+    await client.subscribe(null, "web", (data) => window.got.events.push(data));
+    window.ready = { server: client.server, clientIp: client.clientIp, secure: window.isSecureContext,
+      subtle: !!(globalThis.crypto && crypto.subtle) };
+    log("verbunden als " + client.clientIp + " mit " + client.server);
+  } catch (error) {
+    window.failed = String(error && error.message || error);
+    log("Fehler: " + window.failed);
+  }
+</script>
+</body>
+</html>

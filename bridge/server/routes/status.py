@@ -1,7 +1,8 @@
 import html
+import os
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from bridge.core import backup, protocol
 from bridge.core.status import get_server_status
@@ -50,6 +51,22 @@ async def root_page() -> str:
  <div class="meta">Protokoll {version}{("<br>" + html.escape(url)) if url else ""}<br>
    <a class="j" href="{base}/server/status">Status (JSON)</a></div>
 </div></body></html>"""
+
+
+# The JavaScript extension, straight from this server: a website next to the server (<server url>/site/, same
+# origin) imports it with  import { BridgeClient } from "../server/extensions/bridge.js"  - always the version that
+# fits this server, nothing to copy. Only this one fixed file is served.
+_JS_EXTENSION = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                             "extensions", "javascript", "bridge.js")
+
+
+@Router.get("/server/extensions/bridge.js", include_in_schema=False)
+async def javascript_extension():
+    if not os.path.isfile(_JS_EXTENSION):
+        return Response("// the JavaScript extension is not part of this installation\n", status_code=404,
+                        media_type="text/javascript")
+    return FileResponse(_JS_EXTENSION, media_type="text/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
 
 
 @Router.get("/server/status")

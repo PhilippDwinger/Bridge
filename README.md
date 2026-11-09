@@ -88,6 +88,10 @@ can serve a website under `<server url>/site/` on the same public URL (BridgeCon
 (`bridge/server/routes/site.py`). Without a website, Bridge answers `/site/` itself with a small "no website assigned"
 page. The admin dashboard (`/admin`) has a **Website** button that opens `/site/`.
 
+The JavaScript extension comes from the server itself: `<server url>/server/extensions/bridge.js` (a website under
+`/site/` imports `../server/extensions/bridge.js` – same origin, always the version of this server). See
+[extensions.md](extensions.md) for all extensions (Roblox, Java, Python, JavaScript).
+
 ## Addresses
 
 ```
@@ -592,6 +596,10 @@ python tests/e2e_bugfixes.py
 python tests/e2e_roblox.py
 python tests/e2e_site.py
 python tests/e2e_paths.py
+python extensions/java/run_tests.py
+python extensions/python/run_tests.py
+python extensions/javascript/run_tests.py
+python extensions/roblox/tests/run_tests.py lune
 python extensions/roblox/tests/run_tests.py   # needs Lune 0.8.9, see extensions/roblox/README.md
 python extensions/java/run_tests.py           # needs a JDK 21+ (javac)
 ```
