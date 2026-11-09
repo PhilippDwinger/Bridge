@@ -1,0 +1,20 @@
+[package]
+name = "bridge-node"
+description = "Bridge 4 node runtime: sessions, mailboxes, routing, plugin host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bridge-core.workspace = true
+bridge-store.workspace = true
+bridge-transport.workspace = true
+bridge-guard.workspace = true
+bridge-net.workspace = true
+bridge-plugin-api.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "bridge-net"
+description = "Bridge 4 BridgeNet: manifest, members, levels, seals, delegations, transparency log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bridge-core.workspace = true
+bridge-store.workspace = true
+bridge-guard.workspace = true

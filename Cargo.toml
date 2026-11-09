@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bridge-core",
+    "crates/bridge-store",
+    "crates/bridge-transport",
+    "crates/bridge-guard",
+    "crates/bridge-net",
+    "crates/bridge-plugin-api",
+    "crates/bridge-node",
+    "bin/bridge-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license-file = "LICENSE"
+repository = "https://github.com/PhilippDwinger/Bridge"
+authors = ["Philipp Dwinger"]
+
+# Zero Trust in code: no unsafe anywhere (docs/00_GRUNDSAETZE.md, Z10 / ADR 0003).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+# One place for internal crate paths: layers are enforced by which crate lists which dependency.
+[workspace.dependencies]
+bridge-core = { path = "crates/bridge-core" }
+bridge-store = { path = "crates/bridge-store" }
+bridge-transport = { path = "crates/bridge-transport" }
+bridge-guard = { path = "crates/bridge-guard" }
+bridge-net = { path = "crates/bridge-net" }
+bridge-plugin-api = { path = "crates/bridge-plugin-api" }
+bridge-node = { path = "crates/bridge-node" }

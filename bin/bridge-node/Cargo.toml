@@ -1,0 +1,19 @@
+[package]
+name = "bridge-node-bin"
+description = "The Bridge 4 node program"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bridge-node"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+bridge-node.workspace = true

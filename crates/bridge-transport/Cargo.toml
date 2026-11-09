@@ -1,0 +1,15 @@
+[package]
+name = "bridge-transport"
+description = "Bridge 4 transports: Internet (HTTPS), LAN (mDNS + pinned TLS), later more"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bridge-core.workspace = true
