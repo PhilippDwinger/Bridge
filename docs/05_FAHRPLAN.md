@@ -3,14 +3,14 @@
 Kein Zeitdruck. Jede Phase endet erst, wenn ihre **Abnahme** erfüllt ist (Tests grün, Doku aktuell, Paddy hat
 freigegeben).
 
-## Phase 1 – Spezifikation (jetzt)
+## Phase 1 – Spezifikation (erledigt)
 - Grundsätze, Begriffe, Sicherheitsmodell, Architektur, Protokoll v4, Fahrplan (diese Dateien).
 - Repo-Gerüst auf Branch `bridge-4`: Ordner, LICENSE, README, CLAUDE.md, Rust-Workspace mit einem Crate pro
   Abteil, CI (GitHub Actions).
 - **Abnahme**: Doku freigegeben (inkl. Prüfung durch ChatGPT, eingearbeitet am 09.11.); das Gerüst baut, die Tests
   laufen, CI ist grün.
 
-## Phase 2 – Kern
+## Phase 2 – Kern (erledigt)
 - `core`: kanonisches JSON, Base32/Base64url, Krypto-Suite B4-1 mit Invariante N1, Schlüsselkarte, Aussagen,
   Umschlag (bauen/prüfen/öffnen), Strom für Großes, Fehler-Codes.
 - `store`: SQLite mit Migrationen.
@@ -20,8 +20,16 @@ freigegeben).
 - **Abnahme**: Zwei Clients schicken sich über einen Knoten verschlüsselte Nachrichten; der Knoten kann sie
   nachweislich nicht lesen. Angriffs-Tests (gefälschte Signatur, verändertes Byte, Replay, abgelaufen, zu groß,
   10.000 Anfragen/s, falsches PoW) werden alle abgewehrt. Nach einem Neustart sind nicht abgeholte Nachrichten noch da.
+- **Stand (09.11.2026): erreicht.** Dazu `sdk/rust` (Client) und `tests/e2e` (Abnahme- und Angriffs-Tests über alle
+  Abteile). Eine unabhängige Sicherheits-Prüfung (Sub-Agent) fand 9 Punkte; alle sind behoben und haben Tests.
+- Bekannte Grenzen von Phase 2 (werden in Phase 3 gelöst):
+  - Jeder darf sich anmelden. Mitgliedschaft und Stufen kommen mit `net`; bis dahin begrenzen nur Limits, Kontingente
+    und PoW unter Last.
+  - Die Schlüsseldatei des Knotens ist unverschlüsselt (Unix: nur für den Besitzer lesbar).
+  - Strom-Teile kann man noch nicht beim Knoten abgeben (das Format ist fertig und getestet).
+  - Nur ein Knoten, keine Weiterleitung.
 
-## Phase 3 – BridgeNet
+## Phase 3 – BridgeNet (als Nächstes)
 - `net`: Hauptschlüssel + 24 Wörter (BIP-39), Admin-Delegation, Manifest aus Vorlagen, Mitgliedsausweis, Stufen,
   Siegel, Widerruf, Sperren, Transparenz-Log (Merkle, Zeugen, Gossip); Dienste `gateway` (Empfänger) und `watch`
   (Wächter).

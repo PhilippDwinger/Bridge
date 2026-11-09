@@ -8,7 +8,9 @@ Zuerst lesen: `docs/00_GRUNDSAETZE.md` (Zero Trust Z1–Z10, Struktur S1–S6, C
   (ADR 0008).
 - **Abteile = Crates**: `bridge-core` → `bridge-store` / `bridge-transport` → `bridge-guard` → `bridge-net` →
   `bridge-node` → `services/*`. Abhängigkeiten nur nach unten; Dienste nur über `bridge-plugin-api`.
-  Kein globaler Zustand. `#![forbid(unsafe_code)]` überall.
+  Kein globaler Zustand. `#![forbid(unsafe_code)]` überall. `sdk/rust` nutzt nur `bridge-core` + `bridge-transport`;
+  `tests/e2e` (Crate `bridge-tests`) testet über alle Abteile.
+- Krypto-Bausteine nur über `bridge-core::crypto`; andere Module rufen die Krypto-Bibliotheken nie direkt auf.
 - **Spezifikation vor Code**: erst `docs/` ändern, dann bauen. Größere Entscheidungen als ADR in `docs/adr/`.
 - **Tests**: jede Funktion mit normalen Tests **und** Angriffs-Tests; `cargo fmt`, `cargo clippy -- -D warnings`,
   `cargo test` müssen grün sein.

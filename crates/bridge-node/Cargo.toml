@@ -18,3 +18,11 @@ bridge-transport.workspace = true
 bridge-guard.workspace = true
 bridge-net.workspace = true
 bridge-plugin-api.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+rand_core.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

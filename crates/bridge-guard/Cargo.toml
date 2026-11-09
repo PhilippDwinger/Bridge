@@ -14,3 +14,7 @@ workspace = true
 [dependencies]
 bridge-core.workspace = true
 bridge-store.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand_core.workspace = true

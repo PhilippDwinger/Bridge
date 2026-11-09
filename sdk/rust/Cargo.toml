@@ -1,0 +1,19 @@
+[package]
+name = "bridge-sdk"
+description = "Bridge 4 client library for Rust: log in, send, receive - end-to-end encrypted"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bridge-core.workspace = true
+bridge-transport.workspace = true
+serde_json.workspace = true
+rand_core.workspace = true
+thiserror.workspace = true

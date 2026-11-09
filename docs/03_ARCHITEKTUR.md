@@ -56,7 +56,7 @@ sdk/                    rust/ python/ javascript/ java/ luau/
 apps/
   bridgecontroll/       Desktop-App (Tauri: Rust + Web-Oberfläche): Netz-Assistent, Knoten & Dienste per Klick, Dashboard
   browser/              Bridge-Browser (Web-App, läuft auf Empfänger-Websites)
-tests/                  übergreifende Tests: e2e/ attack/ chaos/ (Unit-Tests liegen in den Crates)
+tests/                  übergreifende Tests: e2e/ (Crate bridge-tests: Abnahme + Angriffe), später chaos/
 .github/workflows/      CI: Format, Lint, Tests auf Linux + Windows, Release-Builds
 ```
 

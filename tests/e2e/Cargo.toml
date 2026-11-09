@@ -1,0 +1,26 @@
+[package]
+name = "bridge-tests"
+description = "Bridge 4 end-to-end and attack tests across compartments (docs/05 acceptance criteria)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bridge-core.workspace = true
+bridge-guard.workspace = true
+bridge-node.workspace = true
+bridge-sdk.workspace = true
+bridge-transport.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+rand_core.workspace = true
+tempfile.workspace = true
+bridge-store.workspace = true
+reqwest.workspace = true

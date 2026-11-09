@@ -5,8 +5,17 @@
 überall – auch im Heimnetz ohne Internet. Sicher nach dem Zero-Trust-Prinzip: Inhalte sind Ende-zu-Ende
 verschlüsselt, alles Wichtige ist signiert, niemand muss einem einzelnen Knoten vertrauen.
 
-> Status: **Phase 1 – Spezifikation und Gerüst.** Noch keine Funktionen. Die laufende Version ist Bridge 3
-> (Branch `bridge-3`).
+> Status: **Phase 2 – Kern fertig.** Ein Knoten nimmt Ende-zu-Ende verschlüsselte Nachrichten an, hält sie bis zur
+> Abholung (auch über Neustarts) und kann sie nicht lesen. Noch kein Netz aus mehreren Knoten (Phase 3).
+> Die laufende Version für Spiele und Bots ist weiterhin Bridge 3 (Branch `bridge-3`).
+
+## Knoten starten
+```
+bridge-node --data <ordner> --listen 127.0.0.1:7400 --name "Mein Knoten"
+```
+Hinter Tailscale Funnel zusätzlich `--trust-proxy 127.0.0.1` (sonst zählen alle Nutzer als eine Adresse).
+`--pow-bits 0-28` verlangt immer Proof-of-Work bei der Anmeldung (Standard: nur unter Last).
+Das Programm für Windows/Linux baut die CI (GitHub Actions → Artefakte).
 
 - Doku: [docs/](docs/README.md)
 - Aufbau: Rust-Workspace, ein Crate pro Abteil (`crates/`), Dienste (`services/`), Programm (`bin/bridge-node`),

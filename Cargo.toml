@@ -9,6 +9,8 @@ members = [
     "crates/bridge-plugin-api",
     "crates/bridge-node",
     "bin/bridge-node",
+    "sdk/rust",
+    "tests/e2e",
 ]
 
 [workspace.package]
@@ -39,3 +41,28 @@ bridge-guard = { path = "crates/bridge-guard" }
 bridge-net = { path = "crates/bridge-net" }
 bridge-plugin-api = { path = "crates/bridge-plugin-api" }
 bridge-node = { path = "crates/bridge-node" }
+bridge-sdk = { path = "sdk/rust" }
+
+# External crates (versions in one place). Crypto: RustCrypto / dalek only (docs/02 §4, rule Z10).
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+base64 = "0.22"
+serde = "1"
+serde_json = "1"
+thiserror = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "sync", "signal", "fs", "io-util"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "server-graceful"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
