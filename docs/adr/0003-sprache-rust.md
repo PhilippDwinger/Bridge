@@ -17,3 +17,5 @@
   - Speichersicherheit und Leistung für große Netze.
   - Paddy liest den Code seltener selbst; dafür gibt es ausführliche Doku und Tests.
   - Bridge 3 (Python) läuft weiter.
+- **Nachtrag (11.11.2026, ADR 0017)**: BridgeControll v2 ist zuerst eine lokale Web-App (Rust-Programm, Oberfläche auf
+  127.0.0.1 im Standard-Browser); die Tauri-/Tray-Hülle folgt später und nutzt dieselbe Oberfläche.

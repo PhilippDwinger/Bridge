@@ -1,0 +1,85 @@
+/* BridgeControll v2 – Seiten-Layouts für die freigegebenen Entwürfe N01–N04.
+   Nur Layout: Farben, Schriften, Radien, Abstände und Tempo kommen aus design/tokens.css (var(--…)),
+   Bausteine aus design/components.css (b-…). Keine eigenen Farbwerte (DESIGN.md, Regel 1).
+   Die Entwürfe hatten diese Werte als style="…" im Markup; die CSP der App erlaubt keine Inline-Styles. */
+
+[hidden] { display: none !important; }
+.bc-noscript { padding: var(--space-6); }
+.bc-stack { display: flex; flex-direction: column; gap: 18px; }
+.bc-stack--tight { display: flex; flex-direction: column; gap: var(--space-2); }
+.bc-row { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+.bc-row--end { justify-content: flex-end; }
+.bc-row--between { justify-content: space-between; }
+.bc-grow { flex: 1 1 0; min-width: 0; }
+.bc-mono { font-family: var(--font-mono); font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+.bc-muted { color: var(--muted); font-size: var(--fs-small); }
+.bc-text { margin: 0; color: var(--text-2); line-height: 1.5; }
+.bc-p0 { margin: 0; }
+.start__wordmark.bc-wordmark { width: 200px; }
+.hs__actions .b-btn--sticker { margin-left: 4px; }
+.bc-foot { display: flex; flex-direction: column; gap: 14px; }
+.bc-foot__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bc-foot .b-switch { font-size: var(--fs-small); color: var(--text-2); }
+
+/* N02 Assistent */
+.bc-main { max-width: 1100px; margin: 0 auto; box-sizing: border-box; padding: 40px 32px; display: flex; flex-direction: column; gap: 28px; }
+.bc-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
+.bc-top .b-steps { flex: 1 1 520px; max-width: 760px; }
+.bc-head { display: flex; flex-direction: column; gap: 10px; }
+.bc-h1 { margin: 0; font-family: var(--font-display); font-size: var(--fs-h1); font-weight: 600; letter-spacing: var(--tracking-display); color: var(--text); }
+.bc-hero { margin: 0; font-family: var(--font-display); font-size: var(--fs-hero); font-weight: 600; letter-spacing: var(--tracking-display); color: var(--text); overflow-wrap: anywhere; }
+.bc-h2 { margin: 0; font-family: var(--font-display); font-size: var(--fs-h2); font-weight: 600; color: var(--text); }
+.bc-lead { margin: 0; font-size: var(--fs-lead); color: var(--text-2); max-width: 720px; line-height: 1.5; }
+.bc-card { display: flex; flex-direction: column; gap: 14px; padding: 22px 24px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-l); }
+.bc-card__title { font-family: var(--font-display); font-size: var(--fs-h2); font-weight: 600; color: var(--text); }
+.bc-words { margin: 0; padding: var(--space-5); list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-l); }
+.bc-word { display: flex; gap: 10px; align-items: baseline; font-family: var(--font-mono); font-size: 16px; color: var(--text); }
+.bc-word__nr { color: var(--muted); width: 22px; text-align: right; flex: none; }
+.bc-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
+.bc-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.bc-fieldrow { display: flex; gap: var(--space-3); flex-wrap: wrap; }
+.bc-fieldrow > .b-field { flex: 1 1 160px; }
+.bc-result { display: flex; flex-wrap: wrap; gap: var(--space-6); align-items: flex-start; }
+.bc-result__text { flex: 1 1 420px; min-width: 0; display: flex; flex-direction: column; gap: var(--space-4); }
+.bc-qr { flex: none; width: 220px; height: 220px; padding: var(--space-2); box-sizing: border-box; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-m); }
+.bc-qr svg { display: block; width: 100%; height: 100%; }
+.bc-qr--sm { width: 180px; height: 180px; }
+
+/* N03 Dashboard */
+.bc-dash { max-width: 1260px; margin: 0 auto; box-sizing: border-box; padding: 40px 32px; display: flex; flex-direction: column; gap: var(--space-6); }
+.bc-dash__head { display: flex; flex-wrap: wrap; gap: 20px 40px; align-items: flex-end; justify-content: space-between; }
+.bc-dash__title { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.bc-dash__title > .b-btn { align-self: flex-start; }
+.bc-dash__head .b-stats { flex: 0 1 520px; }
+.bc-cols { display: flex; flex-wrap: wrap; gap: 32px 48px; }
+.bc-cols__main { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; }
+.bc-cols__side { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 28px; }
+.bc-list { border-top: 1px solid var(--line); }
+.bc-list .srv__name { font-size: 26px; }
+.bc-section-gap { margin-top: var(--space-6); }
+.bc-list-after { padding-top: var(--space-3); }
+.bc-h2.bc-list-title { margin-bottom: var(--space-2); }
+.bc-member { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: 10px 0; border-bottom: 1px solid var(--line); }
+.bc-member__name { flex: 1 1 0; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bc-member__id { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.bc-empty-line { margin: 0; padding: 14px 0; color: var(--muted); border-bottom: 1px solid var(--line); }
+.bc-link-btn { align-self: flex-start; padding: 0; border: 0; background: none; font: inherit; color: var(--accent-text); cursor: pointer; text-decoration: underline; }
+.bc-link-btn:hover { color: var(--bridge-blue-700); }
+.bc-link-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 4px; }
+
+/* N04 Dialoge */
+.bc-dialog-form { width: 100%; max-width: 620px; max-height: calc(100vh - 40px); overflow: auto; }
+.bc-dialog-wide { max-width: 720px; }
+.b-dialog.bc-dialog-log { max-width: 900px; }
+.bc-log { max-height: 60vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-s); padding: var(--space-2); }
+.bc-log .b-log__line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.bc-textarea { min-height: 96px; resize: vertical; font-family: var(--font-mono); font-size: 13px; padding-top: 10px; padding-bottom: 10px; }
+.bc-checks { display: flex; flex-wrap: wrap; gap: 10px 20px; }
+.bc-login { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: var(--space-6); box-sizing: border-box; }
+.bc-login__mark { width: 96px; height: 96px; }
+
+@media (max-width: 760px) {
+  .bc-main, .bc-dash { padding: 24px 16px; }
+  .bc-words { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bc-grid3, .bc-grid2 { grid-template-columns: minmax(0, 1fr); }
+}

@@ -28,6 +28,10 @@ z. B. `k3x7q2...`.
 ```
 Prüfung: `id == ID(sign)`, Signatur gültig, `role` erlaubt. Rolle `app` (Phase 4a, 07 §2): der Schlüssel einer
 Bridge-App, ID = App-ID; er signiert nur App-Versionen (zusammen mit dem Owner) und meldet sich nie an.
+Knoten-Karten tragen dazu optional `urls` (1–4 Adressen) und `tls` (Fingerabdruck, 06 §2). *Nach Prüfung 8* hat jede
+Adresse – auf Karten, im Manifest, im Einladungslink – genau die Form `http(s)://host[:port][/pfad]` (kein `?`, `#`,
+`@`, `%`, Pfad nur `A–Z a–z 0–9 - . _ ~ /`, keine `.`/`..`-Teile; 06 §2), und Knoten rufen Adressen, die ein Knoten
+allein gewählt hat, nur auf öffentlichen IPs an (06 §2 „Adress-Schutz“).
 
 ## 3. Aussagen (signierte Erklärungen)
 ```json
@@ -128,7 +132,7 @@ signiert sind, dient die Transport-Verschlüsselung nur dem Schutz der Metadaten
 | POST | `/v4/poll` | Umschläge abholen (`wait`, `max`) |
 | POST | `/v4/ack` | Abgeholtes bestätigen (wird dann gelöscht) |
 | POST | `/v4/node/relay` · `/v4/node/homes` | Knoten → Knoten: Umschlag weiterreichen, `home`-Einträge (06 §8) |
-| POST | `/v4/node/probe` | Wächter-Proben |
+| POST | `/v4/node/watch` | Knoten meldet sich beim Wächter zu Proben an; die Proben selbst nutzen `/v4/info` und `/v4/net/{netz}/head` (06 §11) |
 | POST | `/v4/blob/begin` · `/chunk` · `/info` · `/hashes` · `/get` | Dateien nach Inhalt hochladen und lesen (Phase 4a, 07 §7) |
 | POST | `/v4/app/publish` · `/v4/app/manifest` · `/v4/node/app` | App-Versionen abgeben, abfragen, unter Hosts anbieten (07 §7) |
 | GET | `/app/<app-id>/<pfad>` | Dateien einer App in abgeschotteter Herkunft ausliefern (07 §5) |

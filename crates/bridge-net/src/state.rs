@@ -44,6 +44,18 @@
 //!   `min(card iat, seal iat)` (docs/06 §2, §6). A seal whose card's `iat` is more than 5 minutes after the seal's
 //!   own `iat` is skipped - a card from the future would otherwise win for good.
 //!
+//! - Watchers (docs/06 §11, ADR 0016): an identity with an active seal of level ≥ 2 with the service `watch` and its
+//!   card signs level-1 seals alone ([`NetState::check_watch_seal`]): subject a member (not the watcher), either a
+//!   member seal (no card, no services, membership at least `member_age` old and the last ban ended at least that
+//!   long ago) or a node seal (node card with addresses, services ⊆ [`WATCH_SERVICES`]); lifetime ≤ `seal_s`; it
+//!   replaces only its own level-1 seal or an orphaned one (issued by a watcher that is none any more); at most
+//!   `seals_per_day` seals per watcher and day (replay time). No cascade when a watcher ends.
+//! - Seals of watchers live in their own table, bounded by `limits.members` (one level-1 seal per member, plus room
+//!   for the churn of members); seals of admins and the master key keep all of [`MAX_SEALS`] (review 8). Entries of
+//!   watchers (their seals and the revocations of them) count against their own pool of `log_entries_per_day`, not
+//!   against the one of admins and gateways. A membership's age counts from the replay time it was accepted at (the
+//!   log clock), not from its `iat` - a back-dated membership is not older.
+//!
 //! Only the log operator additionally refuses manifest changes whose log rules can not be met (first operator and
 //! `witness_threshold` witnesses sealed with a card and the service - [`NetState::validate_candidate`]); replay does
 //! not check that.
@@ -61,12 +73,13 @@ use crate::log::{Head, MAX_ENTRY_BYTES, WitnessedHead, parse_entry, verify_head}
 use crate::merkle::{Hash, MAX_TREE_SIZE, Tree};
 use crate::statements::{
     Ban, Body, DAY_MS, Delegation, Invite, JoinMode, Kind, LogRules, Manifest, Member, Revoke, RevokeTarget, Right,
-    Rights, Seal, Service, Services,
+    Rights, Seal, Service, Services, WATCH_SERVICES, WatchRules,
 };
 
 /// Maximum number of admins (current delegations).
 pub const MAX_ADMINS: usize = 10_000;
-/// Maximum number of current seals (one per subject and level).
+/// Maximum number of current seals signed by admins or the master key (one per subject and level). Seals of watchers
+/// have their own table ([`NetState::watch_seal_limit`]): they can never fill this one (review 8).
 pub const MAX_SEALS: usize = 10_000;
 /// Maximum number of current bans issued by admins.
 pub const MAX_BANS: usize = 10_000;
@@ -91,6 +104,11 @@ pub const MAX_RULES_HISTORY: usize = 64;
 /// Most signature checks [`NetState::rules_ahead`] makes for the entries ahead of one head (manifests and the
 /// delegations of their signers). More: the head is refused, nothing is replayed (fail closed).
 pub const MAX_AHEAD_CHECKS: usize = 64;
+/// Most identities whose latest ban end the state remembers for the watchers' member rule (docs/06 §11.2).
+pub const MAX_BAN_HISTORY: usize = 100_000;
+/// How long the end of a ban is remembered: the longest `member_age_s` plus the longest watcher seal (a seal's `iat`
+/// can lie that far before the log clock) plus a day.
+pub const BAN_MEMORY_MS: i64 = (365 + 90 + 1) * DAY_MS;
 /// Most key cards taken from entries ahead.
 const MAX_AHEAD_CARDS: usize = 4_096;
 /// Most manifests (in the version window) and most `rules` delegations kept from entries ahead.
@@ -121,11 +139,25 @@ enum Key {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Data {
-    Delegation { rights: Rights, card: Box<KeyCard> },
-    Member,
-    Seal { services: Services, card: Option<Box<KeyCard>> },
+    Delegation {
+        rights: Rights,
+        card: Box<KeyCard>,
+    },
+    /// `accepted`: the replay time the membership was accepted at (its age for the watchers counts from there).
+    Member {
+        accepted: i64,
+    },
+    /// `by_watcher`: signed by a watcher alone (docs/06 §11) - such a seal is orphaned once its issuer is no watcher.
+    Seal {
+        services: Services,
+        card: Option<Box<KeyCard>>,
+        by_watcher: bool,
+    },
     Ban,
-    Invite { uses: u32, used: u32 },
+    Invite {
+        uses: u32,
+        used: u32,
+    },
 }
 
 /// A statement that is currently in effect.
@@ -158,6 +190,13 @@ struct Grants {
     invites: BTreeMap<Hash, Grant>,
     by_hash: BTreeMap<Hash, Key>,
     by_exp: BTreeSet<(i64, Key)>,
+    /// How many of `seals` were signed by a watcher alone (their own table, review 8).
+    watch_seals: usize,
+}
+
+/// Whether a grant is a seal signed by a watcher alone.
+fn by_watcher(grant: &Grant) -> bool {
+    matches!(grant.data, Data::Seal { by_watcher: true, .. })
 }
 
 impl Grants {
@@ -176,6 +215,9 @@ impl Grants {
         let old = self.remove(&key);
         self.by_hash.insert(grant.hash, key.clone());
         self.by_exp.insert((grant.exp, key.clone()));
+        if by_watcher(&grant) {
+            self.watch_seals = self.watch_seals.saturating_add(1);
+        }
         match key {
             Key::Delegation(id) => self.delegations.insert(id, grant),
             Key::Member(id) => self.members.insert(id, grant),
@@ -196,6 +238,9 @@ impl Grants {
         }?;
         self.by_hash.remove(&grant.hash);
         self.by_exp.remove(&(grant.exp, key.clone()));
+        if by_watcher(&grant) {
+            self.watch_seals = self.watch_seals.saturating_sub(1);
+        }
         Some(grant)
     }
 
@@ -298,9 +343,70 @@ enum Effect {
     Grant(Key, Grant),
     Ban(Key, Grant, Option<Id>),
     Member(Key, Grant, Option<Hash>),
-    Seal(Key, Grant, bool),
+    /// The seal, whether it makes a gateway, and the watcher that signed it alone (counts against its budget).
+    Seal(Key, Grant, bool, Option<Id>),
     RevokeStatement(Key),
-    RevokeIdentity { id: Id, cascade: bool, by_master: bool },
+    RevokeIdentity {
+        id: Id,
+        cascade: bool,
+        by_master: bool,
+    },
+}
+
+/// Which pool of `limits.log_entries_per_day` an entry counts against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pool {
+    /// Signed by the master key: counts nowhere.
+    Master,
+    /// Admins, gateways, everybody else.
+    General,
+    /// A watcher's seal or its revocation of one (docs/06 §11.2, review 8).
+    Watch,
+}
+
+/// A seal in effect, as the watchers see it (docs/06 §11).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SealInfo {
+    /// Level 1-3.
+    pub level: u8,
+    /// Hash of the statement (for `revoke`).
+    pub hash: Hash,
+    /// Issued at.
+    pub iat: i64,
+    /// Expires.
+    pub exp: i64,
+    /// Who signed it.
+    pub issuers: Vec<Id>,
+    /// Its services.
+    pub services: Services,
+    /// The subject's card in it.
+    pub card: Option<KeyCard>,
+    /// Signed by a watcher alone.
+    pub by_watcher: bool,
+}
+
+impl SealInfo {
+    fn of(level: u8, grant: &Grant) -> Option<Self> {
+        match &grant.data {
+            Data::Seal { services, card, by_watcher } => Some(Self {
+                level,
+                hash: grant.hash,
+                iat: grant.iat,
+                exp: grant.exp,
+                issuers: grant.issuers.clone(),
+                services: *services,
+                card: card.as_deref().cloned(),
+                by_watcher: *by_watcher,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether the seal is in effect at `at` (`iat − 5 min ≤ at < exp`).
+    #[must_use]
+    pub fn active(&self, at: i64) -> bool {
+        self.iat.saturating_sub(CLOCK_SKEW_MS) <= at && at < self.exp
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -316,6 +422,8 @@ pub struct NetState {
     size: u64,
     day: i64,
     day_count: u64,
+    /// Entries of watchers on `day` (their own pool, review 8).
+    watch_day_count: u64,
     gateway_sealed: bool,
     grants: Grants,
     revoked: Expiring<Hash, ()>,
@@ -330,6 +438,13 @@ pub struct NetState {
     bans_today: BTreeMap<Id, u32>,
     /// Changes of the log rules (bounded, oldest first); the first is the genesis.
     rules: VecDeque<RulesChange>,
+    /// Seals per watcher on `watch_day` (cleared when the day changes; docs/06 §11.2).
+    watch_day: i64,
+    watch_today: BTreeMap<Id, u64>,
+    /// Latest end of a ban per identity, forgotten [`BAN_MEMORY_MS`] after it (bounded).
+    ban_ends: Expiring<Id, i64>,
+    /// The ban history was full: no member seal of a watcher before this time (fail closed).
+    ban_history_closed_until: i64,
 }
 
 impl NetState {
@@ -347,6 +462,7 @@ impl NetState {
             size: 1,
             day: clock.div_euclid(DAY_MS),
             day_count: 0,
+            watch_day_count: 0,
             gateway_sealed: false,
             grants: Grants::default(),
             revoked: Expiring::new(),
@@ -357,6 +473,10 @@ impl NetState {
             ban_day: i64::MIN,
             bans_today: BTreeMap::new(),
             rules,
+            watch_day: i64::MIN,
+            watch_today: BTreeMap::new(),
+            ban_ends: Expiring::new(),
+            ban_history_closed_until: i64::MIN,
         })
     }
 
@@ -380,12 +500,12 @@ impl NetState {
         self.size = self.size.saturating_add(1);
         let checked = parse_entry(entry).and_then(|statement| {
             let at = self.time_of(&statement);
-            let effect = self.check(&statement, at)?;
-            Ok((statement, at, effect))
+            let (effect, pool) = self.check(&statement, at)?;
+            Ok((statement, at, effect, pool))
         });
         match checked {
-            Ok((statement, at, effect)) => {
-                self.commit(&statement, at, effect);
+            Ok((statement, at, effect, pool)) => {
+                self.commit(&statement, at, effect, pool);
                 Applied::Accepted
             }
             Err(reason) => Applied::Skipped(reason),
@@ -443,7 +563,7 @@ impl NetState {
         !self.excluded(id, at)
             && self.grants.seals_of(id).any(|(_, grant)| {
                 grant.active(at)
-                    && matches!(&grant.data, Data::Seal { services, card: Some(_) } if services.has(service))
+                    && matches!(&grant.data, Data::Seal { services, card: Some(_), .. } if services.has(service))
             })
     }
 
@@ -453,7 +573,7 @@ impl NetState {
 
     // --- checks (pure) -----------------------------------------------------------------------------------------
 
-    fn check(&self, statement: &Statement, at: i64) -> NetResult<Effect> {
+    fn check(&self, statement: &Statement, at: i64) -> NetResult<(Effect, Pool)> {
         if statement.net() != &self.net {
             return Err(NetError::format("entry: other network"));
         }
@@ -490,10 +610,34 @@ impl NetState {
         if remembers && self.revoked.len() >= MAX_REVOKED {
             return Err(NetError::quota("remembered revocations"));
         }
-        self.check_quota(kind, by_master, at)?;
+        let pool = if by_master {
+            Pool::Master
+        } else if self.is_watch_entry(&effect, &signers, at) {
+            Pool::Watch
+        } else {
+            Pool::General
+        };
+        self.check_quota(kind, pool, at)?;
         // Most expensive last: standing and signatures of every signer.
         self.verify_signers(statement, &signers, at)?;
-        Ok(effect)
+        Ok((effect, pool))
+    }
+
+    /// A watcher's entry (its own pool of log entries, review 8): a seal signed by a watcher alone, or the revocation
+    /// of such a seal by its only issuer when that one is no admin.
+    fn is_watch_entry(&self, effect: &Effect, signers: &[Id], at: i64) -> bool {
+        match effect {
+            Effect::Seal(.., watcher) => watcher.is_some(),
+            Effect::RevokeStatement(key) => match (signers, self.grants.get(key)) {
+                ([signer], Some(grant)) => {
+                    by_watcher(grant)
+                        && grant.issuers.as_slice() == signers
+                        && self.admin_rights_at(signer, at).is_empty()
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     fn check_manifest(&self, statement: &Statement, signers: &[Id], by_master: bool, at: i64) -> NetResult<Effect> {
@@ -565,7 +709,7 @@ impl NetState {
             }
         }
         let key = Key::Member(member.member.clone());
-        let grant = self.new_grant(statement, signers, Data::Member);
+        let grant = self.new_grant(statement, signers, Data::Member { accepted: at });
         if let Some(current) = self.grants.members.get(&member.member) {
             // Only the issuer of the membership, an admin with `members` (or the master) replaces it - or anybody
             // once it has expired. A gateway that did not admit the member can not evict it.
@@ -589,17 +733,50 @@ impl NetState {
         if seal.card.as_ref().is_some_and(|card| card.iat() > statement.times().0.saturating_add(CLOCK_SKEW_MS)) {
             return Err(NetError::forbidden("seal: the card is issued more than 5 minutes after the seal"));
         }
+        let mut watcher = None;
         if !by_master {
             let needed = if seal.level == 3 { self.manifest.approvals.seal3 } else { 1 };
-            self.require_admins(signers, Right::Seals, needed, at)?;
+            if let Err(error) = self.require_admins(signers, Right::Seals, needed, at) {
+                // Not carried by admins: only a watcher alone, within its rules (docs/06 §11.2).
+                let [only] = signers else { return Err(error) };
+                if !self.is_watcher(only, at) {
+                    return Err(error);
+                }
+                let (iat, exp) = statement.times();
+                self.check_watch_seal(only, &seal, iat, exp, at)?;
+                watcher = Some(only.clone());
+            }
         }
         self.check_subject(&seal.subject, statement.times().0, at, false)?;
         let key = Key::Seal(seal.subject.clone(), seal.level);
         let gateway = seal.level >= 2 && seal.services.has(Service::Gateway);
-        let data = Data::Seal { services: seal.services, card: seal.card.map(Box::new) };
+        let data = Data::Seal { services: seal.services, card: seal.card.map(Box::new), by_watcher: watcher.is_some() };
         let grant = self.new_grant(statement, signers, data);
-        self.check_replace(&key, &grant, self.grants.seals.len(), MAX_SEALS)?;
-        Ok(Effect::Seal(key, grant, gateway))
+        self.check_seal_room(&key, &grant)?;
+        Ok(Effect::Seal(key, grant, gateway, watcher))
+    }
+
+    /// A seal may be stored: newer than the one in effect, and room in its table - watchers' seals in theirs
+    /// ([`NetState::watch_seal_limit`]), all others in [`MAX_SEALS`]. Replacing a seal of the other table counts as
+    /// a new one (an admin seal over a watcher's moves it into the admins' table).
+    fn check_seal_room(&self, key: &Key, grant: &Grant) -> NetResult<()> {
+        let current = self.grants.get(key);
+        if current.is_some_and(|current| !grant.newer_than(current)) {
+            return Err(NetError::forbidden("not newer than the statement in effect"));
+        }
+        let watcher = by_watcher(grant);
+        if current.is_some_and(|current| by_watcher(current) == watcher) {
+            return Ok(());
+        }
+        let (count, limit) = if watcher {
+            (self.grants.watch_seals, self.watch_seal_limit())
+        } else {
+            (self.grants.seals.len().saturating_sub(self.grants.watch_seals), MAX_SEALS)
+        };
+        if count >= limit {
+            return Err(NetError::quota(if watcher { "seals of watchers" } else { "seals" }));
+        }
+        Ok(())
     }
 
     fn check_ban(&self, statement: &Statement, signers: &[Id], at: i64) -> NetResult<Effect> {
@@ -739,17 +916,23 @@ impl NetState {
         Ok(())
     }
 
-    fn check_quota(&self, kind: Kind, by_master: bool, at: i64) -> NetResult<()> {
-        if by_master {
-            return Ok(());
-        }
-        let used = if at.div_euclid(DAY_MS) == self.day { self.day_count } else { 0 };
+    fn check_quota(&self, kind: Kind, pool: Pool, at: i64) -> NetResult<()> {
+        let count = match pool {
+            Pool::Master => return Ok(()),
+            Pool::General => self.day_count,
+            Pool::Watch => self.watch_day_count,
+        };
+        let used = if at.div_euclid(DAY_MS) == self.day { count } else { 0 };
         let mut limit = self.manifest.limits.log_entries_per_day;
         if matches!(kind, Kind::Revoke | Kind::Ban) {
             limit = limit.saturating_add(limit / 10);
         }
         if used >= limit {
-            return Err(NetError::quota("log entries per day"));
+            return Err(NetError::quota(if pool == Pool::Watch {
+                "log entries of watchers per day"
+            } else {
+                "log entries per day"
+            }));
         }
         Ok(())
     }
@@ -796,7 +979,7 @@ impl NetState {
 
     // --- changes -----------------------------------------------------------------------------------------------
 
-    fn commit(&mut self, statement: &Statement, at: i64, effect: Effect) {
+    fn commit(&mut self, statement: &Statement, at: i64, effect: Effect, pool: Pool) {
         match effect {
             Effect::Manifest(manifest, hash) => {
                 let rules = manifest.log_rules();
@@ -820,6 +1003,9 @@ impl NetState {
             }
             Effect::Grant(key, grant) => self.put(key, grant),
             Effect::Ban(key, grant, admin) => {
+                if let Key::Ban(subject, _) = &key {
+                    self.remember_ban_end(subject, grant.exp);
+                }
                 if let Some(admin) = admin {
                     let day = at.div_euclid(DAY_MS);
                     if day != self.ban_day {
@@ -839,26 +1025,50 @@ impl NetState {
                 }
                 self.put(key, grant);
             }
-            Effect::Seal(key, grant, gateway) => {
+            Effect::Seal(key, grant, gateway, watcher) => {
                 self.gateway_sealed |= gateway;
+                if let Some(watcher) = watcher {
+                    let day = at.div_euclid(DAY_MS);
+                    if day != self.watch_day {
+                        self.watch_day = day;
+                        self.watch_today.clear();
+                    }
+                    let count = self.watch_today.entry(watcher).or_insert(0);
+                    *count = count.saturating_add(1);
+                }
                 self.put(key, grant);
             }
             Effect::RevokeStatement(key) => self.take(&key),
             Effect::RevokeIdentity { id, cascade, by_master } => self.revoke_identity(&id, cascade, by_master, at),
         }
-        if !statement.claimed_signers().contains(&&self.net) {
+        if pool != Pool::Master {
             let day = at.div_euclid(DAY_MS);
             if day != self.day {
                 self.day = day;
                 self.day_count = 0;
+                self.watch_day_count = 0;
             }
-            self.day_count = self.day_count.saturating_add(1);
+            let count = if pool == Pool::Watch { &mut self.watch_day_count } else { &mut self.day_count };
+            *count = count.saturating_add(1);
         }
         self.clock = self.clock.max(at);
         let before = self.clock.saturating_sub(CLOCK_SKEW_MS);
         self.grants.prune(before);
         self.revoked.prune(before);
         self.cutoffs.prune(before);
+        self.ban_ends.prune(before);
+    }
+
+    /// Remembers the end of a ban of `subject` for the watchers' member rule (the latest one counts). A full history
+    /// closes member seals of watchers until the dropped end is forgotten anyway (fail closed).
+    fn remember_ban_end(&mut self, subject: &Id, end: i64) {
+        let latest = self.ban_ends.get(subject).copied().map_or(end, |known| known.max(end));
+        let forget = latest.saturating_add(BAN_MEMORY_MS);
+        if !self.ban_ends.contains(subject) && self.ban_ends.len() >= MAX_BAN_HISTORY {
+            self.ban_history_closed_until = self.ban_history_closed_until.max(forget);
+            return;
+        }
+        self.ban_ends.insert(subject.clone(), forget, latest);
     }
 
     /// Stores a grant; a replaced one counts as revoked from now on.
@@ -1044,6 +1254,183 @@ impl NetState {
         gateways.into_iter().collect()
     }
 
+    // --- watchers (docs/06 §11) -----------------------------------------------------------------------------------
+
+    /// The rules of the watchers (manifest field `watch`, or the defaults).
+    #[must_use]
+    pub fn watch_rules(&self) -> WatchRules {
+        self.manifest.watch_rules()
+    }
+
+    /// Whether `id` is a watcher at `at`: an active seal of level ≥ 2 with the service `watch` and its card, not
+    /// banned, not revoked with cascade.
+    #[must_use]
+    pub fn is_watcher(&self, id: &Id, at: i64) -> bool {
+        !self.excluded(id, at)
+            && self.grants.seals_of(id).any(|(level, grant)| {
+                level >= 2
+                    && grant.active(at)
+                    && matches!(&grant.data, Data::Seal { services, card: Some(_), .. } if services.has(Service::Watch))
+            })
+    }
+
+    /// All watchers at `at` with their newest card (sorted by ID).
+    #[must_use]
+    pub fn watchers(&self, at: i64) -> Vec<(Id, Option<KeyCard>)> {
+        let ids: BTreeSet<&Id> = self
+            .grants
+            .seals
+            .iter()
+            .filter(|((_, level), grant)| {
+                *level >= 2 && matches!(&grant.data, Data::Seal { services, .. } if services.has(Service::Watch))
+            })
+            .map(|((id, _), _)| id)
+            .collect();
+        ids.into_iter()
+            .filter(|id| self.is_watcher(id, at))
+            .map(|id| (id.clone(), self.seal_card(id, Some(at)).cloned()))
+            .collect()
+    }
+
+    /// Seals `watcher` issued on the day of `at` (its budget is `seals_per_day`).
+    #[must_use]
+    pub fn watch_used(&self, watcher: &Id, at: i64) -> u64 {
+        if at.div_euclid(DAY_MS) != self.watch_day {
+            return 0;
+        }
+        self.watch_today.get(watcher).copied().unwrap_or(0)
+    }
+
+    /// Whether a seal signed by `watcher` alone with the times `iat`/`exp` would count at `at` (docs/06 §11.2):
+    /// `watcher` is one, level 1, the subject is a member and not the watcher (and may receive grants), member seal
+    /// (no card, no services, membership and distance to the last ban at least `member_age`) or node seal (node card
+    /// with addresses, services ⊆ [`WATCH_SERVICES`]), lifetime ≤ `seal_s`, the level-1 seal in effect is its own, an
+    /// orphaned one or expired, and the budget of the day is not used up. The state checks exactly this on replay;
+    /// a watcher asks it before it signs.
+    pub fn check_watch_seal(&self, watcher: &Id, seal: &Seal, iat: i64, exp: i64, at: i64) -> NetResult<()> {
+        if !self.is_watcher(watcher, at) {
+            return Err(NetError::forbidden("watcher: the signer is no watcher"));
+        }
+        if seal.level != 1 {
+            return Err(NetError::forbidden("watcher: only level 1"));
+        }
+        if &seal.subject == watcher {
+            return Err(NetError::forbidden("watcher: not for itself"));
+        }
+        self.check_subject(&seal.subject, iat, at, false)?;
+        if !self.is_member(&seal.subject, at) {
+            return Err(NetError::NotMember);
+        }
+        let rules = self.watch_rules();
+        match &seal.card {
+            None => {
+                if !seal.services.is_empty() {
+                    return Err(NetError::forbidden("watcher: a member seal has no services"));
+                }
+                self.check_member_age(&seal.subject, iat, at, &rules)?;
+            }
+            Some(card) => {
+                if card.role() != bridge_core::Role::Node || card.urls().is_empty() {
+                    return Err(NetError::forbidden("watcher: a node seal needs the node's card with addresses"));
+                }
+                if seal.services.iter().any(|service| !WATCH_SERVICES.contains(&service)) {
+                    return Err(NetError::forbidden("watcher: services beyond web are for admins"));
+                }
+            }
+        }
+        if exp.saturating_sub(iat) > rules.seal_ms() {
+            return Err(NetError::forbidden("watcher: lifetime above watch.seal_s"));
+        }
+        if let Some(current) = self.grants.seals.get(&(seal.subject.clone(), 1)) {
+            let own = current.issuers.as_slice() == [watcher.clone()];
+            let orphaned = matches!(current.data, Data::Seal { by_watcher: true, .. })
+                && current.issuers.iter().all(|issuer| !self.is_watcher(issuer, at));
+            if !(own || orphaned || at >= current.exp) {
+                return Err(NetError::forbidden("watcher: the subject has a level-1 seal of somebody else"));
+            }
+        }
+        if self.watch_used(watcher, at) >= rules.seals_per_day {
+            return Err(NetError::quota("seals of this watcher today"));
+        }
+        // Room in the watchers' own table and pool of log entries (review 8) - checked on replay too.
+        let replaces_own_table = self.grants.seals.get(&(seal.subject.clone(), 1)).is_some_and(by_watcher);
+        if !replaces_own_table && self.grants.watch_seals >= self.watch_seal_limit() {
+            return Err(NetError::quota("seals of watchers"));
+        }
+        self.check_quota(Kind::Seal, Pool::Watch, at)?;
+        Ok(())
+    }
+
+    /// Member rule (docs/06 §11.2): the membership in effect is at least `member_age` old at the seal's `iat`, the
+    /// latest remembered ban ended at least that long before, and the ban history is not closed.
+    fn check_member_age(&self, subject: &Id, iat: i64, at: i64, rules: &WatchRules) -> NetResult<()> {
+        let age = rules.member_age_ms();
+        let since = self.member_since(subject).ok_or(NetError::NotMember)?;
+        if since > iat.saturating_sub(age) {
+            return Err(NetError::forbidden("watcher: membership younger than watch.member_age_s"));
+        }
+        if self.ban_ends.get(subject).is_some_and(|end| *end > iat.saturating_sub(age)) {
+            return Err(NetError::forbidden("watcher: banned within watch.member_age_s"));
+        }
+        if at < self.ban_history_closed_until {
+            return Err(NetError::forbidden("watcher: ban history full, no member seals for now"));
+        }
+        Ok(())
+    }
+
+    /// When the membership in effect for `id` was accepted (the replay time, i.e. the log clock - not its `iat`, which
+    /// its issuer chooses; review 8): its age counts from there.
+    #[must_use]
+    pub fn member_since(&self, id: &Id) -> Option<i64> {
+        match self.grants.members.get(id)?.data {
+            Data::Member { accepted } => Some(accepted),
+            _ => None,
+        }
+    }
+
+    /// Most seals signed by watchers in effect at once: the member limit of the manifest (a watcher seals only
+    /// members, one level-1 seal each; members that left keep theirs until it expires). Their own table - admins
+    /// and the master key never lose room to them (review 8).
+    #[must_use]
+    pub fn watch_seal_limit(&self) -> usize {
+        usize::try_from(self.manifest.limits.members).unwrap_or(usize::MAX)
+    }
+
+    /// Seals signed by watchers in effect (counted against [`NetState::watch_seal_limit`]).
+    #[must_use]
+    pub fn watch_seal_count(&self) -> usize {
+        self.grants.watch_seals
+    }
+
+    /// Up to `max` member IDs after `after` (by ID; from the start without it) - the watchers walk them in turns.
+    #[must_use]
+    pub fn members_after(&self, after: Option<&Id>, max: usize) -> Vec<Id> {
+        let range = match after {
+            Some(after) => {
+                self.grants.members.range::<Id, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            }
+            None => self.grants.members.range::<Id, _>(..),
+        };
+        range.take(max).map(|(id, _)| id.clone()).collect()
+    }
+
+    /// The seal of `id` at `level` in effect (also when not active yet or expired but not forgotten).
+    #[must_use]
+    pub fn seal_info(&self, id: &Id, level: u8) -> Option<SealInfo> {
+        self.grants.seals.get(&(id.clone(), level)).and_then(|grant| SealInfo::of(level, grant))
+    }
+
+    /// The seals at `level` signed by `issuer` alone, with their subjects (by subject ID).
+    #[must_use]
+    pub fn seals_issued_by(&self, issuer: &Id, level: u8) -> Vec<(Id, SealInfo)> {
+        self.grants
+            .seals
+            .iter()
+            .filter(|((_, known), grant)| *known == level && grant.issuers.as_slice() == [issuer.clone()])
+            .filter_map(|((id, _), grant)| SealInfo::of(level, grant).map(|info| (id.clone(), info)))
+            .collect()
+    }
+
     /// Remaining uses of an invite code at `at` (`None` if unknown, revoked or expired).
     #[must_use]
     pub fn invite_left(&self, code_hash: &Hash, at: i64) -> Option<u32> {
@@ -1091,6 +1478,25 @@ impl NetState {
             })
             .max_by(|(a, _), (b, _)| a.cmp(b))
             .map(|(_, card)| card)
+    }
+
+    /// The addresses of `id` that an admin or the master key vouched for: those in the cards of its current seals that
+    /// were not signed by a watcher alone, and its start-gateway entry in the manifest (address and card). A card only
+    /// a watcher sealed carries addresses the node chose itself (its registration, docs/06 §11.5) - nodes call those
+    /// only after checking where they point (review 8, docs/06 §2 "Adress-Schutz").
+    #[must_use]
+    pub fn vetted_urls(&self, id: &Id) -> BTreeSet<String> {
+        let mut urls: BTreeSet<String> = BTreeSet::new();
+        for (_, grant) in self.grants.seals_of(id) {
+            if let Data::Seal { card: Some(card), by_watcher: false, .. } = &grant.data {
+                urls.extend(card.urls().iter().cloned());
+            }
+        }
+        for entry in self.manifest.gateways.iter().filter(|entry| &entry.id == id) {
+            urls.insert(entry.url.clone());
+            urls.extend(entry.card.iter().flat_map(|card| card.urls().iter().cloned()));
+        }
+        urls
     }
 
     /// The seals of `id` active at `at`: (level, services), ascending by level (none when banned).
@@ -1859,5 +2265,96 @@ fn one_signer(signers: &[Id]) -> NetResult<&Id> {
     match signers {
         [one] => Ok(one),
         _ => Err(NetError::format("entry: exactly one signer expected")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bridge_core::{Identity, Role};
+
+    use super::*;
+    use crate::statements::Member;
+
+    const T0: i64 = 1_794_200_000_000;
+
+    /// Review 8, finding 1: watchers once filled the one seal table (10,000) and then no admin or master seal fit any
+    /// more. Their seals have their own table now: with 10,000 watcher seals in effect, the master still seals.
+    #[test]
+    fn watcher_seals_never_take_the_admins_room() -> NetResult<()> {
+        let master = Identity::from_secret_bytes(&[1; 32], &[2; 32]);
+        let net = master.id().clone();
+        let node = Identity::from_secret_bytes(&[3; 32], &[4; 32]);
+        let manifest = Manifest::template(
+            JoinMode::Open,
+            "Netz",
+            master.key_card(Role::Net, None, T0)?,
+            node.id(),
+            "https://n.x",
+        )?;
+        let genesis = manifest.sign(&net, T0, T0 + 400 * DAY_MS, &master)?;
+        let mut state = NetState::genesis(&net, genesis.canonical_bytes())?;
+        let watcher = Id::of_sign_key(&[9; 32]);
+        for index in 0..MAX_SEALS {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            let data = Data::Seal { services: Services::NONE, card: None, by_watcher: true };
+            let grant = Grant { hash: key, iat: T0, exp: T0 + 30 * DAY_MS, issuers: vec![watcher.clone()], data };
+            state.grants.insert(Key::Seal(Id::of_sign_key(&key), 1), grant);
+        }
+        assert_eq!(state.watch_seal_count(), MAX_SEALS);
+        let seal = Seal {
+            subject: node.id().clone(),
+            level: 3,
+            services: Services::of(&[Service::Gateway]),
+            card: Some(node.key_card_with(Role::Node, None, &["https://n.x".into()], None, T0)?),
+        };
+        let statement = seal.sign(&net, T0 + 60_000, T0 + 30 * DAY_MS, &master)?;
+        assert_eq!(state.apply(statement.canonical_bytes()), Applied::Accepted);
+        assert_eq!(state.watch_seal_count(), MAX_SEALS, "the counter follows the table");
+        state.grants.remove(&Key::Seal(Id::of_sign_key(&[0; 32]), 1));
+        assert_eq!(state.watch_seal_count(), MAX_SEALS - 1);
+        Ok(())
+    }
+
+    /// A full ban history closes member seals of watchers (fail closed) until the dropped end is forgotten anyway.
+    #[test]
+    fn full_ban_history_closes_member_seals() -> NetResult<()> {
+        let master = Identity::from_secret_bytes(&[1; 32], &[2; 32]);
+        let net = master.id().clone();
+        let node = Identity::from_secret_bytes(&[3; 32], &[4; 32]);
+        let manifest = Manifest::template(
+            JoinMode::Open,
+            "Netz",
+            master.key_card(Role::Net, None, T0)?,
+            node.id(),
+            "https://n.x",
+        )?;
+        let genesis = manifest.sign(&net, T0, T0 + 400 * DAY_MS, &master)?;
+        let mut state = NetState::genesis(&net, genesis.canonical_bytes())?;
+        let member = Identity::from_secret_bytes(&[5; 32], &[6; 32]);
+        let admitted =
+            Member { member: member.id().clone(), invite: None }.sign(&net, T0, T0 + 300 * DAY_MS, &master)?;
+        assert_eq!(state.apply(admitted.canonical_bytes()), Applied::Accepted);
+        let rules = WatchRules::default();
+        let at = T0 + 8 * DAY_MS;
+        state.check_member_age(member.id(), at, at, &rules)?;
+        for index in 0..MAX_BAN_HISTORY {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            state.remember_ban_end(&Id::of_sign_key(&key), T0);
+        }
+        assert_eq!(state.ban_ends.len(), MAX_BAN_HISTORY);
+        state.check_member_age(member.id(), at, at, &rules)?;
+        // One more identity does not fit: closed until its end is forgotten anyway.
+        state.remember_ban_end(&Id::of_sign_key(&[0xff; 32]), T0 + DAY_MS);
+        assert_eq!(state.ban_ends.len(), MAX_BAN_HISTORY, "bounded");
+        assert!(matches!(state.check_member_age(member.id(), at, at, &rules), Err(NetError::Forbidden(_))));
+        let reopened = T0 + DAY_MS + BAN_MEMORY_MS;
+        assert!(state.check_member_age(member.id(), reopened, reopened, &rules).is_ok());
+        // A known identity keeps its slot and only moves its end forward.
+        let known = Id::of_sign_key(&[0; 32]);
+        state.remember_ban_end(&known, T0 - DAY_MS);
+        assert_eq!(state.ban_ends.get(&known), Some(&T0));
+        Ok(())
     }
 }

@@ -19,8 +19,10 @@
 //! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core` (address keys, hashes, IDs).
 
 pub mod lan;
+mod public;
 
 pub use lan::{Discovery, LanAnnouncer, LanHints, LanPeer, TlsIdentity};
+pub use public::{PeerAddresses, is_public_ip, is_tailnet_ip};
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -63,6 +65,10 @@ pub enum TransportError {
     /// The answer was larger than allowed.
     #[error("response too large")]
     TooLarge,
+    /// The target is not allowed (an address that is not public, for a client made with
+    /// [`HttpClient::new_public`]); nothing was sent.
+    #[error("refused: {0}")]
+    Refused(String),
 }
 
 /// Result type of the transport.

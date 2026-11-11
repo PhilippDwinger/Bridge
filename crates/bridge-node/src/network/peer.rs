@@ -4,6 +4,11 @@
 //! LAN before Internet (docs/04 §7, docs/06 §2): a node is reached through its [`Endpoint`]s - first the LAN
 //! addresses where it was seen lately (pinned to the TLS certificate of its card in the network log), then its
 //! public addresses. A failed connection moves on to the next endpoint; an answer is an answer.
+//!
+//! Addresses a node chose alone (a card only a watcher sealed, a registration at this watcher) are **guarded**
+//! (review 8, docs/06 §2 "Adress-Schutz"): they are resolved for each call and only public IPs are contacted, pinned
+//! for that call ([`HttpClient::new_checked`]) - plus Tailscale's ranges with `tailnet`, unchecked with `any`
+//! ([`crate::NodeConfig::peer_addresses`]).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -38,12 +43,20 @@ pub(crate) struct Endpoint {
     pub(crate) pin: Option<[u8; 32]>,
     /// LAN only: the node ID the directory listed this address for (a failed connection forgets it for that ID).
     pub(crate) node: Option<Id>,
+    /// The address was chosen by the node alone (no admin vouched for it): only public IPs (see module docs).
+    pub(crate) guarded: bool,
 }
 
 impl Endpoint {
     /// A public address (`http://` or `https://` with certificate authorities).
     pub(crate) fn public(url: &str) -> Self {
-        Self { url: url.trim_end_matches('/').to_owned(), pin: None, node: None }
+        Self { url: url.trim_end_matches('/').to_owned(), pin: None, node: None, guarded: false }
+    }
+
+    /// The same address, guarded (a LAN endpoint stays as it is: its pinned certificate is the check).
+    pub(crate) fn guard(mut self) -> Self {
+        self.guarded = self.pin.is_none();
+        self
     }
 }
 
@@ -90,8 +103,14 @@ impl Answer {
 }
 
 impl Node {
-    fn client(&self, endpoint: &Endpoint) -> Result<HttpClient, String> {
+    async fn client(&self, endpoint: &Endpoint) -> Result<HttpClient, String> {
         let network = self.network().ok_or("no network")?;
+        let rule = network.peer_addresses;
+        if endpoint.guarded && endpoint.pin.is_none() && rule != bridge_transport::PeerAddresses::Any {
+            // Resolved and checked for every call, never cached: a later DNS answer is checked again.
+            let timeout = network.timing.peer_timeout;
+            return HttpClient::new_checked(&endpoint.url, timeout, rule).await.map_err(|e| e.to_string());
+        }
         let mut peers = lock(&network.peers);
         if let Some(client) = peers.clients.get(endpoint) {
             return Ok(client.clone());
@@ -118,13 +137,13 @@ impl Node {
 
     /// GET `path` at `to`.
     pub(crate) async fn peer_get(&self, to: &Endpoint, path: &str) -> Result<Answer, String> {
-        let answer = self.client(to)?.get(path).await;
+        let answer = self.client(to).await?.get(path).await;
         self.answered(to, answer)
     }
 
     /// POST `body` to `path` at `to`.
     pub(crate) async fn peer_post(&self, to: &Endpoint, path: &str, body: Vec<u8>) -> Result<Answer, String> {
-        let answer = self.client(to)?.post(path, None, body).await;
+        let answer = self.client(to).await?.post(path, None, body).await;
         self.answered(to, answer)
     }
 
@@ -176,21 +195,46 @@ impl Node {
     }
 
     /// How to reach the node `id`: its LAN addresses first - if it was seen in the LAN lately and `tls` (from its
-    /// card) pins a certificate - then its public `urls`. Never this node itself.
+    /// card) pins a certificate - then its public `urls`. Never this node itself. A public address no admin vouched
+    /// for in the log ([`bridge_net::NetState::vetted_urls`]) is guarded. Must not be called under the core lock.
     pub(crate) fn endpoints_of(&self, id: &Id, tls: Option<[u8; 32]>, urls: &[String]) -> Vec<Endpoint> {
         if id == self.inner.identity.id() {
             return Vec::new();
         }
+        let vetted = self.with_core(|core| core.state.vetted_urls(id)).ok();
+        let mut endpoints = self.lan_endpoints(id, tls);
+        for url in urls.iter().take(bridge_core::keys::MAX_URLS) {
+            let mut endpoint = Endpoint::public(url);
+            endpoint.guarded = vetted.as_ref().is_some_and(|vetted| !vetted.contains(url));
+            if !endpoints.iter().any(|known| known.url == endpoint.url && known.pin.is_none()) {
+                endpoints.push(endpoint);
+            }
+        }
+        endpoints
+    }
+
+    /// Like [`Node::endpoints_of`] for addresses the node `id` chose alone (its registration at this watcher): every
+    /// public address is guarded.
+    pub(crate) fn guarded_endpoints_of(&self, id: &Id, tls: Option<[u8; 32]>, urls: &[String]) -> Vec<Endpoint> {
+        if id == self.inner.identity.id() {
+            return Vec::new();
+        }
+        let mut endpoints = self.lan_endpoints(id, tls);
+        for url in urls.iter().take(bridge_core::keys::MAX_URLS) {
+            let endpoint = Endpoint::public(url).guard();
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+        endpoints
+    }
+
+    /// The LAN addresses of `id` (pinned to `tls`), if it was seen in the LAN lately.
+    fn lan_endpoints(&self, id: &Id, tls: Option<[u8; 32]>) -> Vec<Endpoint> {
         let mut endpoints: Vec<Endpoint> = Vec::new();
         if let (Some(pin), Some(directory)) = (tls, self.inner.lan.as_ref()) {
             for url in directory.urls_of(id).into_iter().take(MAX_LAN_ENDPOINTS) {
-                endpoints.push(Endpoint { url, pin: Some(pin), node: Some(id.clone()) });
-            }
-        }
-        for url in urls.iter().take(bridge_core::keys::MAX_URLS) {
-            let endpoint = Endpoint::public(url);
-            if !endpoints.contains(&endpoint) {
-                endpoints.push(endpoint);
+                endpoints.push(Endpoint { url, pin: Some(pin), node: Some(id.clone()), guarded: false });
             }
         }
         endpoints

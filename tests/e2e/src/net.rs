@@ -51,12 +51,14 @@ where
     }
 }
 
-/// A node config for tests: fast network timing and limits that let many nodes on 127.0.0.1 talk a lot.
+/// A node config for tests: fast network timing and limits that let many nodes on 127.0.0.1 talk a lot - and, since
+/// all of them live on 127.0.0.1, private peer addresses allowed (review 8; the default refuses them).
 #[must_use]
 pub fn test_config(dir: &Path, network: Option<NetConfig>, url: &str) -> NodeConfig {
     let mut config = NodeConfig::new(dir);
     config.network = network;
     config.urls = vec![url.to_owned()];
+    config.peer_addresses = bridge_node::PeerAddresses::Any;
     let fast = Rate { per_second: 100_000, burst: 100_000 };
     config.limits = Limits {
         per_address: fast,

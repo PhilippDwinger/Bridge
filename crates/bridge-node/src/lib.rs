@@ -42,10 +42,12 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-pub use bridge_transport::{Discovery, LanHints, LanPeer};
+pub use bridge_transport::{Discovery, LanHints, LanPeer, PeerAddresses};
 pub use error::{NodeError, NodeResult};
 pub use lan::LanConfig;
-pub use network::{LanPin, MAX_BOOTSTRAP, MEMBER_LIFETIME_MS, NetConfig, NetStatus, NetTiming};
+pub use network::{
+    LanPin, MAX_BOOTSTRAP, MEMBER_LIFETIME_MS, NetConfig, NetStatus, NetTiming, WatchStatus, WatchedNode,
+};
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
 pub const COMPARTMENT: &str = "bridge-node";
@@ -101,6 +103,15 @@ pub struct NodeConfig {
     /// LAN access (`None`: Internet only). With it, the node's card carries the fingerprint of its TLS certificate
     /// (`tls`, kept in `node-tls.pem` in the data folder).
     pub lan: Option<LanConfig>,
+    /// In a network: ask its watchers for probes and level 1 with these services (⊆ {web}; docs/06 §11.5) - the
+    /// node joins as a member if it is none yet and registers at the watchers. `None`: not.
+    pub probe: Option<bridge_net::Services>,
+    /// Which addresses this node calls when another node chose them itself (review 8, docs/06 §2 "Adress-Schutz"):
+    /// the addresses of nodes registered at this watcher, and addresses in cards only a watcher sealed. `Public` (the
+    /// default): public IPs only (no loopback, private, link-local, CGNAT, ULA …) unless the node is reached in the LAN
+    /// with its pinned certificate; `Tailnet`: also Tailscale's ranges (networks over Tailscale, BridgeControll's
+    /// default); `Any`: no check (LAN-only networks, tests on 127.0.0.1). `bridge-node --peer-addresses …`.
+    pub peer_addresses: PeerAddresses,
     /// Session lifetime (ms).
     pub session_lifetime_ms: i64,
     /// Sessions per identity.
@@ -122,6 +133,8 @@ impl NodeConfig {
             limits: Limits::default(),
             server: ServerConfig::default(),
             lan: None,
+            probe: None,
+            peer_addresses: PeerAddresses::Public,
             session_lifetime_ms: 60 * 60 * 1000,
             sessions_per_identity: 8,
             clock: Arc::new(SystemClock),
@@ -189,6 +202,11 @@ impl RunningNode {
     pub fn net_status(&self) -> Option<NetStatus> {
         self.node.net_status()
     }
+    /// The watcher's view (docs/06 §11): whether it is one, its seals, the nodes registered with their probes
+    /// (`None` without a network or log).
+    pub async fn watch_status(&self) -> Option<WatchStatus> {
+        self.node.watch_status().await
+    }
     /// Stops the node: background duties, the mDNS announcement (with a goodbye), then both listeners (running
     /// requests may finish).
     pub async fn shutdown(self) {
@@ -230,7 +248,14 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
         .key_card_with(Role::Node, config.name.as_deref(), &urls, tls.as_ref().map(TlsIdentity::fingerprint), now)
         .map_err(|e| format!("key card: {e}"))?;
     let network = match &network_config {
-        Some(network_config) => Some(Arc::new(network::NetRuntime::open(&store, identity.id(), network_config, now)?)),
+        Some(network_config) => Some(Arc::new(network::NetRuntime::open(
+            &store,
+            identity.id(),
+            network_config,
+            now,
+            config.probe,
+            config.peer_addresses,
+        )?)),
         None => None,
     };
     let apps = match &network_config {
@@ -352,6 +377,9 @@ async fn janitor(node: Node) {
         let purged = tokio::task::spawn_blocking(move || {
             let (envelopes, seen) = store.purge_expired(now)?;
             let (homes, outbox) = if network { store.purge_net(now)? } else { (0, 0) };
+            if network {
+                store.purge_watch(now)?;
+            }
             Ok::<_, bridge_store::StoreError>((envelopes, seen, homes, outbox))
         })
         .await;

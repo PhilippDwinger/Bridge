@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge – Start</title>
+<!--
+  Startbildschirm eines Servers (Entwurf 09 „Großschrift-Liste“), statische Referenz.
+  Gehört zu design/ (Design-Claude). Bau-Claude: Markup + Klassen übernehmen,
+  Daten an die data-bind-Stellen hängen, Logik selbst ergänzen.
+  - Tasten 1–9: in den Bereich springen. Vorher der Zeile kurz .is-flash geben (K62).
+  - Bereiche ohne Daten (Clients, Realms, Nachrichten, Freunde, Logs) führen auf screens/kommt-noch.html.
+  - Seitenwechsel: neue Seite bekommt .b-page-in, zurück .b-page-in--back (K59).
+-->
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+</head>
+<body class="b-page">
+<main class="start b-page-in">
+
+  <aside class="start__aside">
+    <div>
+      <a href="hosting.html" class="soon__back">← Alle Server</a>
+      <img class="start__wordmark" src="../logo/bridge-wortmarke.svg" alt="Bridge" style="display: block; margin-top: 18px">
+      <p class="start__lead">Dein Bridge-Server <strong data-bind="server.name">grove</strong>. Such dir aus, wohin du willst.</p>
+    </div>
+    <div class="start__foot">
+      <img class="start__mark" src="../logo/bridge-bildmarke.svg" alt="">
+      <span class="start__version"><span data-bind="app.version">BridgeControll 0.1</span><span data-bind="server.git.local">b451413</span></span>
+    </div>
+  </aside>
+
+  <nav class="areas" aria-label="Bereiche">
+    <a class="area" href="#uebersicht" data-area="uebersicht">
+      <span class="area__nr">01</span><span class="area__name">Übersicht</span>
+      <span class="area__hint">Status auf einen Blick</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="kommt-noch.html" data-area="clients">
+      <span class="area__nr">02</span><span class="area__name">Clients</span>
+      <span class="area__hint">Wer verbunden ist</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="kommt-noch.html" data-area="realms">
+      <span class="area__nr">03</span><span class="area__name">Realms</span>
+      <span class="area__hint">Gruppen und Commands</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="kommt-noch.html" data-area="nachrichten">
+      <span class="area__nr">04</span><span class="area__name">Nachrichten</span>
+      <span class="area__hint">Postfächer und Verlauf</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="#server" data-area="server">
+      <span class="area__nr">05</span><span class="area__name">Vertraute Server</span>
+      <span class="area__hint">Dein Mesh</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="kommt-noch.html" data-area="freunde">
+      <span class="area__nr">06</span><span class="area__name">Freunde</span>
+      <span class="area__hint">Verbindungen zu anderen</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="#backup" data-area="backup">
+      <span class="area__nr">07</span><span class="area__name">Backup</span>
+      <span class="area__hint">Verwahrt bei Partnern</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="kommt-noch.html" data-area="logs">
+      <span class="area__nr">08</span><span class="area__name">Logs</span>
+      <span class="area__hint">Was gerade passiert</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+    <a class="area" href="#einstellungen" data-area="einstellungen">
+      <span class="area__nr">09</span><span class="area__name">Einstellungen</span>
+      <span class="area__hint">Modi und Passwort</span>
+      <span class="area__go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+    </a>
+  </nav>
+
+</main>
+</body>
+</html>

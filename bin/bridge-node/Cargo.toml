@@ -8,6 +8,10 @@ license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "bridge_node_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bridge-node"
 path = "src/main.rs"

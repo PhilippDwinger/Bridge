@@ -15,6 +15,9 @@
 //! hosts. Since schema 6 a pin carries the bytes it reserves (an accepted app version reserves its whole size, also
 //! for blobs that are not here yet) and an app its rank (version + statement hash; a stopped app keeps only that).
 //!
+//! Since schema 7 what a watcher keeps (docs/06 §11.7): the nodes registered for probes and their probe history;
+//! since schema 8 with the time of the first registration (a full table makes room by that order).
+//!
 //! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core`. It never checks hashes or signatures itself -
 //! the node verifies every part before it is stored and after it is read.
 //! Quotas are passed in by the caller (`bridge-guard` decides them) and checked atomically with the insert, so two
@@ -29,6 +32,7 @@ use thiserror::Error;
 mod apps;
 mod blobs;
 mod net;
+mod watch;
 
 pub use apps::{AppLimits, AppRow, AppState, AppStored, Reservation};
 pub use blobs::{
@@ -39,6 +43,7 @@ pub use net::{
     HeadRow, HomeRow, HomeStored, MAX_EVIDENCE_PER_NET, MAX_HEAD_ROWS_PER_NET, Outgoing, RelayItem, RelayLimits,
     TransitionRow,
 };
+pub use watch::{Probe, Registration, Standing, WatchNode, WatchRegistered};
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
 pub const COMPARTMENT: &str = "bridge-store";
@@ -114,6 +119,18 @@ const MIGRATIONS: &[&str] = &[
      UPDATE blob_pins SET size = COALESCE((SELECT size FROM blobs WHERE blobs.id = blob_pins.blob), 0);
      ALTER TABLE apps ADD COLUMN hash BLOB;
      CREATE INDEX apps_by_owner ON apps (owner, state, updated);",
+    // 7: watchers (docs/06 §11.7): nodes registered for probes (card, requested services, until when, observed since,
+    // failures in a row, last probe) and the probe history (bounded per node by the node).
+    "CREATE TABLE watch_nodes (net TEXT NOT NULL, node TEXT NOT NULL, card BLOB NOT NULL, card_iat INTEGER NOT NULL,
+                               services TEXT NOT NULL, expires INTEGER NOT NULL, since INTEGER,
+                               fails INTEGER NOT NULL, last_probe INTEGER, last_ok INTEGER NOT NULL,
+                               PRIMARY KEY (net, node)) WITHOUT ROWID;
+     CREATE INDEX watch_nodes_by_expiry ON watch_nodes (expires);
+     CREATE TABLE watch_probes (net TEXT NOT NULL, node TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL,
+                                ms INTEGER NOT NULL, PRIMARY KEY (net, node, at)) WITHOUT ROWID;",
+    // 8: review 8 (docs/06 §11.5): when the table of a watcher is full, a new registration takes the place of the
+    // oldest one that is not passing its probes - the time of the first registration decides "oldest".
+    "ALTER TABLE watch_nodes ADD COLUMN registered INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

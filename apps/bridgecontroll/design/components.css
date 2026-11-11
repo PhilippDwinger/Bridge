@@ -1,0 +1,527 @@
+/* ============================================================
+   Bridge – Bausteine (UI-Kit K01–K63, von Paddy freigegeben)
+   Gehört zu design/ (Design-Claude). Bitte nicht ändern –
+   Wünsche in design/FRAGEN.md.
+   Einbinden NACH tokens.css:
+     <link rel="stylesheet" href="/design/tokens.css">
+     <link rel="stylesheet" href="/design/components.css">
+   Alle Beispiele mit Markup: design/screens/ui-kit.html
+   ============================================================ */
+
+/* ---------- 0 · Grundlagen ---------- */
+.b-page { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-body); font-size: var(--fs-body); }
+.b-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+
+/* ============================================================
+   1 · KNÖPFE  (K01–K14)
+   ============================================================ */
+.b-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 18px;
+  border-radius: 12px; border: 1px solid transparent; font-family: var(--font-body); font-size: 15px; font-weight: 600;
+  line-height: 1; cursor: pointer; white-space: nowrap; text-decoration: none;
+  transition: transform var(--dur-1) var(--ease-out), background-color var(--dur-2), border-color var(--dur-2), color var(--dur-2), box-shadow var(--dur-2); }
+.b-btn svg { width: 18px; height: 18px; flex: none; }
+.b-btn:active { transform: translateY(1px) scale(.98); }
+.b-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.b-btn:disabled, .b-btn[aria-disabled="true"] { opacity: .45; cursor: not-allowed; box-shadow: none; transform: none; }
+
+/* K01 Primär */
+.b-btn--primary { background: var(--accent); color: var(--on-accent); box-shadow: 0 1px 0 rgba(12,24,56,.06), 0 4px 12px rgba(51,105,255,.22); }
+.b-btn--primary:hover { background: var(--bridge-blue-600); color: var(--on-accent); box-shadow: 0 8px 20px rgba(51,105,255,.32); transform: translateY(-1px); }
+/* K02 Sekundär */
+.b-btn--secondary { background: var(--surface); color: var(--text); border-color: var(--line); }
+.b-btn--secondary:hover { border-color: var(--bridge-blue-300); color: var(--accent-text); background: var(--bridge-blue-50); }
+/* K03 Ghost */
+.b-btn--ghost { background: transparent; color: var(--accent-text); }
+.b-btn--ghost:hover { background: var(--bridge-blue-50); }
+/* K04 Gefahr (Umriss) + gefüllt für Dialoge */
+.b-btn--danger { background: var(--surface); color: var(--err); border-color: #EDC3C7; }
+.b-btn--danger:hover { background: var(--err); color: var(--on-accent); border-color: var(--err); }
+.b-btn--danger-solid { background: var(--err); color: var(--on-accent); }
+.b-btn--danger-solid:hover { background: #8C1C25; }
+/* K05 Dunkel */
+.b-btn--dark { background: var(--ink); color: var(--on-accent); }
+.b-btn--dark:hover { background: #1E2D4F; }
+/* K06 Sticker (Haupt-Aktion einer Seite, sparsam!) */
+.b-btn--sticker { height: 52px; padding: 0 22px; border-radius: 15px; background: var(--accent); color: var(--on-accent);
+  border: 3px solid var(--surface); font-family: var(--font-display); font-weight: 700; font-size: 16px;
+  box-shadow: 0 2px 0 rgba(12,24,56,.08), 0 8px 18px rgba(12,24,56,.2); transform: rotate(-2deg);
+  transition: transform var(--dur-2) var(--ease-spring), box-shadow var(--dur-2); }
+.b-btn--sticker:hover { transform: rotate(0deg) translateY(-2px) scale(1.03); color: var(--on-accent); box-shadow: 0 2px 0 rgba(12,24,56,.08), 0 12px 24px rgba(12,24,56,.24); }
+.b-btn--sticker:active { transform: rotate(0deg) scale(.97); }
+/* K07 Größen */
+.b-btn--sm { height: 34px; padding: 0 12px; font-size: 13px; border-radius: 9px; gap: 6px; }
+.b-btn--sm svg { width: 15px; height: 15px; }
+.b-btn--lg { height: 54px; padding: 0 24px; font-size: 17px; border-radius: 14px; }
+/* K09 Lädt: <span class="b-spin"> im Knopf, aria-busy="true" */
+.b-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); border-top-color: #FFFFFF; animation: b-spin .8s linear infinite; flex: none; box-sizing: border-box; }
+.b-spin--blue { border-color: var(--bridge-blue-100); border-top-color: var(--accent); }
+.b-btn--progress { position: relative; overflow: hidden; background: var(--bridge-blue-700); color: var(--on-accent); }
+.b-btn--progress::before { content: ""; position: absolute; inset: 0; background: var(--accent); transform-origin: left; transform: scaleX(var(--progress, 0)); transition: transform var(--dur-4) var(--ease-out); }
+.b-btn--progress > span { position: relative; }
+/*  → Fortschritt setzen: style="--progress: .42" */
+
+/* K10 Icon-Knöpfe (immer aria-label!) */
+.b-icon { width: 40px; height: 40px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface); color: var(--text-2);
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex: none;
+  transition: background-color var(--dur-2), color var(--dur-2), border-color var(--dur-2), transform var(--dur-1); }
+.b-icon svg { width: 18px; height: 18px; }
+.b-icon:hover { background: var(--bridge-blue-50); color: var(--accent-text); border-color: var(--bridge-blue-200); }
+.b-icon:active { transform: scale(.94); }
+.b-icon:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.b-icon--plain { border-color: transparent; background: transparent; }
+
+/* K11 Runder Pfeil (Startliste, Server-Zeile) */
+.b-go { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex: none;
+  transition: background-color var(--dur-2), border-color var(--dur-2), color var(--dur-2); }
+.b-go svg { width: 18px; height: 18px; transition: transform var(--dur-2) var(--ease-out); }
+.b-go:hover { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.b-go:hover svg { transform: translateX(3px); }
+.b-go:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* K12 Hinweis-Punkt (Update verfügbar) */
+.b-dot-badge { position: relative; }
+.b-dot-badge::after { content: ""; position: absolute; right: -4px; top: -4px; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--amber); border: 2px solid var(--bg); animation: b-pulse-amber 2s ease-out infinite; }
+
+/* K13 Start/Stop-Schalter */
+.b-power { width: 56px; height: 56px; border-radius: 50%; border: 0; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  transition: background-color var(--dur-3), transform var(--dur-2) var(--ease-spring), box-shadow var(--dur-3); }
+.b-power:active { transform: scale(.92); }
+.b-power:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.b-power--on { background: var(--accent); color: var(--on-accent); box-shadow: 0 6px 16px rgba(51,105,255,.35); }
+.b-power--off { background: var(--bridge-blue-50); color: var(--accent-text); }
+.b-power svg { width: 22px; height: 22px; animation: b-pop var(--dur-3) var(--ease-spring); }
+
+/* K14 Knopfgruppe */
+.b-group { display: inline-flex; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.b-group > button { height: 42px; padding: 0 16px; border: 0; border-right: 1px solid var(--line); background: transparent;
+  font-family: var(--font-body); font-size: 14px; font-weight: 600; color: var(--text); display: inline-flex; align-items: center; gap: 7px;
+  cursor: pointer; transition: background-color var(--dur-2), color var(--dur-2); }
+.b-group > button:last-child { border-right: 0; }
+.b-group > button svg { width: 16px; height: 16px; }
+.b-group > button:hover { background: var(--bridge-blue-50); color: var(--accent-text); }
+.b-group > button:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+
+
+/* ============================================================
+   2 · EINGABEN & SCHALTER  (K15–K27)
+   ============================================================ */
+.b-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.b-field > label, .b-flabel { font-size: 13px; font-weight: 600; color: var(--text); }
+.b-hint { font-size: 12.5px; color: var(--muted); }
+.b-hint--err { color: var(--err); display: flex; align-items: center; gap: 5px; }
+.b-hint--err svg { width: 14px; height: 14px; flex: none; }
+
+/* K15 Textfeld */
+.b-input { height: 44px; box-sizing: border-box; width: 100%; border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+  padding: 0 14px; font-family: var(--font-body); font-size: 15px; color: var(--text); outline: none;
+  transition: border-color var(--dur-2), box-shadow var(--dur-2); }
+.b-input::placeholder { color: #66748C; }
+.b-input:hover { border-color: var(--bridge-blue-200); }
+.b-input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(51,105,255,.16); }
+.b-input.is-error, .b-input[aria-invalid="true"] { border-color: var(--err); box-shadow: 0 0 0 4px rgba(168,36,46,.12); }
+.b-input:disabled { background: var(--neutral-bg); color: var(--muted); cursor: not-allowed; }
+.b-input--mono { font-family: var(--font-mono); font-size: 14px; }
+
+/* K16–K19 Feld mit Innen-Knöpfen / Vorsatz / Zähler / Suche */
+.b-wrap { display: flex; align-items: stretch; height: 44px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); overflow: hidden; transition: border-color var(--dur-2), box-shadow var(--dur-2); }
+.b-wrap:hover { border-color: var(--bridge-blue-200); }
+.b-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(51,105,255,.16); }
+.b-wrap > input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; padding: 0 12px; font-family: var(--font-body); font-size: 15px; color: var(--text); }
+.b-wrap > input::placeholder { color: #66748C; }
+.b-wrap > input.mono { font-family: var(--font-mono); font-size: 14px; }
+.b-affix { display: flex; align-items: center; padding: 0 12px; background: var(--field-bg); color: var(--muted); font-family: var(--font-mono); font-size: 13px; white-space: nowrap; }
+.b-in-icon { display: flex; align-items: center; justify-content: center; width: 40px; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  transition: color var(--dur-2), background-color var(--dur-2); }
+.b-in-icon:hover { color: var(--accent-text); background: var(--bridge-blue-50); }
+.b-in-icon:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+.b-in-icon svg { width: 18px; height: 18px; }
+.b-step { width: 44px; border: 0; background: var(--field-bg); color: var(--text-2); font-size: 20px; line-height: 1; cursor: pointer;
+  transition: background-color var(--dur-2), color var(--dur-2); }
+.b-step:hover { background: var(--bridge-blue-50); color: var(--accent-text); }
+.b-step:active { background: var(--bridge-blue-100); }
+.b-step:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+.b-kbd { align-self: center; margin-right: 10px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); padding: 3px 7px; border: 1px solid var(--line); border-radius: 6px; }
+
+/* K20 Schalter · K21 Checkbox · K22 Auswahlpunkte – echte <input>, optisch versteckt */
+.b-switch, .b-check, .b-radio { display: inline-flex; align-items: center; gap: 12px; cursor: pointer; font-size: 15px; position: relative; }
+.b-switch input, .b-check input, .b-radio input, .b-seg input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+.b-switch__track { width: 46px; height: 28px; border-radius: 14px; background: #C3CDDD; position: relative; flex: none; transition: background-color var(--dur-3) var(--ease-out); }
+.b-switch__knob { position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 3px rgba(14,26,51,.25); transition: transform var(--dur-3) var(--ease-spring); }
+.b-switch input:checked + .b-switch__track { background: var(--accent); }
+.b-switch input:checked + .b-switch__track .b-switch__knob { transform: translateX(18px); }
+.b-switch input:focus-visible + .b-switch__track { box-shadow: var(--focus-ring); }
+
+.b-check { gap: 10px; }
+.b-check__box { width: 22px; height: 22px; border-radius: 7px; border: 1.5px solid #AEB9CC; background: var(--surface); display: flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box;
+  transition: background-color var(--dur-2), border-color var(--dur-2); }
+.b-check__box svg { width: 16px; height: 16px; }
+.b-check__box path { stroke-dasharray: 22; stroke-dashoffset: 22; transition: stroke-dashoffset var(--dur-3) var(--ease-out); }
+.b-check input:checked + .b-check__box { background: var(--accent); border-color: var(--accent); }
+.b-check input:checked + .b-check__box path { stroke-dashoffset: 0; }
+.b-check input:focus-visible + .b-check__box, .b-radio input:focus-visible + .b-radio__dot { box-shadow: var(--focus-ring); }
+
+.b-radio { gap: 10px; }
+.b-radio__dot { width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid #AEB9CC; background: var(--surface); display: flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box; transition: border-color var(--dur-2); }
+.b-radio__dot::after { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); transform: scale(0); transition: transform var(--dur-3) var(--ease-spring); }
+.b-radio input:checked + .b-radio__dot { border-color: var(--accent); }
+.b-radio input:checked + .b-radio__dot::after { transform: scale(1); }
+
+/* K23/K24 Umschalter (Segment) – Radio-Gruppe mit role="radiogroup" */
+.b-seg { display: inline-flex; padding: 4px; gap: 2px; border-radius: 12px; background: #EBEFF6; max-width: 100%; box-sizing: border-box; }
+.b-seg label { position: relative; cursor: pointer; }
+.b-seg span { display: flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px; border-radius: 9px; font-size: 14px; font-weight: 500; color: var(--text-2); white-space: nowrap;
+  transition: background-color var(--dur-2), color var(--dur-2), box-shadow var(--dur-2); }
+.b-seg span svg { width: 16px; height: 16px; }
+.b-seg label:hover span { color: var(--text); }
+.b-seg input:checked + span { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(14,26,51,.14); }
+.b-seg input:focus-visible + span { box-shadow: var(--focus-ring); }
+.b-seg--sm span { height: 30px; padding: 0 12px; font-family: var(--font-mono); font-size: 13px; }
+.b-seg--full { display: flex; width: 100%; }
+.b-seg--full label { flex: 1; }
+
+/* K25 Auswahl */
+.b-selectwrap { position: relative; }
+.b-selectwrap select { appearance: none; -webkit-appearance: none; padding-right: 40px; cursor: pointer; }
+.b-selectwrap svg { position: absolute; right: 14px; top: 13px; width: 18px; height: 18px; pointer-events: none; color: var(--muted); }
+
+/* K26 Kopierfeld – nach Klick .is-done für 1,6 s */
+.b-copy { display: flex; align-items: center; height: 48px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 12px; background: var(--field-bg); padding-left: 14px; overflow: hidden; }
+.b-copy__val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 14px; color: var(--text); }
+.b-copy__btn { height: 100%; display: inline-flex; align-items: center; gap: 7px; padding: 0 16px; border: 0; border-left: 1px solid var(--line); background: var(--surface);
+  font-family: var(--font-body); font-size: 14px; font-weight: 600; color: var(--accent-text); cursor: pointer; transition: background-color var(--dur-2), color var(--dur-2); }
+.b-copy__btn svg { width: 16px; height: 16px; }
+.b-copy__btn:hover { background: var(--bridge-blue-50); }
+.b-copy__btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+.b-copy__btn.is-done { background: var(--ok-bg); color: var(--ok); }
+.b-copy__btn.is-done svg { animation: b-pop var(--dur-3) var(--ease-spring); }
+
+/* K27 Formular-Karte (z. B. „Server hinzufügen“ im Dialog) */
+.b-form { background: var(--surface); border-radius: 18px; overflow: hidden; display: flex; flex-direction: column; }
+.b-form__head { padding: 22px 22px 0; display: flex; flex-direction: column; gap: 4px; }
+.b-form__head h2 { margin: 0; font-family: var(--font-display); font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+.b-form__head p { margin: 0; font-size: 14px; color: var(--text-2); }
+.b-form__body { padding: 18px 22px; display: flex; flex-direction: column; gap: 16px; }
+.b-form__foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 22px; background: var(--bg); border-top: 1px solid var(--line); }
+
+
+/* ============================================================
+   3 · STATUS & BADGES  (K28–K36)
+   Zuordnung zu /api/servers:
+     running=false → b-pill--neutral + __dot--hollow „Aus“
+     running && !ready → b-pill--info + __spin „Startet …“
+     ready → b-pill--ok + __dot--live „Läuft“
+     git.up_to_date → b-pill--ok „Aktuell“ · git.behind>0 → b-pill--warn „N hinter“
+     git.error → b-pill--err „Git nicht erreichbar“
+   ============================================================ */
+.b-pill { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px; border-radius: 999px; font-family: var(--font-body); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.b-pill svg { width: 14px; height: 14px; flex: none; }
+.b-pill__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: currentColor; }
+.b-pill__dot--live { animation: b-live 1.8s ease-out infinite; }
+.b-pill__dot--hollow { background: transparent; border: 2px solid currentColor; box-sizing: border-box; }
+.b-pill__dot--square { border-radius: 2px; }
+.b-pill__spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; box-sizing: border-box; animation: b-spin .8s linear infinite; flex: none; }
+.b-pill--ok { background: var(--ok-bg); color: var(--ok); }
+.b-pill--info { background: var(--bridge-blue-50); color: var(--accent-text); }
+.b-pill--neutral { background: var(--neutral-bg); color: var(--text-2); }
+.b-pill--warn { background: var(--warn-bg); color: var(--warn); }
+.b-pill--err { background: var(--err-bg); color: var(--err); }
+
+/* K29 Live-Punkt */
+.b-live { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex: none; }
+.b-live--ok { background: #12A26F; animation: b-live 1.8s ease-out infinite; }
+.b-live--blue { background: var(--accent); animation: b-live-blue 1.8s ease-out infinite; }
+.b-live--amber { background: var(--amber); animation: b-pulse-amber 1.8s ease-out infinite; }
+
+/* K31 / K36 Chips (Commit, Branch, Port, Funnel) */
+.b-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); font-family: var(--font-mono); font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
+.b-chip svg { width: 13px; height: 13px; }
+
+/* K34 Zähler */
+.b-count { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 6px; box-sizing: border-box; border-radius: 999px; font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+.b-count--blue { background: var(--accent); color: var(--on-accent); }
+.b-count--soft { background: var(--bridge-blue-50); color: var(--accent-text); }
+.b-count--amber { background: var(--amber); color: var(--ink); }
+
+/* K35 Kennzahlen */
+.b-stats { display: flex; gap: 10px; }
+.b-stat { flex: 1 1 0; min-width: 0; padding: 12px 14px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
+.b-stat__val { font-family: var(--font-display); font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+.b-stat__val--ok { color: var(--ok); }
+.b-stat__val--warn { color: var(--warn); }
+.b-stat__lbl { font-size: 12.5px; color: var(--muted); }
+
+
+/* ============================================================
+   4 · LADEN & FORTSCHRITT  (K37–K46)
+   ============================================================ */
+/* K37 Bogen-Loader (Logo zeichnet sich) – Markup siehe ui-kit.html */
+.b-loader-arch { width: 96px; height: 96px; overflow: visible; }
+.b-loader-arch__arc, .b-loader-arch__deck { fill: none; stroke: var(--accent); stroke-width: 4.5; stroke-linecap: round; stroke-dasharray: 100; stroke-dashoffset: 100; }
+.b-loader-arch__arc { animation: b-draw 2.4s var(--ease-io) infinite; }
+.b-loader-arch__deck { animation: b-draw 2.4s var(--ease-io) .25s infinite; }
+.b-loader-arch__dot { fill: var(--amber); transform-box: fill-box; transform-origin: center; transform: scale(0); animation: b-dot 2.4s var(--ease-spring) infinite; }
+
+/* K38 Trittsteine */
+.b-stones { position: relative; width: 120px; height: 56px; }
+.b-stones i { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: var(--bridge-blue-200); animation: b-hop 1.4s var(--ease-out) infinite; }
+.b-stones i:nth-child(1) { left: 0;     top: 34px; animation-delay: 0s; }
+.b-stones i:nth-child(2) { left: 26px;  top: 18px; animation-delay: .12s; }
+.b-stones i:nth-child(3) { left: 54px;  top: 12px; animation-delay: .24s; }
+.b-stones i:nth-child(4) { left: 82px;  top: 18px; animation-delay: .36s; }
+.b-stones i:nth-child(5) { left: 108px; top: 34px; animation-delay: .48s; }
+
+/* K39 Ring */
+.b-ring { width: 24px; height: 24px; border-radius: 50%; border: 3px solid var(--bridge-blue-100); border-top-color: var(--accent); animation: b-spin .8s linear infinite; box-sizing: border-box; display: inline-block; flex: none; }
+.b-ring--sm { width: 16px; height: 16px; border-width: 2px; }
+.b-ring--lg { width: 36px; height: 36px; border-width: 4px; }
+
+/* K40 / K41 Balken */
+.b-barhead { display: flex; justify-content: space-between; align-items: baseline; width: 100%; font-size: 14px; color: var(--text-2); }
+.b-barhead b { font-family: var(--font-mono); font-weight: 500; color: var(--text); }
+.b-bar { position: relative; width: 100%; height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+.b-bar__run { position: absolute; top: 0; left: 0; height: 100%; width: 30%; border-radius: 4px; background: var(--accent); animation: b-run 1.5s var(--ease-io) infinite; }
+.b-bar__fill { position: absolute; top: 0; left: 0; height: 100%; border-radius: 4px; background-color: var(--accent);
+  background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.22) 0 8px, transparent 8px 16px); background-size: 22.6px 22.6px;
+  animation: b-stripes .8s linear infinite; transition: width var(--dur-4) var(--ease-out); }
+.b-bar__fill--done { background-color: var(--ok); background-image: none; animation: none; }
+
+/* K42 Update-Schritte: .is-done / .is-now */
+.b-steps { display: flex; align-items: flex-start; width: 100%; }
+.b-step-i { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; position: relative; text-align: center; font-size: 13px; color: var(--muted); }
+.b-step-i::before { content: ""; position: absolute; top: 15px; right: 50%; width: 100%; height: 3px; background: var(--track); z-index: 0; }
+.b-step-i:first-child::before { display: none; }
+.b-step-i.is-done::before, .b-step-i.is-now::before { background: var(--accent); }
+.b-step-i__dot { position: relative; z-index: 1; width: 32px; height: 32px; border-radius: 50%; background: var(--surface); border: 2px solid var(--line); box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.b-step-i.is-done { color: var(--text-2); }
+.b-step-i.is-done .b-step-i__dot { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.b-step-i.is-now { color: var(--accent-text); font-weight: 600; }
+.b-step-i.is-now .b-step-i__dot { border-color: var(--accent); animation: b-ping 1.6s ease-out infinite; }
+
+/* K43 Rollendes Update */
+.b-roll { display: grid; grid-template-columns: 120px minmax(0, 1fr) 160px; gap: 10px 16px; align-items: center; width: 100%; font-size: 14px; }
+.b-roll__name { font-family: var(--font-display); font-weight: 600; font-size: 16px; }
+.b-roll__state { font-size: 13px; color: var(--muted); }
+.b-roll__state--ok { color: var(--ok); font-weight: 600; }
+.b-roll__state--now { color: var(--accent-text); font-weight: 600; }
+
+/* K44 Platzhalter beim Laden */
+.b-skel { display: flex; flex-direction: column; gap: 14px; width: 100%; }
+.b-skel__row { display: flex; align-items: center; gap: 14px; }
+.b-sh { display: block; border-radius: 8px; background: linear-gradient(90deg, #E9EDF4 0%, #F4F6FA 40%, #E9EDF4 80%); background-size: 300% 100%; animation: b-shim 1.4s linear infinite; }
+
+/* K45 Start-Splash */
+.b-splash { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: var(--bg); }
+.b-splash__mark { animation: b-drop .9s var(--ease-spring) both; transform-origin: 50% 80%; filter: var(--shadow-logo); }
+.b-splash__text { font-size: 14px; color: var(--muted); animation: b-fade-in .4s ease .5s both; }
+
+/* K46 Checkliste beim Start */
+.b-checklist { display: flex; flex-direction: column; gap: 12px; }
+.b-checkrow { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text-2); }
+.b-checkrow.is-now { color: var(--accent-text); font-weight: 600; }
+.b-checkrow__ic { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box; }
+.b-checkrow__ic--ok { background: var(--ok-bg); color: var(--ok); }
+.b-checkrow__ic--wait { border: 2px dashed var(--line); }
+.b-checkrow__ic svg { width: 13px; height: 13px; }
+
+
+/* ============================================================
+   5 · RÜCKMELDUNGEN  (K47–K55)
+   ============================================================ */
+/* K47 Toast */
+.b-toast { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 10px 28px rgba(14,26,51,.12); position: relative; overflow: hidden; }
+.b-toast__ic { width: 30px; height: 30px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; }
+.b-toast__ic svg { width: 16px; height: 16px; }
+.b-toast__ic--ok { background: var(--ok-bg); color: var(--ok); }
+.b-toast__ic--warn { background: var(--warn-bg); color: var(--warn); }
+.b-toast__ic--err { background: var(--err-bg); color: var(--err); }
+.b-toast__ic--info { background: var(--bridge-blue-50); color: var(--accent-text); }
+.b-toast__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.b-toast__title { font-weight: 600; font-size: 14.5px; }
+.b-toast__text { font-size: 13.5px; color: var(--text-2); }
+.b-toast__actions { padding-top: 6px; display: flex; gap: 8px; }
+.b-toast__x { width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; display: flex; align-items: center; justify-content: center; flex: none; }
+.b-toast__x:hover { background: var(--bg); color: var(--text); }
+.b-toast__x svg { width: 14px; height: 14px; }
+.b-toast--dark { background: var(--ink); border-color: var(--ink); color: #FFFFFF; align-items: center; }
+.b-toast--dark .b-toast__text { color: #C8D3E8; }
+.b-toast__undo { border: 0; background: transparent; color: var(--bridge-blue-300); font-family: var(--font-body); font-weight: 600; font-size: 14px; cursor: pointer; padding: 6px 8px; border-radius: 8px; }
+.b-toast__undo:hover { background: rgba(255,255,255,.08); }
+/* K48 Stapel unten rechts + Ein-/Ausflug + Zeitbalken */
+.b-toasts { position: fixed; right: 20px; bottom: 20px; z-index: 50; display: flex; flex-direction: column; gap: 10px; width: min(360px, calc(100vw - 40px)); }
+.b-toast.is-in { animation: b-toast-in var(--dur-3) var(--ease-out) both; }
+.b-toast.is-out { animation: b-toast-out var(--dur-3) var(--ease-io) both; }
+.b-toast__timer { position: absolute; left: 14px; right: 14px; bottom: 6px; height: 3px; border-radius: 2px; background: var(--bridge-blue-100); overflow: hidden; }
+.b-toast__timer span { display: block; height: 100%; background: var(--accent); transform-origin: left; animation: b-timer var(--toast-time, 5s) linear both; }
+
+/* K49 Banner */
+.b-banner { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 14px; }
+.b-banner > svg { flex: none; width: 22px; height: 22px; }
+.b-banner--warn { background: var(--warn-bg); color: #5C3700; }
+.b-banner--info { background: var(--bridge-blue-50); color: #16306F; }
+.b-banner__text { flex: 1; font-size: 14px; line-height: 1.45; }
+.b-banner__text b { font-weight: 600; }
+
+/* K50 / K51 Dialog */
+.b-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(14,26,51,.45); display: flex; align-items: center; justify-content: center; padding: 20px; animation: b-fade-in var(--dur-2) ease both; }
+.b-dialog { width: 100%; max-width: 400px; background: var(--surface); border-radius: 18px; box-shadow: 0 24px 60px rgba(14,26,51,.35); padding: 22px; display: flex; flex-direction: column; gap: 12px; animation: b-pop-dialog var(--dur-4) var(--ease-spring) both; }
+.b-dialog h3 { margin: 0; font-family: var(--font-display); font-size: 21px; font-weight: 600; letter-spacing: -0.02em; }
+.b-dialog p { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text-2); }
+.b-dialog__btns { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+
+/* K52 Tooltip – .b-tip um das Element, Blase erscheint bei Hover/Fokus */
+.b-tip { position: relative; display: inline-flex; }
+.b-tip__bubble { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translate(-50%, 4px); white-space: nowrap; background: var(--ink); color: #FFFFFF; font-size: 13px; padding: 7px 10px; border-radius: 8px;
+  display: flex; align-items: center; gap: 8px; opacity: 0; pointer-events: none; transition: opacity var(--dur-2), transform var(--dur-2) var(--ease-out); }
+.b-tip__bubble::after { content: ""; position: absolute; top: 100%; left: 50%; margin-left: -6px; border: 6px solid transparent; border-top-color: var(--ink); }
+.b-tip:hover .b-tip__bubble, .b-tip:focus-within .b-tip__bubble { opacity: 1; transform: translate(-50%, 0); transition-delay: .35s; }
+.b-tip__kbd { font-family: var(--font-mono); font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background: rgba(255,255,255,.14); color: var(--bridge-blue-100); }
+
+/* K53 / K54 Leere Zustände */
+.b-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; padding: 24px 16px; }
+.b-empty h3 { margin: 0; font-family: var(--font-display); font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+.b-empty p { margin: 0; max-width: 340px; font-size: 15px; line-height: 1.5; color: var(--text-2); }
+.b-float { animation: b-float 3.4s ease-in-out infinite; }
+.b-build { stroke-dasharray: 3 4; animation: b-march 1.2s linear infinite; }
+
+/* K55 Steuer-Dienst weg · Gespeichert */
+.b-offline { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-radius: 12px; background: var(--ink); color: #FFFFFF; font-size: 14px; }
+.b-offline b { font-weight: 600; }
+.b-offline .m { color: #C8D3E8; }
+.b-saved { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--ok); animation: b-saved 2.4s ease both; }
+.b-saved svg { width: 18px; height: 18px; }
+
+
+/* ============================================================
+   6 · BEWEGUNG  (K56–K63)
+   Tempo/Kurven stehen in tokens.css (--dur-*, --ease-*).
+   ============================================================ */
+/* K59 Seitenwechsel: neue Seite .b-page-in, alte .b-page-out, zurück: .b-page-in--back */
+.b-page-in { animation: b-page-in var(--dur-4) var(--ease-io) both; }
+.b-page-in--back { animation: b-page-in-back var(--dur-4) var(--ease-io) both; }
+.b-page-out { animation: b-page-out var(--dur-3) var(--ease-io) both; }
+/* K60 Logo wackelt bei Hover */
+.b-wiggle:hover { animation: b-wiggle .6s var(--ease-out); }
+/* K61 Neue Log-Zeile */
+.b-log { display: flex; flex-direction: column; font-family: var(--font-mono); font-size: 13px; }
+.b-log__line { display: flex; gap: 14px; padding: 6px 8px; border-radius: 6px; }
+.b-log__time { color: var(--muted); }
+.b-log__kind { width: 72px; color: var(--accent-text); }
+.b-log__line.is-new { animation: b-newline 2.4s var(--ease-out) both; overflow: hidden; }
+/* K62 Zahl-Taste: Zeile kurz aufleuchten lassen → .is-flash (danach entfernen) */
+.is-flash { animation: b-flash .7s ease both; }
+/* K63 Update da: Amber-Punkt im Logo pulsiert → <svg class="b-logo has-update"> mit .b-logo__dot / .b-logo__ring */
+.b-logo .b-logo__ring { fill: none; stroke: var(--amber); stroke-width: 2; opacity: 0; transform-box: fill-box; transform-origin: center; }
+.b-logo.has-update { overflow: visible; }
+.b-logo.has-update .b-logo__dot { transform-box: fill-box; transform-origin: center; animation: b-amber 2s ease-out infinite; }
+.b-logo.has-update .b-logo__ring { animation: b-ring 2s ease-out infinite; }
+
+
+/* ============================================================
+   7 · SEITEN
+   ============================================================ */
+/* Startbildschirm (09) – screens/start.html */
+.start { min-height: 100vh; max-width: 1220px; margin: 0 auto; padding: 40px 32px; box-sizing: border-box; display: flex; flex-wrap: wrap; gap: var(--space-6) var(--space-7); }
+.start__aside { flex: 1 1 280px; display: flex; flex-direction: column; justify-content: space-between; gap: var(--space-5); }
+.start__wordmark { width: 230px; height: auto; margin-left: -16px; filter: var(--shadow-logo); }
+.start__lead { margin: var(--space-4) 0 0; max-width: 280px; font-size: var(--fs-lead); line-height: 1.5; color: var(--text-2); }
+.start__lead strong { color: var(--text); font-weight: 600; }
+.start__foot { display: flex; align-items: center; gap: 10px; }
+.start__mark { width: 34px; height: 34px; }
+.start__version { font-family: var(--font-mono); font-size: 12px; color: var(--muted); display: flex; flex-direction: column; }
+
+.areas { flex: 2 1 560px; min-width: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.area { position: relative; display: flex; align-items: center; gap: 22px; padding: 12px 4px; border-bottom: 1px solid var(--line); color: var(--text); text-decoration: none; border-radius: 2px; overflow: hidden; }
+.area::before { content: ""; position: absolute; inset: 0; background: var(--bridge-blue-50); transform: scaleX(0); transform-origin: left; transition: transform var(--dur-3) var(--ease-out); z-index: 0; }
+.area > * { position: relative; z-index: 1; }
+.area__nr { width: 34px; flex: none; font-family: var(--font-mono); font-size: var(--fs-small); color: var(--muted); }
+.area__name { flex: 1; min-width: 0; font-family: var(--font-display); font-size: var(--fs-hero); font-weight: 600; letter-spacing: var(--tracking-display); line-height: 1.2; transition: color var(--dur-2); }
+.area__hint { font-size: 14px; color: var(--text-2); opacity: 0; transition: opacity var(--dur-2); }
+.area__go { width: 40px; height: 40px; flex: none; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; justify-content: center; color: var(--muted);
+  transition: background-color var(--dur-2), border-color var(--dur-2), color var(--dur-2); }
+.area__go svg { width: 18px; height: 18px; transition: transform var(--dur-2) var(--ease-out); }
+.area:hover::before, .area:focus-visible::before { transform: scaleX(1); }
+.area:hover .area__name, .area:focus-visible .area__name, .area:hover .area__nr, .area:focus-visible .area__nr { color: var(--accent-text); }
+.area:hover .area__hint, .area:focus-visible .area__hint { opacity: 1; }
+.area:hover .area__go, .area:focus-visible .area__go { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.area:hover .area__go svg, .area:focus-visible .area__go svg { transform: translateX(3px); }
+.area:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.area.is-soon .area__name { color: var(--muted); }
+
+/* Hosting (H01) – screens/hosting.html */
+.hs { min-height: 100vh; max-width: 1260px; margin: 0 auto; box-sizing: border-box; padding: 40px 32px; display: flex; flex-wrap: wrap; gap: 32px 56px; }
+.hs__aside { flex: 1 1 280px; display: flex; flex-direction: column; justify-content: space-between; gap: 28px; }
+.hs__actions { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding-top: 6px; }
+.hs__list { flex: 2.4 1 620px; min-width: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.srv { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 18px 4px; border-bottom: 1px solid var(--line); }
+.srv__nr { width: 34px; flex: none; align-self: flex-start; padding-top: 12px; font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+.srv__body { flex: 1 1 340px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.srv__name { font-family: var(--font-display); font-size: 34px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.1; color: var(--text); text-decoration: none; transition: color var(--dur-2); }
+.srv__meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.srv__meta > * { animation: b-fade-up var(--dur-3) var(--ease-out); }
+.srv__actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.srv__actions .b-btn { height: 40px; padding: 0 15px; font-size: 14px; border-radius: 11px; }
+.srv__actions .b-btn svg { width: 16px; height: 16px; }
+.srv__step { font-family: var(--font-mono); font-size: 12.5px; color: var(--accent-text); }
+.srv__bar { position: absolute; left: 0; bottom: -1px; height: 3px; background: var(--accent); border-radius: 2px; transition: width var(--dur-4) var(--ease-out); }
+.srv:hover .srv__name { color: var(--accent-text); }
+.srv:hover .b-go { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.srv:hover .b-go svg { transform: translateX(3px); }
+
+/* Kommt noch – screens/kommt-noch.html */
+.soon { min-height: 100vh; max-width: 1220px; margin: 0 auto; padding: 40px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 24px; }
+.soon__back { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 13px; color: var(--muted); text-decoration: none; }
+.soon__back:hover { color: var(--accent-text); }
+.soon__title { margin: 0; font-family: var(--font-display); font-size: clamp(36px, 5vw, 56px); font-weight: 600; letter-spacing: var(--tracking-display); }
+.soon__box { flex: 1; display: flex; align-items: center; justify-content: center; border-top: 1px solid var(--line); }
+
+@media (max-width: 640px) {
+  .start, .hs, .soon { padding: 24px 16px; }
+  .start__wordmark { width: 160px; }
+  .area { gap: 14px; }
+  .area__hint { display: none; }
+  .srv__name { font-size: 26px; }
+}
+
+
+/* ============================================================
+   KEYFRAMES
+   ============================================================ */
+@keyframes b-spin { to { transform: rotate(360deg); } }
+@keyframes b-pop { from { transform: scale(.3) rotate(-20deg); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes b-pulse-amber { 0% { box-shadow: 0 0 0 0 rgba(245,181,68,.55); } 70%, 100% { box-shadow: 0 0 0 8px rgba(245,181,68,0); } }
+@keyframes b-live { 0% { box-shadow: 0 0 0 0 rgba(11,122,84,.45); } 70%, 100% { box-shadow: 0 0 0 7px rgba(11,122,84,0); } }
+@keyframes b-live-blue { 0% { box-shadow: 0 0 0 0 rgba(51,105,255,.45); } 70%, 100% { box-shadow: 0 0 0 9px rgba(51,105,255,0); } }
+@keyframes b-draw { 0% { stroke-dashoffset: 100; } 45%, 72% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: -100; } }
+@keyframes b-dot { 0%, 40% { transform: scale(0); } 52%, 78% { transform: scale(1); } 92%, 100% { transform: scale(0); } }
+@keyframes b-hop { 0%, 60%, 100% { transform: translateY(0) scale(1); background: var(--bridge-blue-200); } 20% { transform: translateY(-10px) scale(1.25); background: var(--accent); } }
+@keyframes b-run { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+@keyframes b-stripes { to { background-position: 22.6px 0; } }
+@keyframes b-ping { 0% { box-shadow: 0 0 0 0 rgba(51,105,255,.4); } 70%, 100% { box-shadow: 0 0 0 10px rgba(51,105,255,0); } }
+@keyframes b-shim { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+@keyframes b-drop { 0% { transform: translateY(-70px) rotate(-24deg); opacity: 0; } 30% { opacity: 1; } 100% { transform: none; opacity: 1; } }
+@keyframes b-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes b-fade-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes b-toast-in { from { transform: translateY(120%); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes b-toast-out { from { transform: none; opacity: 1; } to { transform: translateX(110%); opacity: 0; } }
+@keyframes b-timer { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+@keyframes b-pop-dialog { from { transform: scale(.92); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes b-float { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-6px) rotate(1deg); } }
+@keyframes b-march { to { stroke-dashoffset: -14; } }
+@keyframes b-saved { 0% { opacity: 0; transform: translateY(3px); } 15%, 75% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+@keyframes b-page-in { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes b-page-in-back { from { transform: translateX(-40px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes b-page-out { from { transform: none; opacity: 1; } to { transform: translateX(-30px); opacity: 0; } }
+@keyframes b-wiggle { 0% { transform: rotate(0); } 25% { transform: rotate(7deg) scale(1.06); } 55% { transform: rotate(-5deg); } 80% { transform: rotate(2deg); } 100% { transform: rotate(0); } }
+@keyframes b-newline { 0% { max-height: 0; opacity: 0; background: var(--bridge-blue-100); } 12% { max-height: 32px; opacity: 1; background: var(--bridge-blue-100); } 60% { background: var(--bridge-blue-50); } 100% { max-height: 32px; opacity: 1; background: transparent; } }
+@keyframes b-flash { 0% { background: transparent; } 25% { background: var(--bridge-blue-100); } 100% { background: transparent; } }
+@keyframes b-amber { 0% { transform: scale(1); } 15% { transform: scale(1.35); } 30%, 100% { transform: scale(1); } }
+@keyframes b-ring { 0% { transform: scale(1); opacity: .8; } 70%, 100% { transform: scale(2.4); opacity: 0; } }

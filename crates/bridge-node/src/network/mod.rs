@@ -15,6 +15,8 @@
 //!   `home` entries, relay to other gateways;
 //! - everybody **follows**: fetches witnessed heads + entries, verifies them, appends, replays; gossips heads and
 //!   deposes an operator locally as soon as it holds evidence of a split view.
+//! - **watcher** (sealed `watch` level ≥ 2, docs/06 §11): probes registered nodes and gives level 1 automatically
+//!   (module `watcher`); a node started with `--probe` joins as a member and registers at the watchers.
 //!
 //! Everything node-to-node is a signed request (`rq`, `aud` = the target node) or a signed statement, every answer
 //! from another node is size-limited, parsed strictly and verified before it changes anything (Z3).
@@ -36,6 +38,7 @@ mod operator;
 mod peer;
 mod relay;
 mod sync;
+mod watcher;
 mod witness;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -56,6 +59,8 @@ use crate::{Node, lock};
 
 pub(crate) use gateway::Route;
 pub(crate) use peer::{Endpoint, Peers};
+pub(crate) use watcher::{WatchMemory, status as watch_status_of};
+pub use watcher::{WatchStatus, WatchedNode};
 
 /// Meta keys in the store (the network a data folder belongs to survives restarts).
 pub(crate) const META_NET: &str = "net.id";
@@ -98,6 +103,11 @@ pub struct NetTiming {
     pub join_wait: Duration,
     /// Apps: ask the other hosts of every hosted app for newer versions this often (docs/07 §4).
     pub apps: Duration,
+    /// Watcher: one round (probes due, decisions) this often (docs/06 §11.4).
+    pub watch: Duration,
+    /// A node with `probe`: join / register at the watchers this often; a watcher keeps a registration 24 times this
+    /// long (docs/06 §11.5).
+    pub register: Duration,
 }
 
 impl Default for NetTiming {
@@ -114,6 +124,8 @@ impl Default for NetTiming {
             peer_gap: Duration::from_secs(1),
             join_wait: Duration::from_secs(20),
             apps: Duration::from_secs(30),
+            watch: Duration::from_secs(10),
+            register: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -134,6 +146,8 @@ impl NetTiming {
             peer_gap: Duration::from_millis(100),
             join_wait: Duration::from_secs(10),
             apps: Duration::from_millis(200),
+            watch: Duration::from_millis(200),
+            register: Duration::from_millis(500),
         }
     }
 }
@@ -158,13 +172,15 @@ pub struct NetConfig {
     pub lan_bootstrap: Option<LanPin>,
     /// Timing of the network duties.
     pub timing: NetTiming,
+    /// The invite code of the join link (only in memory): used when the node joins as a member for probes.
+    pub invite: Option<String>,
 }
 
 impl NetConfig {
     /// Membership in `net` with default timing and no bootstrap addresses (owner node).
     #[must_use]
     pub fn new(net: Id) -> Self {
-        Self { net, bootstrap: Vec::new(), lan_bootstrap: None, timing: NetTiming::default() }
+        Self { net, bootstrap: Vec::new(), lan_bootstrap: None, timing: NetTiming::default(), invite: None }
     }
 
     /// Membership from a join link: its gateway is the bootstrap address, and - with `node` and `tls` - the gateway
@@ -175,7 +191,12 @@ impl NetConfig {
             (Some(node), Some(tls)) => Some(LanPin { node: node.clone(), tls }),
             _ => None,
         };
-        Self { bootstrap: vec![link.gateway.clone()], lan_bootstrap, ..Self::new(link.net.clone()) }
+        Self {
+            bootstrap: vec![link.gateway.clone()],
+            lan_bootstrap,
+            invite: link.code.clone(),
+            ..Self::new(link.net.clone())
+        }
     }
 }
 
@@ -618,6 +639,14 @@ pub(crate) struct NetRuntime {
     /// Transition-head rows that could not be stored yet: tried again on every store and every sync round (at most
     /// 64).
     pub(crate) unsaved: Mutex<BTreeMap<u64, TransitionRow>>,
+    /// Watcher: registered nodes, member walk, statements in flight (docs/06 §11). Lock order: core, then this.
+    pub(crate) watch: Mutex<WatchMemory>,
+    /// This node asks the watchers for probes with these services.
+    pub(crate) probe: Option<bridge_net::Services>,
+    /// Invite code of the join link (memory only), for joining as a member for probes.
+    pub(crate) invite: Option<String>,
+    /// Which addresses other nodes chose are called ([`crate::NodeConfig::peer_addresses`]).
+    pub(crate) peer_addresses: bridge_transport::PeerAddresses,
 }
 
 /// The first pause before a damaged transition head is fetched again (it doubles up to 64 times this).
@@ -627,7 +656,16 @@ fn repair_pause(timing: &NetTiming) -> i64 {
 
 impl NetRuntime {
     /// Loads what the store holds for `config.net` (log, heads, transition heads - verified again -, evidence).
-    pub(crate) fn open(store: &Store, me: &Id, config: &NetConfig, now: i64) -> Result<Self, String> {
+    /// `probe`: ask the watchers for probes with these services ([`crate::NodeConfig::probe`]); `peer_addresses`: see
+    /// [`crate::NodeConfig::peer_addresses`].
+    pub(crate) fn open(
+        store: &Store,
+        me: &Id,
+        config: &NetConfig,
+        now: i64,
+        probe: Option<bridge_net::Services>,
+        peer_addresses: bridge_transport::PeerAddresses,
+    ) -> Result<Self, String> {
         let net = config.net.clone();
         let key = net.to_string();
         let entries =
@@ -654,6 +692,7 @@ impl NetRuntime {
             Some(core)
         };
         let size = core.as_ref().map_or(0, |core| core.log.size());
+        let watch = WatchMemory::load(store, &net)?;
         Ok(Self {
             net,
             bootstrap: config.bootstrap.iter().take(MAX_BOOTSTRAP).cloned().collect(),
@@ -670,6 +709,10 @@ impl NetRuntime {
             fetched_transitions: Mutex::new(BTreeMap::new()),
             failures: Mutex::new(sync::Failures::default()),
             unsaved: Mutex::new(BTreeMap::new()),
+            watch: Mutex::new(watch),
+            probe,
+            invite: config.invite.clone(),
+            peer_addresses,
         })
     }
 }
@@ -766,14 +809,19 @@ impl Node {
 pub(crate) fn spawn(node: &Node) -> Vec<JoinHandle<()>> {
     let Some(network) = node.network() else { return Vec::new() };
     let timing = network.timing;
-    vec![
+    let mut tasks = vec![
         tokio::spawn(duty(node.clone(), timing.sync, Duty::Sync)),
         tokio::spawn(duty(node.clone(), timing.gossip, Duty::Gossip)),
         tokio::spawn(duty(node.clone(), timing.head, Duty::Head)),
         tokio::spawn(duty(node.clone(), timing.cosign, Duty::Witness)),
         tokio::spawn(duty(node.clone(), timing.relay_retry, Duty::Relay)),
         tokio::spawn(duty(node.clone(), timing.homes, Duty::Homes)),
-    ]
+        tokio::spawn(duty(node.clone(), timing.watch, Duty::Watch)),
+    ];
+    if network.probe.is_some() {
+        tasks.push(tokio::spawn(duty(node.clone(), timing.register, Duty::Register)));
+    }
+    tasks
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -784,6 +832,8 @@ enum Duty {
     Witness,
     Relay,
     Homes,
+    Watch,
+    Register,
 }
 
 /// One duty: run, then wait for the interval (or a wake-up), forever. A round never panics the task: errors are
@@ -798,6 +848,8 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Witness => node.witness_round().await,
             Duty::Relay => node.relay_round().await,
             Duty::Homes => node.homes_round().await,
+            Duty::Watch => node.watch_round().await,
+            Duty::Register => node.register_round().await,
         }
         let Some(network) = node.network() else { return };
         let wake = match duty {
@@ -805,7 +857,7 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Head => Some(&network.wake_head),
             Duty::Witness => Some(&network.wake_witness),
             Duty::Relay => Some(&network.wake_relay),
-            Duty::Gossip | Duty::Homes => None,
+            Duty::Gossip | Duty::Homes | Duty::Watch | Duty::Register => None,
         };
         match wake {
             Some(wake) => {

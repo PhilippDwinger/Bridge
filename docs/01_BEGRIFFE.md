@@ -10,7 +10,7 @@
 | **Knoten** | Laufender Bridge-Prozess auf einem PC/Server. Bietet einen oder mehrere **Dienste** an. |
 | **Dienst** | Was ein Knoten anbietet: Empfänger, DNS, Speicher, Rechnen, Web, KI … (als Plugin). |
 | **Empfänger** | Dienst, über den Clients ins Netz kommen (Zugang, Postfach, Weiterleitung). Braucht Siegel-Stufe 3. |
-| **Wächter** | Dienst, der andere Knoten prüft (Proben, Erreichbarkeit) und das Transparenz-Log mitführt. |
+| **Wächter** | Dienst (`watch`, Siegel Stufe ≥ 2), der Mitglieder nach Zeit und Knoten mit Proben (Erreichbarkeit, Log) prüft und ihnen automatisch Stufe 1 gibt oder entzieht (06 §11). |
 | **Mitglied** | Identität mit gültigem **Mitgliedsausweis** eines Netzes. Hat eine Vertrauensstufe. |
 | **Stufe** | Vertrauensstufe 0–3 einer Identität (Mitglied oder Knoten) im Netz; bestimmt Rechte und Kontingente. |
 | **Siegel** | Signierte Bestätigung (Owner/Admin/automatisch), dass ein Knoten/Dienst eine Stufe hat. Läuft ab, widerrufbar. |

@@ -55,3 +55,13 @@ jobs:
             target/release/bridge-node
             target/release/bridge-node.exe
           if-no-files-found: ignore
+      # BridgeControll v2 (ADR 0017): one program for the app and its node processes.
+      - name: Build BridgeControll v2 (release)
+        run: cargo build --release -p bridgecontroll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridgecontroll-${{ matrix.os }}
+          path: |
+            target/release/bridgecontroll
+            target/release/bridgecontroll.exe
+          if-no-files-found: error

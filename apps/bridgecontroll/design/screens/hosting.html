@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BridgeControll – Deine Server</title>
+<!--
+  H01 Hosting-Bildschirm (App-Ebene, erste Seite der App), statische Referenz.
+  Gehört zu design/ (Design-Claude). Bau-Claude: eine .srv-Zeile pro Eintrag aus /api/servers.
+
+  Pillen je Zustand (Klassen aus components.css, Abschnitt 3):
+    Server   running=false          → <span class="b-pill b-pill--neutral"><span class="b-pill__dot b-pill__dot--hollow"></span>Aus</span>
+             running && !ready      → <span class="b-pill b-pill--info"><span class="b-pill__spin"></span>Startet …</span>
+             ready                  → <span class="b-pill b-pill--ok"><span class="b-pill__dot b-pill__dot--live"></span>Läuft</span>
+             (Stop gedrückt)        → <span class="b-pill b-pill--neutral"><span class="b-pill__spin"></span>Stoppt …</span>
+    Version  git.up_to_date         → b-pill--ok „Aktuell“ (+ Haken)
+             git.behind > 0         → b-pill--warn „{behind} hinter“ + Chip „{local} → {remote}“ + Update-Knopf (b-btn--primary b-dot-badge)
+             Update läuft           → b-pill--info „Update läuft“ + .srv__step (Schritt-Text) + .srv__bar mit style="width: 25|50|75|100%"
+             git.error              → b-pill--err „Git nicht erreichbar“
+    Tunnel   expose=tailscale       → Chip mit public_url (gekürzt) / beim Aufbau b-pill--info „Tunnel baut auf“
+             expose=none            → b-pill--neutral „Nur lokal“
+  Knöpfe: läuft → „Stop“ (b-btn--secondary) · aus → „Starten“ (b-btn--primary) · startet → Stop gesperrt.
+  Stop öffnet den Dialog K50, Löschen (im ⋯-Menü) den Dialog K51 – Markup in ui-kit.html.
+  „Server hinzufügen“ öffnet K27 als Dialog (b-backdrop + b-form).
+  Update-Schritte (Text in .srv__step): „Sichert Backup bei Partnern …“ · „Partner hält die Daten …“ · „Holt {remote} …“ · „Startet neu …“
+-->
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+</head>
+<body class="b-page">
+<main class="hs b-page-in">
+
+  <aside class="hs__aside">
+    <div style="display: flex; flex-direction: column; gap: 18px">
+      <img class="start__wordmark" src="../logo/bridge-wortmarke.svg" alt="Bridge" style="width: 200px">
+      <p class="start__lead" style="margin: 0">Deine Bridge-Server auf <strong data-bind="app.host">paddy-pc</strong>. Wähl einen aus oder leg einen neuen an.</p>
+      <div class="b-stats">
+        <div class="b-stat"><span class="b-stat__val" data-bind="count.servers">5</span><span class="b-stat__lbl">Server</span></div>
+        <div class="b-stat"><span class="b-stat__val b-stat__val--ok" data-bind="count.running">3</span><span class="b-stat__lbl">laufen</span></div>
+        <div class="b-stat"><span class="b-stat__val b-stat__val--warn" data-bind="count.behind">1</span><span class="b-stat__lbl">Update</span></div>
+      </div>
+      <div class="hs__actions">
+        <button class="b-btn b-btn--sticker" style="margin-left: 4px" data-action="add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Server hinzufügen</button>
+        <button class="b-btn b-btn--ghost" data-action="update-all"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>Alle rollend updaten</button>
+      </div>
+    </div>
+    <div class="start__foot">
+      <img class="start__mark" src="../logo/bridge-bildmarke.svg" alt="">
+      <span class="start__version"><span data-bind="app.version">BridgeControll 0.1</span><span data-bind="git.checked">Git geprüft vor 1 min</span></span>
+      <span class="b-tip" style="margin-left: 4px">
+        <span class="b-tip__bubble" role="tooltip">Git jetzt prüfen</span>
+        <button class="b-icon" aria-label="Git jetzt prüfen" data-action="git-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+      </span>
+    </div>
+  </aside>
+
+  <section class="hs__list" aria-label="Server">
+
+    <!-- läuft · aktuell · öffentlich -->
+    <div class="srv" data-server="haupt">
+      <span class="srv__nr">01</span>
+      <div class="srv__body">
+        <a class="srv__name" href="start.html" data-bind="name">haupt</a>
+        <div class="srv__meta">
+          <span class="b-pill b-pill--ok"><span class="b-pill__dot b-pill__dot--live"></span>Läuft</span>
+          <span class="b-pill b-pill--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Aktuell</span>
+          <span class="b-chip" data-bind="public_url">paddy-pc.…ts.net</span>
+          <span class="b-chip">Port <span data-bind="port">8080</span></span>
+        </div>
+      </div>
+      <div class="srv__actions">
+        <button class="b-btn b-btn--secondary" data-action="stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button>
+        <button class="b-icon" aria-label="Mehr zu haupt" data-action="menu"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+        <a class="b-go" href="start.html" aria-label="haupt öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+    </div>
+
+    <!-- läuft · 3 hinter → Update-Knopf -->
+    <div class="srv" data-server="grove">
+      <span class="srv__nr">02</span>
+      <div class="srv__body">
+        <a class="srv__name" href="start.html" data-bind="name">grove</a>
+        <div class="srv__meta">
+          <span class="b-pill b-pill--ok"><span class="b-pill__dot b-pill__dot--live"></span>Läuft</span>
+          <span class="b-pill b-pill--warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span><span data-bind="git.behind">3</span> hinter</span></span>
+          <span class="b-chip"><span data-bind="git.local">b451413</span> → <span data-bind="git.remote">c3f9e21</span></span>
+          <span class="b-chip">paddy-pc.…ts.net:8443</span>
+          <span class="b-chip">Port 8081</span>
+        </div>
+      </div>
+      <div class="srv__actions">
+        <button class="b-btn b-btn--primary b-dot-badge" data-action="update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>Update</button>
+        <button class="b-btn b-btn--secondary" data-action="stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button>
+        <button class="b-icon" aria-label="Mehr zu grove" data-action="menu"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+        <a class="b-go" href="start.html" aria-label="grove öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+    </div>
+
+    <!-- Update läuft (Schritt 3 von 4) -->
+    <div class="srv" data-server="werkstatt">
+      <span class="srv__nr">03</span>
+      <div class="srv__body">
+        <a class="srv__name" href="start.html">werkstatt</a>
+        <div class="srv__meta">
+          <span class="b-pill b-pill--info"><span class="b-pill__spin"></span>Update läuft</span>
+          <span class="srv__step">Holt c3f9e21 …</span>
+          <span class="b-chip">paddy-pc.…ts.net:10000</span>
+          <span class="b-chip">Port 8083</span>
+        </div>
+      </div>
+      <div class="srv__actions">
+        <button class="b-btn b-btn--secondary" disabled><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button>
+        <button class="b-icon" aria-label="Mehr zu werkstatt"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+        <a class="b-go" href="start.html" aria-label="werkstatt öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+      <span class="srv__bar" style="width: 75%"></span>
+    </div>
+
+    <!-- startet · Tunnel baut auf -->
+    <div class="srv" data-server="spielwiese">
+      <span class="srv__nr">04</span>
+      <div class="srv__body">
+        <a class="srv__name" href="start.html">spielwiese</a>
+        <div class="srv__meta">
+          <span class="b-pill b-pill--info"><span class="b-pill__spin"></span>Startet …</span>
+          <span class="b-pill b-pill--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Aktuell</span>
+          <span class="b-pill b-pill--info"><span class="b-pill__spin"></span>Tunnel baut auf</span>
+          <span class="b-chip">Port 8082</span>
+        </div>
+      </div>
+      <div class="srv__actions">
+        <button class="b-btn b-btn--secondary" disabled><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button>
+        <button class="b-icon" aria-label="Mehr zu spielwiese"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+        <a class="b-go" href="start.html" aria-label="spielwiese öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+    </div>
+
+    <!-- aus · nur lokal -->
+    <div class="srv" data-server="test">
+      <span class="srv__nr">05</span>
+      <div class="srv__body">
+        <a class="srv__name" href="start.html">test</a>
+        <div class="srv__meta">
+          <span class="b-pill b-pill--neutral"><span class="b-pill__dot b-pill__dot--hollow"></span>Aus</span>
+          <span class="b-pill b-pill--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Aktuell</span>
+          <span class="b-pill b-pill--neutral"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/></svg>Nur lokal</span>
+          <span class="b-chip">Port 8090</span>
+        </div>
+      </div>
+      <div class="srv__actions">
+        <button class="b-btn b-btn--primary" data-action="start"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>Starten</button>
+        <button class="b-icon" aria-label="Mehr zu test" data-action="menu"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+        <a class="b-go" href="start.html" aria-label="test öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+    </div>
+
+  </section>
+</main>
+</body>
+</html>

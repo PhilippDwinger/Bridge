@@ -25,6 +25,7 @@ impl Node {
             (Method::Post, "/v4/node/relay") => return self.relay_in(&request.body, now).await,
             (Method::Post, "/v4/node/homes") => return self.homes_out(&request.body, now).await,
             (Method::Post, "/v4/node/app") => return self.app_offer_in(&request.body, now).await,
+            (Method::Post, "/v4/node/watch") => return self.watch_in(&request.body, request.peer, now).await,
             _ => {}
         }
         let rest = request.path.strip_prefix("/v4/net/").ok_or_else(NodeError::not_found)?;
@@ -178,16 +179,16 @@ impl Node {
         Ok(json!({"index": appended.index, "size": appended.size, "hash": statement.hash()}).to_string().into_bytes())
     }
 
-    /// Who may submit: the network key, an admin with any right, a gateway (docs/06 §9).
+    /// Who may submit: the network key, an admin with any right, a gateway, a watcher (docs/06 §9, §11.6).
     fn submitter_card(&self, id: &Id, now: i64) -> NodeResult<KeyCard> {
         self.with_core(|core| {
             // The network key has all rights; an admin has at least one.
-            if !core.state.admin_rights(id, now).is_empty() {
+            if !core.state.admin_rights(id, now).is_empty() || core.state.is_watcher(id, now) {
                 return core.state.card_of(id).cloned();
             }
             core.gateway_card(id, now)
         })?
-        .ok_or_else(|| NodeError::forbidden("only the network key, admins and gateways submit"))
+        .ok_or_else(|| NodeError::forbidden("only the network key, admins, gateways and watchers submit"))
     }
 
     /// `POST /v4/net/{net}/cosign`: a witness's `cosign` statement (self-signed; repeating it changes nothing) - at

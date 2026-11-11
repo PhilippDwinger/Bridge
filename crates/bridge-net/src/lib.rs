@@ -40,10 +40,11 @@ pub use log::{
     verify_head,
 };
 pub use merkle::{Hash, Tree};
-pub use state::{Ahead, Applied, Endorsement, NetState, RulesAhead, Transition, Transitions};
+pub use state::{Ahead, Applied, Endorsement, NetState, RulesAhead, SealInfo, Transition, Transitions};
 pub use statements::{
     AppRules, Approvals, Ban, Body, Cosign, Delegation, GatewayEntry, HeadBody, Home, Invite, Join, JoinMode, Kind,
-    Limits, LogRules, Manifest, Member, Revoke, RevokeTarget, Right, Rights, Seal, Service, Services,
+    Limits, LogRules, Manifest, Member, Revoke, RevokeTarget, Right, Rights, Seal, Service, Services, WATCH_SERVICES,
+    WatchRules,
 };
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.

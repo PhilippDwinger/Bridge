@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge – Kommt noch</title>
+<!--
+  K54 „Kommt noch“ – für Clients, Realms, Nachrichten, Freunde, Logs, solange Bridge dafür noch keine Admin-Schnittstelle hat.
+  Gehört zu design/ (Design-Claude). Pro Bereich nur Titel + Satz austauschen (data-bind):
+    clients      „Clients kommen bald“       … „siehst du hier, wer verbunden ist.“
+    realms       „Realms kommen bald“        … „siehst du hier deine Realms und ihre Commands.“
+    nachrichten  „Nachrichten kommen bald“   … „siehst du hier Postfächer und Verlauf.“
+    freunde      „Freunde kommen bald“       … „siehst du hier deine Freundschaften zu anderen Servern.“
+    logs         „Logs kommen bald“          … „siehst du hier live, was auf dem Server passiert.“
+-->
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+</head>
+<body class="b-page">
+<main class="soon b-page-in">
+  <a class="soon__back" href="start.html">← <span data-bind="server.name">grove</span></a>
+  <h1 class="soon__title" data-bind="area.name">Clients</h1>
+  <div class="soon__box">
+    <div class="b-empty">
+      <svg width="180" height="108" viewBox="0 0 150 90" fill="none" stroke-linecap="round" aria-hidden="true"><path d="M10 74C24 26 66 18 75 22" stroke="var(--accent)" stroke-width="7"/><path class="b-build" d="M75 22C90 18 126 26 140 74" stroke="var(--bridge-blue-300)" stroke-width="4"/><path d="M4 74h68" stroke="var(--ink)" stroke-width="5"/><path class="b-build" d="M78 74h68" stroke="var(--bridge-blue-300)" stroke-width="4"/><circle cx="75" cy="22" r="6" fill="var(--amber)"/></svg>
+      <h3 data-bind="area.soon_title">Clients kommen bald</h3>
+      <p data-bind="area.soon_text">Diese Ansicht braucht noch eine Schnittstelle in Bridge. Sobald sie da ist, siehst du hier, wer verbunden ist.</p>
+      <a class="b-btn b-btn--secondary" href="start.html">Zurück zu den Bereichen</a>
+    </div>
+  </div>
+</main>
+</body>
+</html>

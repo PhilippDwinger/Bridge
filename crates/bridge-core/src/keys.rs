@@ -24,17 +24,80 @@ pub const MAX_URLS: usize = 4;
 /// Maximum length of one address in characters.
 pub const MAX_URL_CHARS: usize = 200;
 
-/// Checks one address (key cards, manifests - one rule, S5): starts with `https://` or `http://`, something follows,
-/// at most 200 characters, printable ASCII only (no whitespace, no control characters).
+/// Checks one address (key cards, manifests, join links - one rule, S5; docs/06 §2): exactly
+/// `http(s)://host[:port][/path]`, at most 200 characters.
+/// - `host`: a DNS name (labels of `A-Z a-z 0-9 - _`, separated by single dots, no empty label), an IPv4 address in
+///   that form, or an IPv6 address in brackets (`[` hex digits, `:` and `.` `]`, no zone);
+/// - `port`: 1-65535, digits only;
+/// - `path`: `/` and the unreserved characters `A-Z a-z 0-9 - . _ ~`, no `.`/`..` segments.
+///
+/// So no query (`?`), fragment (`#`), user info (`@`), `%` escapes, whitespace or control characters: a node appends
+/// its API paths to these addresses (`<url>/v4/info`), and nothing in an address may turn that into another request
+/// (review 8: `http://10.0.0.1/admin?x=` + `/v4/info`).
 pub fn check_url(url: &str) -> CoreResult<()> {
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
-    let ok = url.len() <= MAX_URL_CHARS
-        && rest.is_some_and(|rest| !rest.is_empty())
-        && url.bytes().all(|b| b.is_ascii_graphic());
-    if !ok {
-        return Err(CoreError::format("url: expected http(s)://..., at most 200 printable ASCII characters"));
+    if url_shape_ok(url) {
+        return Ok(());
     }
-    Ok(())
+    Err(CoreError::format(
+        "url: expected http(s)://host[:port][/path] (letters, digits, - . _ ~ in the path; no ?, #, @, %), at most \
+         200 characters",
+    ))
+}
+
+fn url_shape_ok(url: &str) -> bool {
+    if url.len() > MAX_URL_CHARS {
+        return false;
+    }
+    let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else { return false };
+    let (authority, path) = match rest.find('/') {
+        Some(slash) => rest.split_at(slash),
+        None => (rest, ""),
+    };
+    authority_ok(authority) && path_ok(path)
+}
+
+/// `host[:port]` with a DNS name / IPv4 host or `[ipv6]`.
+fn authority_ok(authority: &str) -> bool {
+    let (host_ok, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let Some((ip, after)) = inner.split_once(']') else { return false };
+        let ok = !ip.is_empty()
+            && ip.contains(':')
+            && ip.bytes().all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+            && ip.parse::<std::net::Ipv6Addr>().is_ok();
+        let port = match after {
+            "" => None,
+            _ => match after.strip_prefix(':') {
+                Some(port) => Some(port),
+                None => return false,
+            },
+        };
+        (ok, port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let ok = !host.is_empty()
+            && host.split('.').all(|label| {
+                !label.is_empty() && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            });
+        (ok, port)
+    };
+    let port_ok = port.is_none_or(|port| {
+        !port.is_empty()
+            && port.len() <= 5
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|port| port > 0)
+    });
+    host_ok && port_ok
+}
+
+/// Empty, or `/`-separated segments of unreserved characters, none of them `.` or `..`.
+fn path_ok(path: &str) -> bool {
+    path.is_empty()
+        || (path.starts_with('/')
+            && path.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~'))
+            && path.split('/').all(|segment| segment != "." && segment != ".."))
 }
 
 /// What an identity is.
@@ -409,6 +472,57 @@ mod tests {
         assert!(node.key_card_with(Role::Client, None, &urls, None, 0).is_err());
         assert!(node.key_card_with(Role::Admin, None, &[], Some(pin), 0).is_err());
         Ok(())
+    }
+
+    /// Review 8: an address is exactly `scheme://host[:port][/path]` - nothing that could turn `<url>/v4/info` into
+    /// another request (query, fragment, user info, escapes, whitespace).
+    #[test]
+    fn urls_are_scheme_host_port_path_only() {
+        for good in [
+            "https://pc.tail91b057.ts.net:8443/n1",
+            "http://192.168.1.20:7700",
+            "http://127.0.0.1:7401/",
+            "https://node.example/a/b_c-d.e~f/",
+            "http://[::1]:7400",
+            "http://[2001:db8::1]/x",
+            "https://my_host.local",
+            "http://a",
+        ] {
+            assert!(check_url(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "http://10.0.0.1/x#",
+            "http://10.0.0.1/admin?x=",
+            "http://user@evil.example/",
+            "http://user:pw@evil.example/",
+            "http://evil.example@10.0.0.1/",
+            "http://a.example/%2e%2e/admin",
+            "http://a.example/../admin",
+            "http://a.example/./x",
+            "http://a.example/a b",
+            "http://a.example/a\tb",
+            "http://a.example/a;b",
+            "http://a..example",
+            "http://.a.example",
+            "http://a.example.",
+            "http://a.example:",
+            "http://a.example:0",
+            "http://a.example:65536",
+            "http://a.example:+80",
+            "http://a.example:80:81",
+            "http://[::1",
+            "http://[::1]x",
+            "http://[fe80::1%25eth0]/",
+            "http://[zz::1]/",
+            "http://[]",
+            "http://",
+            "http:///x",
+            "https://ä.example",
+            "ftp://a.example",
+            "HTTP://a.example",
+        ] {
+            assert!(check_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -1,0 +1,92 @@
+/* ============================================================
+   Bridge – Design-Tokens
+   Gehört zu design/ (Design-Claude). Bitte nicht ändern –
+   Wünsche in design/FRAGEN.md eintragen.
+   Im UI immer var(--…) benutzen, nie eigene Farb- oder Schriftwerte.
+   ============================================================ */
+
+/* ---------- Schriften (lokal, kein CDN) ---------- */
+@font-face { font-family: "Sora"; src: url("fonts/sora-latin-600-normal.woff2") format("woff2"); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: "Sora"; src: url("fonts/sora-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "IBM Plex Sans"; src: url("fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "IBM Plex Sans"; src: url("fonts/ibm-plex-sans-latin-500-normal.woff2") format("woff2"); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: "IBM Plex Sans"; src: url("fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2"); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2"); font-weight: 500; font-style: normal; font-display: swap; }
+
+:root {
+  /* ---------- Marke ---------- */
+  --bridge-blue: #3369FF;          /* Kernfarbe, Weiß darauf 4,6 : 1 */
+  --bridge-blue-50:  #EEF3FF;
+  --bridge-blue-100: #DCE6FF;
+  --bridge-blue-200: #BACDFF;
+  --bridge-blue-300: #8DACFF;
+  --bridge-blue-400: #5D88FF;
+  --bridge-blue-500: #3369FF;
+  --bridge-blue-600: #2152E6;
+  --bridge-blue-700: #1B42B8;
+  --bridge-blue-800: #18368F;
+  --bridge-blue-900: #152B69;
+  --bridge-blue-950: #0C1838;
+  --amber: #F5B544;                /* nur Akzentpunkt im Logo und Hinweise */
+
+  /* ---------- Flächen & Text (hell = entschieden) ---------- */
+  --bg: #F7F8FB;
+  --surface: #FFFFFF;
+  --line: #D5DCE8;
+  --text: #0E1A33;
+  --text-2: #36435C;               /* Fließtext, Beschreibungen */
+  --muted: #56657F;                /* Nummern, Meta, kleine Labels */
+
+  /* ---------- Akzent ---------- */
+  --accent: var(--bridge-blue);    /* Flächen, Knöpfe, aktive Punkte */
+  --accent-text: var(--bridge-blue-600);  /* blauer TEXT auf hellem Grund (5,8 : 1) */
+  --on-accent: #FFFFFF;
+
+  /* ---------- Status (Text auf hellem Grund, alle ≥ 4,5 : 1) ---------- */
+  --ok: #0B7A54;      --ok-bg: #E3F5EC;
+  --warn: #9A5B00;    --warn-bg: #FFF1DB;
+  --err: #A8242E;     --err-bg: #FBE6E8;
+  --neutral-bg: #EEF1F6;           /* Pille „Aus“, gesperrte Felder */
+  --track: #E4E9F2;                /* leere Ladebalken, Schritt-Linien */
+  --field-bg: #F3F6FB;             /* Vor-/Nachsatz in Feldern, Kopierfeld */
+  --ink: #0E1A33;                  /* dunkle Flächen: Toast „Rückgängig“, Tooltip, Offline-Leiste */
+
+  /* ---------- Bewegung (K56/K57) ---------- */
+  --dur-1: 120ms;                  /* schnell: Klick, Drücken */
+  --dur-2: 200ms;                  /* normal: Hover, Farbwechsel */
+  --dur-3: 320ms;                  /* ruhig: Schalter, Einblenden */
+  --dur-4: 600ms;                  /* lang: Seitenwechsel, Fortschritt */
+  --ease-out: cubic-bezier(.2, .8, .2, 1);     /* Standard */
+  --ease-io: cubic-bezier(.65, 0, .35, 1);     /* große Wege, Seiten */
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1); /* Schalter, Sticker, Häkchen */
+
+  /* ---------- Schrift ---------- */
+  --font-display: "Sora", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --fs-hero: clamp(28px, 3.2vw, 40px);  /* Bereichsnamen im Startbildschirm */
+  --fs-h1: 30px;
+  --fs-h2: 22px;
+  --fs-lead: 17px;
+  --fs-body: 15px;
+  --fs-small: 13px;
+  --tracking-display: -0.03em;
+
+  /* ---------- Form ---------- */
+  --r-s: 8px;
+  --r-m: 14px;
+  --r-l: 22px;
+  --r-pill: 999px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 56px;
+
+  --shadow-logo: drop-shadow(0 4px 5px rgba(12, 24, 56, .25));
+  --focus-ring: 0 0 0 3px var(--bg), 0 0 0 5px var(--accent);
+}

@@ -93,7 +93,13 @@ Gelten für **Mitglieder** (Clients) und **Knoten** getrennt. Das Manifest legt 
 
 - Siegel laufen ab (Standard 30 Tage). Wächter verlängern Stufe 1 automatisch, solange Proben bestehen; Stufe 2/3
   verlängert ein Admin (oder automatisch, wenn das Manifest es erlaubt und die Proben passen).
-- Abstieg: Verstoß, durchgefallene Proben oder Widerruf → sofort niedrigere Stufe.
+- **Wächter** (Dienst `watch`, Siegel Stufe ≥ 2 von Admins; 06 §11, ADR 0016) vergeben **nur Stufe 1**: an Mitglieder
+  nach `member_age_s` (Standard 7 Tage) Mitgliedschaft ohne Sperre, an Knoten (die selbst Mitglied sind) nach
+  `node_observe_s` (Standard 24 h) mit ≥ `success_pct` (90 %) bestandenen Proben, als einzigen Dienst höchstens `web`.
+  Der Netz-Zustand prüft das (Stufe, Dienste, Mitgliedschaft, Alter, Budget je Wächter und Tag), die Regeln stehen im
+  Manifest (`watch`).
+- Abstieg: Verstoß, durchgefallene Proben oder Widerruf → sofort niedrigere Stufe (Wächter: nach `fail_limit`
+  Fehlschlägen in Folge widerrufen sie ihr Siegel; auch bei Sperre oder Ende der Mitgliedschaft).
 - **Bürgen** (optional pro Netz): Wer einlädt, bürgt. Fliegt der Eingeladene wegen Missbrauch, verliert der Bürge Ruf.
 
 ## 7. Angriffe und Abwehr

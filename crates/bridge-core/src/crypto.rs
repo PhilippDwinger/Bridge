@@ -35,6 +35,30 @@ pub fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// A message authentication code under `key` (at least 16 bytes): HKDF-SHA256 with `key` as input key material and
+/// `"bridge4/mac/<domain>\n" + message` as info, 32 bytes - that is HMAC-SHA256 with the extracted key over the info
+/// (a PRF of domain and message). For local protocols, e.g. BridgeControll's second start proving and checking the
+/// launch key without sending it.
+pub fn mac(key: &[u8], domain: &str, message: &[u8]) -> CoreResult<[u8; 32]> {
+    if key.len() < 16 {
+        return Err(CoreError::format("mac: key too short"));
+    }
+    let mut info = Vec::with_capacity(13 + domain.len() + message.len());
+    info.extend_from_slice(b"bridge4/mac/");
+    info.extend_from_slice(domain.as_bytes());
+    info.push(b'\n');
+    info.extend_from_slice(message);
+    let mut out = [0u8; 32];
+    Hkdf::<Sha256>::new(None, key).expand(&info, &mut out).map_err(|_| CoreError::format("mac: hkdf"))?;
+    Ok(out)
+}
+
+/// Compares two codes without an early exit (no timing hint about where they differ).
+#[must_use]
+pub fn mac_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
 /// Incremental SHA-256 (for streams).
 #[derive(Clone, Default)]
 pub(crate) struct Hasher(Sha256);
@@ -213,6 +237,22 @@ mod tests {
     use rand_core::OsRng;
 
     use super::*;
+
+    #[test]
+    fn mac_depends_on_key_domain_and_message() -> CoreResult<()> {
+        let key = [7u8; 32];
+        let tag = mac(&key, "launch", b"nonce")?;
+        assert_eq!(tag, mac(&key, "launch", b"nonce")?, "deterministic");
+        assert!(mac_eq(&tag, &mac(&key, "launch", b"nonce")?));
+        for other in [mac(&[8u8; 32], "launch", b"nonce")?, mac(&key, "answer", b"nonce")?, mac(&key, "launch", b"x")?]
+        {
+            assert!(!mac_eq(&tag, &other));
+        }
+        // Domain and message are separated: ("ab", "c") is not ("a", "bc").
+        assert_ne!(mac(&key, "ab", b"c")?, mac(&key, "a", b"bc")?);
+        assert!(mac(&[1u8; 15], "launch", b"nonce").is_err(), "short keys are refused");
+        Ok(())
+    }
 
     #[test]
     fn sha256_known_vector() {

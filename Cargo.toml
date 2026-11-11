@@ -9,6 +9,7 @@ members = [
     "crates/bridge-plugin-api",
     "crates/bridge-node",
     "bin/bridge-node",
+    "apps/bridgecontroll",
     "sdk/rust",
     "tests/e2e",
 ]
@@ -42,6 +43,8 @@ bridge-net = { path = "crates/bridge-net" }
 bridge-plugin-api = { path = "crates/bridge-plugin-api" }
 bridge-node = { path = "crates/bridge-node" }
 bridge-sdk = { path = "sdk/rust" }
+# The node program as a library (its node runner and commands), for BridgeControll (ADR 0017).
+bridge-node-cli = { path = "bin/bridge-node", package = "bridge-node-bin" }
 
 # External crates (versions in one place). Crypto: RustCrypto / dalek only (docs/02 §4, rule Z10).
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
@@ -64,7 +67,7 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "server-graceful"] }
 http-body-util = "0.1"
 http = "1"
-bytes = "1"
+bytes = "1.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -77,6 +80,11 @@ mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
 # `net rescue`: the terminal echo off while the 24 words are typed (safe termios API; already in the tree via
 # tempfile). Only the binary uses it, only on Unix.
 rustix = { version = "1", default-features = false, features = ["std", "termios", "process"] }
+# BridgeControll (ADR 0017): QR codes of join links, pure Rust without dependencies (rendered to SVG by the app).
+qrcodegen = "1.8"
+# BridgeControll (review 8): the single-instance lock (flock / LockFileEx through rustix / windows-sys, no own unsafe;
+# std's File::lock needs Rust 1.89, the MSRV is 1.85).
+fs4 = { version = "1", default-features = false, features = ["sync"] }
 
 # Tests verify many signatures; unoptimized curve arithmetic makes each check ~10 ms in debug builds. Optimize only
 # these crypto dependencies in dev/test builds (Bridge's own code and release builds are unchanged).

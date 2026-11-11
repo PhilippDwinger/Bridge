@@ -31,7 +31,7 @@
 | `node` | Laufzeit eines Knotens: Sitzungen, Postfächer, Weiterleitung zwischen Knoten, Plugin-Host (Sandbox), Gesundheit | Laufzeit-Zustand | alle darunter |
 | `services/*` | Je Dienst-Art ein Plugin: `gateway` (Empfänger), `watch` (Wächter), `names` (DNS + Suche), `storage`, `compute`, `web`, `mailbox`, `ai`, `bridge` (zu anderen Netzen) | eigene Daten (über die Plugin-Schnittstelle) | nur die **Plugin-API** von `node` + `core` |
 | `sdk/*` | Client-Bibliotheken je Sprache | – | nur das Protokoll (Doku 04) |
-| `apps/*` | BridgeControll, Browser, Dashboard | eigene Einstellungen | SDK + Knoten-Admin-API |
+| `apps/*` | BridgeControll, Browser, Dashboard | eigene Einstellungen | SDK + Knoten-Admin-API (BridgeControll v2: `bridge-node` mit `admin`, `bridge-net`, `bridge-core`, `bridge-transport` und die Bibliothek von `bin/bridge-node`, ADR 0017) |
 
 **Regeln**
 - Abhängigkeiten nur nach unten (Tabelle). Jedes Abteil ist ein eigenes Rust-Crate – der **Compiler** verbietet
@@ -56,7 +56,9 @@ services/               ein Crate pro Kern-Dienst: gateway/ watch/ names/ storag
 bin/bridge-node/        das Programm eines Knotens (eine Datei, Windows/Linux/macOS)
 sdk/                    rust/ python/ javascript/ java/ luau/
 apps/
-  bridgecontroll/       Desktop-App (Tauri: Rust + Web-Oberfläche): Netz-Assistent, Knoten & Dienste per Klick, Dashboard
+  bridgecontroll/       Desktop-App (ADR 0017: Rust-Programm, Oberfläche auf 127.0.0.1 im Browser, später Tauri-Hülle):
+                        Netz-Assistent, Beitritt per Link, ein Prozess pro Knoten mit Watchdog, Owner-Dashboard
+                        (src/ Rust, ui/ Bildschirme, design/ Design-System des Design-Claude, tests/ inkl. Playwright)
   browser/              Bridge-Browser (Web-App, läuft auf Empfänger-Websites)
 tests/                  übergreifende Tests: e2e/ (Crate bridge-tests: Abnahme + Angriffe), später chaos/
 .github/workflows/      CI: Format, Lint, Tests auf Linux + Windows, Release-Builds
@@ -64,7 +66,8 @@ tests/                  übergreifende Tests: e2e/ (Crate bridge-tests: Abnahme 
 
 ## 4. Laufzeit eines Knotens
 - Ein Knoten = ein Prozess = eine Knoten-Identität (eigener Schlüssel) + eine SQLite-Datenbank + aktivierte Dienste.
-- Ein PC kann viele Knoten haben (BridgeControll verwaltet sie). Ein Knoten kann in **mehreren Netzen** Mitglied
+- Ein PC kann viele Knoten haben (BridgeControll verwaltet sie: jeder Knoten ein eigener Prozess desselben Programms im
+  Knoten-Modus, überwacht mit Neustart und Rückzug, ADR 0017). Ein Knoten kann in **mehreren Netzen** Mitglied
   sein; Zustand ist pro Netz getrennt.
 - **Plugin-Manifest**: Name, Version, Herausgeber + Signatur, Dienst-Art, benötigte Fähigkeiten und Ressourcen,
   **Einstellungs-Schema** → BridgeControll baut daraus automatisch das Formular (ohne Programmieren).
@@ -111,7 +114,7 @@ Mehrere Anbieter → Auswahl nach Stufe, Ruf, Last (Erbe von BridgeAgent).
 | Datenbank | SQLite (rusqlite, eingebaut) | keine Installation, robust, pro Knoten |
 | Krypto | RustCrypto/dalek (`ed25519-dalek`, `x25519-dalek`, `chacha20poly1305`, `hkdf`, `sha2`, `argon2`) | geprüft, reine Rust-Bibliotheken |
 | Plugins | WebAssembly-Komponenten (wasmtime, WIT) | echte Sandbox, Plugins in vielen Sprachen schreibbar |
-| Desktop-App | **Tauri** (Rust-Kern + Web-Oberfläche) | gleicher Kern wie der Knoten, kleine Programmdatei, Design-System (HTML/CSS) weiterverwendbar |
+| Desktop-App | **Rust-Programm + Web-Oberfläche** im Standard-Browser (127.0.0.1), später **Tauri**-Hülle (ADR 0017) | gleicher Kern wie der Knoten, eine Programmdatei, Design-System (HTML/CSS) weiterverwendbar, ohne GUI-Abhängigkeiten bau- und testbar |
 | Browser | Web-App (TypeScript) | läuft in jedem Browser, auf den Empfänger-Websites |
 | SDKs | Rust, Python, JavaScript/TypeScript, Java, Luau | für jede Plattform, auf der Clients laufen |
 | Qualität | cargo test, clippy (streng), rustfmt, `#![forbid(unsafe_code)]` in allen Abteilen, cargo-deny (Lizenzen/Sicherheitslücken der Abhängigkeiten), Fuzzing für Parser | |

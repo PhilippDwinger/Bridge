@@ -461,6 +461,140 @@ pub struct AppRules {
     pub min_level: u8,
 }
 
+/// Rules of the watchers (docs/06 §11.3): optional manifest field `watch`, all times in seconds. Without the field
+/// the defaults ([`WatchRules::default`]) hold. The state checks `member_age_s`, `seal_s` and `seals_per_day`; the other
+/// fields steer the watchers and are public that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchRules {
+    /// Minimum age of a membership (and distance to the end of the last ban) for a member seal (1 s - 365 days).
+    pub member_age_s: u64,
+    /// Time between two probes of one node (1 s - 1 day).
+    pub probe_interval_s: u64,
+    /// How long a node must have passed probes, and the window of the success ratio (1 s - 30 days).
+    pub node_observe_s: u64,
+    /// Minimum share of passed probes in the window, in percent (50-100).
+    pub success_pct: u64,
+    /// Failed probes in a row until the watcher revokes its seal (1-100).
+    pub fail_limit: u64,
+    /// Longest lifetime of a watcher's seal (60 s - 90 days).
+    pub seal_s: u64,
+    /// A seal is renewed when less than this is left (1 s .. `seal_s`, exclusive).
+    pub renew_s: u64,
+    /// Seals one watcher may issue per day (1-10,000).
+    pub seals_per_day: u64,
+}
+
+impl Default for WatchRules {
+    fn default() -> Self {
+        Self {
+            member_age_s: 7 * 86_400,
+            probe_interval_s: 300,
+            node_observe_s: 86_400,
+            success_pct: 90,
+            fail_limit: 3,
+            seal_s: 30 * 86_400,
+            renew_s: 7 * 86_400,
+            seals_per_day: 1_000,
+        }
+    }
+}
+
+/// Bounds of the fields of [`WatchRules`] (inclusive), in wire order.
+const WATCH_FIELDS: [(&str, u64, u64); 8] = [
+    ("member_age_s", 1, 365 * 86_400),
+    ("probe_interval_s", 1, 86_400),
+    ("node_observe_s", 1, 30 * 86_400),
+    ("success_pct", 50, 100),
+    ("fail_limit", 1, 100),
+    ("seal_s", 60, 90 * 86_400),
+    ("renew_s", 1, 90 * 86_400),
+    ("seals_per_day", 1, 10_000),
+];
+
+/// The services a watcher may put into a level-1 seal (docs/06 §11.2): a fixed list, the manifest can not widen it.
+pub const WATCH_SERVICES: [Service; 1] = [Service::Web];
+
+impl WatchRules {
+    /// Longest lifetime of a watcher's seal in milliseconds.
+    #[must_use]
+    pub fn seal_ms(&self) -> i64 {
+        secs_to_ms(self.seal_s)
+    }
+
+    /// Minimum membership age in milliseconds.
+    #[must_use]
+    pub fn member_age_ms(&self) -> i64 {
+        secs_to_ms(self.member_age_s)
+    }
+
+    /// Renewal threshold in milliseconds.
+    #[must_use]
+    pub fn renew_ms(&self) -> i64 {
+        secs_to_ms(self.renew_s)
+    }
+
+    /// Probe interval in milliseconds.
+    #[must_use]
+    pub fn probe_interval_ms(&self) -> i64 {
+        secs_to_ms(self.probe_interval_s)
+    }
+
+    /// Observation time (and window) in milliseconds.
+    #[must_use]
+    pub fn node_observe_ms(&self) -> i64 {
+        secs_to_ms(self.node_observe_s)
+    }
+
+    fn parse(object: &Map<String, Value>) -> NetResult<Self> {
+        let names: Vec<&str> = WATCH_FIELDS.iter().map(|(name, _, _)| *name).collect();
+        let watch = sub_object(object, "watch", &names)?;
+        let mut values = [0u64; 8];
+        for (value, (name, min, max)) in values.iter_mut().zip(WATCH_FIELDS) {
+            *value = number(watch, name, min, max)?;
+        }
+        let [member_age_s, probe_interval_s, node_observe_s, success_pct, fail_limit, seal_s, renew_s, seals_per_day] =
+            values;
+        if renew_s >= seal_s {
+            return Err(NetError::format("watch.renew_s: must be below watch.seal_s"));
+        }
+        Ok(Self {
+            member_age_s,
+            probe_interval_s,
+            node_observe_s,
+            success_pct,
+            fail_limit,
+            seal_s,
+            renew_s,
+            seals_per_day,
+        })
+    }
+
+    fn to_value(self) -> Value {
+        json!({
+            "member_age_s": self.member_age_s,
+            "probe_interval_s": self.probe_interval_s,
+            "node_observe_s": self.node_observe_s,
+            "success_pct": self.success_pct,
+            "fail_limit": self.fail_limit,
+            "seal_s": self.seal_s,
+            "renew_s": self.renew_s,
+            "seals_per_day": self.seals_per_day,
+        })
+    }
+}
+
+/// Highest `watch.seals_per_day` a manifest with these limits may set: a quarter of `log_entries_per_day`, at least 1
+/// (docs/06 §11.3).
+#[must_use]
+pub fn max_watch_seals_per_day(limits: &Limits) -> u64 {
+    (limits.log_entries_per_day / 4).max(1)
+}
+
+/// Seconds (bounded by the parser) to milliseconds.
+fn secs_to_ms(secs: u64) -> i64 {
+    i64::try_from(secs).unwrap_or(i64::MAX / 1000).saturating_mul(1000)
+}
+
 /// Limits of the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -500,6 +634,8 @@ pub struct Manifest {
     pub card: KeyCard,
     /// Rules for apps (optional field `apps`, docs/07 §3; `None` = not in the body, the defaults hold).
     pub apps: Option<AppRules>,
+    /// Rules of the watchers (optional field `watch`, docs/06 §11.3; `None` = not in the body, the defaults hold).
+    pub watch: Option<WatchRules>,
 }
 
 /// Who runs and who witnesses the log: the part of a manifest that heads are checked against (docs/06 §5). Which
@@ -554,6 +690,7 @@ impl Manifest {
             limits: Limits { members: 100_000, log_entries_per_day: 10_000 },
             card: master_card,
             apps: None,
+            watch: None,
         };
         manifest.to_body()?;
         Ok(manifest)
@@ -573,6 +710,12 @@ impl Manifest {
     #[must_use]
     pub fn app_min_level(&self) -> u8 {
         self.apps.map_or(0, |apps| apps.min_level)
+    }
+
+    /// Rules of the watchers (`watch`, or the defaults without the field).
+    #[must_use]
+    pub fn watch_rules(&self) -> WatchRules {
+        self.watch.unwrap_or_default()
     }
 
     /// A copy with the version increased by one - the start of every change.
@@ -606,7 +749,7 @@ impl Body for Manifest {
 
     fn from_body(body: &Value) -> NetResult<Self> {
         let object = object(body, "manifest")?;
-        fields(object, &MANIFEST_FIELDS, &["apps"], "manifest")?;
+        fields(object, &MANIFEST_FIELDS, &["apps", "watch"], "manifest")?;
         let name = text(object, "name")?;
         check_text(name, 1, MAX_NET_NAME_CHARS, false, "name")?;
         let description = text(object, "description")?;
@@ -650,6 +793,16 @@ impl Body for Manifest {
         } else {
             None
         };
+        let watch = if object.contains_key("watch") { Some(WatchRules::parse(object)?) } else { None };
+        if let Some(watch) = &watch {
+            // One watcher's budget is at most a quarter of its pool of log entries per day (docs/06 §11.3): at least
+            // four watchers fit, and none can use up the pool for the others.
+            if watch.seals_per_day > max_watch_seals_per_day(&limits) {
+                return Err(NetError::format(
+                    "watch.seals_per_day: at most a quarter of limits.log_entries_per_day (at least 1)",
+                ));
+            }
+        }
         Ok(Self {
             name: name.to_owned(),
             description: description.to_owned(),
@@ -664,6 +817,7 @@ impl Body for Manifest {
             limits,
             card,
             apps,
+            watch,
         })
     }
 
@@ -697,6 +851,9 @@ impl Body for Manifest {
         });
         if let Some(apps) = self.apps {
             body["apps"] = json!({"min_level": apps.min_level});
+        }
+        if let Some(watch) = self.watch {
+            body["watch"] = watch.to_value();
         }
         checked::<Self>(body)
     }
@@ -1289,6 +1446,41 @@ mod tests {
         r(&with_apps, &["apps", "min_level"], Value::Null);
         r(&with_apps, &["apps", "max"], json!(1));
         r(&with_apps, &["apps"], json!(1));
+        // The optional `watch` field: exactly the eight fields, each within its bounds, renew below seal.
+        let mut with_watch = valid.clone();
+        with_watch["watch"] = WatchRules::default().to_value();
+        assert_eq!(Manifest::from_body(&with_watch)?.watch_rules(), WatchRules::default());
+        assert_eq!(Manifest::from_body(&with_watch)?.to_body()?, with_watch, "kept exactly");
+        assert_eq!(Manifest::from_body(&valid)?.watch, None, "without the field: none");
+        assert_eq!(Manifest::from_body(&valid)?.watch_rules(), WatchRules::default(), "defaults");
+        for (name, min, max) in WATCH_FIELDS {
+            r(&with_watch, &["watch", name], json!(max + 1));
+            r(&with_watch, &["watch", name], json!(min - 1));
+            r(&with_watch, &["watch", name], json!(-1));
+            r(&with_watch, &["watch", name], json!("1"));
+            r(&with_watch, &["watch", name], json!(1.5));
+            r(&with_watch, &["watch", name], Value::Null);
+        }
+        r(&with_watch, &["watch", "extra"], json!(1));
+        r(&with_watch, &["watch"], json!([]));
+        r(&with_watch, &["watch", "renew_s"], json!(WatchRules::default().seal_s));
+        // Review 8: one watcher's budget is at most a quarter of the daily log entries (10,000 → 2,500).
+        let mut quarter = with_watch.clone();
+        quarter["watch"]["seals_per_day"] = json!(2_500);
+        assert!(Manifest::from_body(&quarter).is_ok());
+        r(&with_watch, &["watch", "seals_per_day"], json!(2_501));
+        let mut tiny = quarter.clone();
+        tiny["limits"]["log_entries_per_day"] = json!(3);
+        tiny["watch"]["seals_per_day"] = json!(1);
+        assert!(Manifest::from_body(&tiny).is_ok(), "at least 1");
+        r(&tiny, &["watch", "seals_per_day"], json!(2));
+        let mut short = with_watch.clone();
+        short["watch"]["seal_s"] = json!(60);
+        short["watch"]["renew_s"] = json!(59);
+        short["watch"]["member_age_s"] = json!(1);
+        short["watch"]["probe_interval_s"] = json!(1);
+        let rules = Manifest::from_body(&short)?.watch_rules();
+        assert_eq!((rules.seal_ms(), rules.renew_ms(), rules.member_age_ms()), (60_000, 59_000, 1_000));
         // Limits at the edges are fine
         let mut edge = valid.clone();
         edge["limits"]["members"] = json!(MAX_MEMBERS_LIMIT);

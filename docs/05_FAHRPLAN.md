@@ -99,9 +99,36 @@ freigegeben).
     der Standard-Eingabe (hing in Git Bash/MSYS). Tests: `crates/bridge-net/tests/net_review6.rs` (u. a. der Testfall
     des Prüfers als dauerhafter Regressionstest), `tests/e2e/tests/phase3_review6.rs`, `sync.rs`, `mdns.rs`,
     `bridge-store` (`net.rs`).
-  - Offen: Abnahme „zwei PCs im selben WLAN“ auf echter Hardware (Paddys PCs, Windows-Firewall/Multicast),
-    LAN-Restpunkte (06 §10: Neu-Siegeln nach spätem `--lan`, keine Zertifikats-Rotation), BridgeControll v2
-    (Assistent „Neues BridgeNet“, „per Klick“), Dienst `watch` (Wächter, Stufe 1), Befehle mit den 24 Wörtern
+  - **Wächter gebaut** (06 §11, ADR 0016; Freigabe durch Paddy steht aus): Dienst `watch` (Siegel Stufe ≥ 2) vergibt
+    automatisch Stufe 1 – an Mitglieder nach Zeit ohne Sperre, an Knoten (`--probe web`, selbst Mitglied) nach
+    bestandenen Proben (`/v4/info` + Kopf, ≤ 5 s, LAN gepinnt oder `urls`); Verlängern, Abstieg per Widerruf nach
+    Fehlschlägen in Folge. `bridge-net`: Regeln im Zustand (nur Stufe 1, nur `web`, Inhaber Mitglied, Mindestalter
+    und Abstand zur letzten Sperre, Lebensdauer, Budget je Wächter und Tag, nur eigenes oder verwaistes Siegel
+    ersetzen), optionales Manifest-Feld `watch`. `bridge-node`: Wächter-Takt, Anmeldung `POST /v4/node/watch`,
+    Beitritt als Mitglied für Knoten mit `--probe`, `submit` auch für Wächter, Proben-Geschichte in SQLite (Schema 7).
+    Kommandozeile `bridge-node net watch-status`. Tests: `crates/bridge-net/tests/net_watch.rs`,
+    `tests/e2e/tests/phase3_watch.rs`, `bridge-store` (`watch.rs`). Offen: 06 §11.8.
+  - **BridgeControll v2 gebaut** (ADR 0017, `apps/bridgecontroll`; Freigabe durch Paddy steht aus): lokale Web-App
+    (Rust-Programm, Oberfläche nach den freigegebenen Entwürfen N01–N04 auf 127.0.0.1 im Browser, Tauri-Hülle später).
+    „Deine Netze“ mit Live-Status je Knoten (Prozess, `/v4/info`, Log, Kopf, Stufe und Rollen), Start/Stop,
+    Einstellungen, Protokoll, Löschen (Ordner nach `backup/`); Assistent „Neues BridgeNet“ in vier Schritten (Name und
+    Art → die 24 Wörter genau einmal, nur in der Antwort eines POST, Test mit drei Wörtern → Erreichbarkeit mit Prüfung
+    → Netz erstellt, Owner-Knoten läuft, Einladungslink mit QR-Code); „Netz beitreten“ per Link (Link geprüft:
+    Genesis bis zur Netz-ID, ID des Empfängers, LAN-Hinweis); Owner-Dashboard (Knoten mit Stufe/Rollen, Siegeln mit
+    ID-Bestätigung – Knoten dieses PCs oder Knoten-Ausweis –, Siegel entziehen, „Karte veraltet → Neu siegeln“,
+    Mitglieder mit Suche/Sperren/Entsperren, Einladungen, Apps mit Sperren, Transparenz-Log mit Beweis-Alarm, Wächter).
+    Jeder Knoten ist ein eigener Prozess desselben Programms (`bridgecontroll node --supervised`, Knoten-Läufer aus
+    `bin/bridge-node` als Bibliothek) mit Watchdog (1/2/4/8/16 s, höchstens 5 Neustarts in 10 min), sauberem Stopp
+    über die Standard-Eingabe und rotierenden Logs. Lokal Zero Trust: Sitzung per Einmal-Link + Cookie, Host- und
+    Origin-Prüfung, CSP, keine Inline-Skripte, begrenzte Bodies. Autostart mit dem PC (Windows: Datei im
+    Autostart-Ordner). Tests: `apps/bridgecontroll/tests/` (`control.rs` mit echten Knoten-Prozessen: erstellen →
+    beitreten → siegeln → Stufe sichtbar → Mitglied sperren → Siegel entziehen wirkt in Sekunden → löschen; LAN-Beitritt
+    mit totem `gw` nur über das LAN (`--ignored`); `supervision.rs`; `security.rs`), Playwright-Rauchtest
+    `tests/ui/smoke.py` mit Bildschirmfotos.
+  - Offen: Abnahme „zwei PCs im selben WLAN“ auf echter Hardware (Paddys PCs, Windows-Firewall/Multicast) – jetzt mit
+    BridgeControll v2 per Klick; BridgeControll v2: Tauri-/Tray-Hülle, Tailscale Funnel einrichten, Knoten anderer PCs
+    ohne Ausweis finden, Windows-Teile nur von der CI gebaut (ADR 0017 „Grenzen“); LAN-Restpunkte (06 §10: keine
+    Zertifikats-Rotation), Wächter-Restpunkte (06 §11.8, u. a. Bürgen), Befehle mit den 24 Wörtern
     (Admin verlängern, `cascade`), GET mit Query-Strings (Transport), Folgen über sehr große Lücken, Test mit
     mehreren Log-Führern (06 §10); Grenzen nach Prüfung 4 (06 §10: verlorener einziger Log-Führer, Wechsel nur von
     später delegierten Admins, erster Kontakt ohne Vorprüfung); Grenzen nach Prüfung 5 (06 §10: Anker beim ersten

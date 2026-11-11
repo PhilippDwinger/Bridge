@@ -1,0 +1,874 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge – UI-Kit</title>
+<!--
+  Alle freigegebenen Bausteine K01–K63 mit Markup zum Kopieren.
+  Gehört zu design/ (Design-Claude). Die Bausteine selbst stehen in components.css,
+  der <style>-Block hier ist nur für diese Übersichtsseite (k-… und Vorführ-Animationen).
+-->
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+<style>
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-body); }
+  .k-top { max-width: 1280px; margin: 0 auto; padding: 40px 52px 8px; box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center; gap: 18px 28px; }
+  .k-top h1 { margin: 0; font-family: var(--font-display); font-size: 40px; font-weight: 600; letter-spacing: -0.03em; }
+  .k-top nav { display: flex; flex-wrap: wrap; gap: 6px; }
+  .k-top nav a { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--text-2); font-size: 14px; text-decoration: none; }
+  .k-top nav a:hover { color: var(--accent-text); border-color: var(--bridge-blue-300); }
+  .k-sec { max-width: 1280px; margin: 0 auto; padding: 44px 52px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px; border-top: 1px solid var(--line); }
+  .k-card { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 18px 20px 22px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .k-label { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+  .k-nr { color: var(--accent-text); font-weight: 500; }
+  .k-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .k-cap { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .k-state { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .k-stage { flex: 1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+  .cap { font-family: var(--font-mono); font-size: 11px; color: var(--muted); width: 118px; flex: none; }
+  @media (max-width: 900px) { .k-sec [style*="grid-template-columns"] { grid-template-columns: 1fr !important; } .k-sec [style*="grid-column: span"] { grid-column: auto !important; } .k-sec { padding: 28px 16px; } .k-top { padding: 28px 16px 8px; } .m-row, .b-roll { grid-template-columns: 1fr; } .m-track { max-width: 280px; } .k-row { flex-wrap: wrap; } .b-steps { flex-wrap: wrap; row-gap: 16px; } }
+
+  /* erzwungene Zustände für K08 / K11 / K15 */
+  .b-btn--primary.is-hover { background: var(--bridge-blue-600); box-shadow: 0 8px 20px rgba(51,105,255,.32); transform: translateY(-1px); }
+  .b-btn.is-active { transform: translateY(1px) scale(.98); }
+  .b-btn.is-focus { outline: none; box-shadow: var(--focus-ring); }
+  .b-go.is-hover { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .b-go.is-hover svg { transform: translateX(3px); }
+  .b-input.is-focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(51,105,255,.16); }
+
+  /* Vorführung: Dialog im Fluss statt über der Seite, Tooltip dauerhaft sichtbar, Schleifen */
+  .k-dialog-demo { position: relative; border-radius: 14px; background: rgba(14,26,51,.45); padding: 22px 16px; display: flex; justify-content: center; }
+  .k-dialog-demo .b-dialog { max-width: 340px; }
+  .k-card .b-tip__bubble { opacity: 1; transform: translate(-50%, 0); }
+  .k-card .b-saved { animation: b-saved 2.8s ease infinite; }
+  .k-card .b-log__line.is-new { animation-duration: 3s; animation-iteration-count: infinite; }
+  .k-grow { animation: k-grow 4s var(--ease-out) infinite; }
+  @keyframes k-grow { 0% { width: 8%; } 85%, 100% { width: 92%; } }
+
+  /* K45 Splash-Vorführung */
+  .l-splash { width: 100%; height: 190px; border-radius: 14px; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; overflow: hidden; }
+  .l-splash svg { animation: l-drop 3.2s var(--ease-spring) infinite; transform-origin: 50% 80%; }
+  .l-splash span { font-size: 13px; color: var(--muted); animation: l-fade 3.2s ease infinite; }
+  @keyframes l-drop { 0% { transform: translateY(-70px) rotate(-24deg); opacity: 0; } 18% { opacity: 1; } 30%, 85% { transform: none; opacity: 1; } 100% { opacity: 0; } }
+  @keyframes l-fade { 0%, 30% { opacity: 0; } 42%, 85% { opacity: 1; } 100% { opacity: 0; } }
+
+  /* K48 Toast-Vorführung */
+  .t-stage { position: relative; height: 210px; border-radius: 14px; background: var(--bg); border: 1px dashed var(--line); overflow: hidden; }
+  .t-fly { position: absolute; right: 14px; bottom: 14px; width: 260px; animation: t-fly 4.2s var(--ease-out) infinite; }
+  @keyframes t-fly { 0% { transform: translateY(120%); opacity: 0; } 12%, 72% { transform: none; opacity: 1; } 86%, 100% { transform: translateX(110%); opacity: 0; } }
+  .t-fly .t-bar { position: absolute; left: 14px; right: 14px; bottom: 6px; height: 3px; border-radius: 2px; background: var(--bridge-blue-100); overflow: hidden; }
+  .t-fly .t-bar span { display: block; height: 100%; background: var(--accent); transform-origin: left; animation: t-timer 4.2s linear infinite; }
+  @keyframes t-timer { 0%, 12% { transform: scaleX(1); } 72%, 100% { transform: scaleX(0); } }
+
+  /* K56–K62 Bewegungs-Vorführungen */
+  .m-row { display: grid; grid-template-columns: 150px 280px minmax(0, 1fr); gap: 16px; align-items: center; font-size: 14px; }
+  .m-row b { font-family: var(--font-mono); font-weight: 500; font-size: 13px; }
+  .m-row span.d { color: var(--text-2); }
+  .m-track { position: relative; height: 28px; border-radius: 14px; background: var(--track); }
+  .m-dot { position: absolute; left: 4px; top: 4px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); }
+  @keyframes m-t120 { 0% { transform: translateX(0); } 6%, 50% { transform: translateX(252px); } 56%, 100% { transform: translateX(0); } }
+  @keyframes m-t200 { 0% { transform: translateX(0); } 10%, 50% { transform: translateX(252px); } 60%, 100% { transform: translateX(0); } }
+  @keyframes m-t320 { 0% { transform: translateX(0); } 16%, 50% { transform: translateX(252px); } 66%, 100% { transform: translateX(0); } }
+  @keyframes m-t600 { 0% { transform: translateX(0); } 30%, 50% { transform: translateX(252px); } 80%, 100% { transform: translateX(0); } }
+  @keyframes m-go { from { transform: translateX(0); } to { transform: translateX(252px); } }
+  .m-list a { position: relative; display: flex; align-items: center; gap: 14px; padding: 10px 6px; border-bottom: 1px solid var(--line); overflow: hidden; color: var(--text); text-decoration: none; }
+  .m-list a::before { content: ""; position: absolute; inset: 0; background: var(--bridge-blue-50); transform: scaleX(0); transform-origin: left; transition: transform var(--dur-3) var(--ease-out); z-index: 0; }
+  .m-list a > * { position: relative; z-index: 1; }
+  .m-list a:hover::before { transform: scaleX(1); }
+  .m-list .nr { font-family: var(--font-mono); font-size: 12px; color: var(--muted); width: 22px; }
+  .m-list .nm { flex: 1; font-family: var(--font-display); font-size: 22px; font-weight: 600; letter-spacing: -0.02em; transition: color var(--dur-2); }
+  .m-list .go { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; justify-content: center; color: var(--muted); transition: background-color var(--dur-2), color var(--dur-2), border-color var(--dur-2); }
+  .m-list .go svg { width: 14px; height: 14px; transition: transform var(--dur-2) var(--ease-out); }
+  .m-list a:hover .nm { color: var(--accent-text); }
+  .m-list a:hover .go { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .m-list a:hover .go svg { transform: translateX(3px); }
+  .m-frame { position: relative; height: 210px; border-radius: 14px; border: 1px solid var(--line); background: var(--bg); overflow: hidden; }
+  .m-page { position: absolute; inset: 0; padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; }
+  .m-page--a { animation: m-out 4.4s var(--ease-io) infinite; }
+  .m-page--b { background: var(--surface); animation: m-in 4.4s var(--ease-io) infinite; }
+  @keyframes m-out { 0%, 35% { transform: none; opacity: 1; } 55%, 90% { transform: translateX(-30%); opacity: 0; } 100% { transform: none; opacity: 1; } }
+  @keyframes m-in { 0%, 35% { transform: translateX(100%); } 55%, 90% { transform: none; } 100% { transform: translateX(100%); } }
+  .m-bar { height: 12px; border-radius: 6px; background: #E1E7F0; }
+  .b-wiggle { cursor: pointer; }
+  .m-auto { animation: m-wiggle-loop 3s var(--ease-out) infinite; }
+  @keyframes m-wiggle-loop { 0%, 62% { transform: rotate(0); } 70% { transform: rotate(7deg) scale(1.06); } 80% { transform: rotate(-5deg); } 90% { transform: rotate(2deg); } 100% { transform: rotate(0); } }
+  .m-key { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 9px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 3px 0 #C9D2E0; font-family: var(--font-mono); font-size: 16px; font-weight: 500; animation: m-press 3s ease infinite; }
+  @keyframes m-press { 0%, 18% { transform: none; box-shadow: 0 3px 0 #C9D2E0; } 22%, 30% { transform: translateY(3px); box-shadow: 0 0 0 #C9D2E0; background: var(--bridge-blue-50); } 36%, 100% { transform: none; box-shadow: 0 3px 0 #C9D2E0; } }
+  .m-flash { animation: m-flash 3s ease infinite; }
+  @keyframes m-flash { 0%, 22% { background: transparent; } 28% { background: var(--bridge-blue-100); } 70%, 100% { background: transparent; } }
+  .m-flash .nm { animation: m-flash-c 3s ease infinite; }
+  @keyframes m-flash-c { 0%, 22% { color: var(--text); } 28%, 70% { color: var(--accent-text); } 100% { color: var(--text); } }
+</style>
+</head>
+<body>
+<header class="k-top">
+  <img src="../logo/bridge-wortmarke.svg" alt="Bridge" width="120" style="filter: var(--shadow-logo)">
+  <div style="display: flex; flex-direction: column; gap: 6px">
+    <h1>UI-Kit</h1>
+    <span style="font-family: var(--font-mono); font-size: 13px; color: var(--muted)">K01–K63 · freigegeben 01.11.2026 · Klassen in components.css</span>
+  </div>
+  <nav aria-label="Abschnitte">
+    <a href="#knoepfe">Knöpfe</a><a href="#eingaben">Eingaben</a><a href="#status">Status</a><a href="#laden">Laden</a><a href="#feedback">Rückmeldungen</a><a href="#bewegung">Bewegung</a><a href="hosting.html">Hosting →</a>
+  </nav>
+</header>
+<main>
+
+<section class="k-sec" id="knoepfe">
+
+  <div style="display: flex; align-items: baseline; gap: 14px">
+    <h1 style="margin: 0; font-family: 'Sora', sans-serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em">Knöpfe</h1>
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #56657F">K01–K14 · mit Hover und Klick</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px">
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K01</span> · Primär</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--primary"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>Starten</button>
+        <button class="b-btn b-btn--primary">Speichern</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K02</span> · Sekundär</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--secondary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v7h-7"></path></svg>Neustart</button>
+        <button class="b-btn b-btn--secondary">Abbrechen</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K03</span> · Ghost</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--ghost">Details</button>
+        <button class="b-btn b-btn--ghost">Alle anzeigen<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K04</span> · Gefahr</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--danger"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>Stoppen</button>
+        <button class="b-btn b-btn--danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg>Löschen</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K05</span> · Dunkel</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--dark"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>Stoppen</button>
+        <button class="b-btn b-btn--dark">Alle stoppen</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K06</span> · Sticker (wie das Logo)</span>
+      <div class="k-row" style="padding: 4px 0 2px 6px">
+        <button class="b-btn b-btn--sticker"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Server hinzufügen</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K07</span> · Größen S · M · L</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--primary b-btn--sm">Klein</button>
+        <button class="b-btn b-btn--primary">Mittel</button>
+        <button class="b-btn b-btn--primary b-btn--lg">Groß</button>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 2">
+      <span class="k-label"><span class="k-nr">K08</span> · Zustände</span>
+      <div class="k-row" style="gap: 22px">
+        <div class="k-state"><button class="b-btn b-btn--primary">Starten</button><span class="k-cap">normal</span></div>
+        <div class="k-state"><button class="b-btn b-btn--primary is-hover">Starten</button><span class="k-cap">hover</span></div>
+        <div class="k-state"><button class="b-btn b-btn--primary is-active">Starten</button><span class="k-cap">gedrückt</span></div>
+        <div class="k-state"><button class="b-btn b-btn--primary is-focus">Starten</button><span class="k-cap">Tastatur-Fokus</span></div>
+        <div class="k-state"><button class="b-btn b-btn--primary" disabled>Starten</button><span class="k-cap">gesperrt</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K09</span> · Lädt</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--primary" aria-busy="true"><span class="b-spin"></span>Startet …</button>
+        <button class="b-btn b-btn--progress" aria-busy="true" style="--progress: .62"><span>Update läuft</span></button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K10</span> · Icon-Knöpfe</span>
+      <div class="k-row">
+        <button class="b-icon" aria-label="Kopieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"></path></svg></button>
+        <button class="b-icon" aria-label="Neu prüfen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v7h-7"></path></svg></button>
+        <button class="b-icon" aria-label="Im Browser öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"></path><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"></path></svg></button>
+        <button class="b-icon" aria-label="Mehr"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg></button>
+        <button class="b-icon b-icon--plain" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg></button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K11</span> · Runder Pfeil (aus der Startliste)</span>
+      <div class="k-row" style="gap: 22px">
+        <div class="k-state"><button class="b-go" aria-label="Öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></button><span class="k-cap">normal</span></div>
+        <div class="k-state"><button class="b-go is-hover" aria-label="Öffnen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></button><span class="k-cap">hover</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K12</span> · Update mit Hinweis-Punkt</span>
+      <div class="k-row">
+        <button class="b-btn b-btn--secondary b-dot-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>Update</button>
+        <button class="b-btn b-btn--primary b-dot-badge">Auf c3f9e21 updaten</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K13</span> · Start/Stop-Schalter </span>
+      <div class="k-row" style="gap: 16px">
+        
+          <button class="b-power b-power--on" aria-label="Server stoppen"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"></rect></svg></button>
+          <span style="display: flex; flex-direction: column"><span style="font-weight: 600">Läuft</span><span class="k-cap">klick = stoppen</span></span>
+        
+        
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K14</span> · Knopfgruppe pro Server</span>
+      <div class="k-row">
+        <div class="b-group" role="group" aria-label="Server-Aktionen">
+          <button><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>Stop</button>
+          <button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v7h-7"></path></svg>Neustart</button>
+          <button aria-label="Mehr"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg></button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section class="k-sec" id="eingaben">
+
+  <div style="display: flex; align-items: baseline; gap: 14px">
+    <h1 style="margin: 0; font-family: 'Sora', sans-serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em">Eingaben &amp; Schalter</h1>
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #56657F">K15–K27 · bedienbar</span>
+  </div>
+
+  <div style="display: flex; gap: 18px; align-items: flex-start">
+
+    <div style="flex: 2 1 0; min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px">
+
+      <div class="k-card" style="grid-column: span 2">
+        <span class="k-label"><span class="k-nr">K15</span> · Textfeld: normal · Fokus · Fehler · gesperrt</span>
+        <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px">
+          <div class="b-field"><label for="k15a">Name</label><input id="k15a" class="b-input" placeholder="z. B. grove"></div>
+          <div class="b-field"><label for="k15b">Name</label><input id="k15b" class="b-input is-focus" value="grove"></div>
+          <div class="b-field"><label for="k15c">Port</label><input id="k15c" class="b-input is-error" value="8080" aria-invalid="true"><span class="b-hint b-hint--err"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v6M12 16.5v.5"></path></svg>Port 8080 ist schon belegt</span></div>
+          <div class="b-field"><label for="k15d">Branch</label><input id="k15d" class="b-input" value="bridge-3" disabled></div>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K16</span> · Passwort</span>
+        <div class="b-field">
+          <label for="k16">Admin-Passwort</label>
+          <div class="b-wrap">
+            <input id="k16" type="password" class="mono" value="kranich-teich-47">
+            <button class="b-in-icon" aria-label="Anzeigen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+            <button class="b-in-icon" aria-label="Neues Passwort würfeln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"></rect><circle cx="9" cy="9" r="1.2" fill="currentColor"></circle><circle cx="15" cy="15" r="1.2" fill="currentColor"></circle><circle cx="15" cy="9" r="1.2" fill="currentColor"></circle><circle cx="9" cy="15" r="1.2" fill="currentColor"></circle></svg></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K17</span> · Port-Zähler</span>
+        <div class="b-field">
+          <label for="k17">Port</label>
+          <div class="b-wrap" style="width: 200px">
+            <button class="b-step" aria-label="Port minus 1">−</button>
+            <input id="k17" class="mono" style="text-align: center" value="8080" readonly>
+            <button class="b-step" aria-label="Port plus 1">+</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K18</span> · Adresse mit Vor- und Nachsatz</span>
+        <div class="b-field">
+          <label for="k18">Öffentliche Adresse</label>
+          <div class="b-wrap">
+            <span class="b-affix">https://</span>
+            <input id="k18" class="mono" value="paddy-pc">
+            <span class="b-affix">.…ts.net</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K19</span> · Suche</span>
+        <div class="b-wrap" style="margin-top: 22px">
+          <span class="b-in-icon" aria-hidden="true" style="cursor: default"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg></span>
+          <input aria-label="Suchen" placeholder="Server oder Bereich suchen" style="padding-left: 0">
+          <span class="b-kbd">Strg K</span>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K20</span> · Schalter</span>
+        <div style="display: flex; flex-direction: column; gap: 14px">
+          <label class="b-switch"><input type="checkbox" checked><span class="b-switch__track"><span class="b-switch__knob"></span></span>Autostart</label>
+          <label class="b-switch"><input type="checkbox"><span class="b-switch__track"><span class="b-switch__knob"></span></span>Proxy vertrauen</label>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K21</span> · Checkbox (Haken zeichnet sich)</span>
+        <div style="display: flex; flex-direction: column; gap: 14px">
+          <label class="b-check"><input type="checkbox" checked><span class="b-check__box"><svg viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>Vor dem Update sichern</label>
+          <label class="b-check"><input type="checkbox"><span class="b-check__box"><svg viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>Alle Server einschließen</label>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K22</span> · Auswahlpunkte</span>
+        <div style="display: flex; flex-direction: column; gap: 14px" role="radiogroup" aria-label="Update-Art">
+          <label class="b-radio"><input type="radio" name="k22" checked><span class="b-radio__dot"></span>Einzeln updaten</label>
+          <label class="b-radio"><input type="radio" name="k22"><span class="b-radio__dot"></span>Alle rollend updaten</label>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K23</span> · Umschalter: Erreichbarkeit</span>
+        <div class="b-seg" role="radiogroup" aria-label="Erreichbarkeit">
+          <label><input type="radio" name="k23"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"></rect><path d="M8 21h8"></path></svg>Nur lokal</span></label>
+          <label><input type="radio" name="k23" checked><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path></svg>Tailscale Funnel</span></label>
+        </div>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K24</span> · Umschalter klein: Funnel-Port</span>
+        <div class="b-seg b-seg--sm" role="radiogroup" aria-label="Funnel-Port">
+          <label><input type="radio" name="k24"><span>443</span></label>
+          <label><input type="radio" name="k24" checked><span>8443</span></label>
+          <label><input type="radio" name="k24"><span>10000</span></label>
+        </div>
+        <span class="b-hint">Tailscale erlaubt pro PC nur diese drei.</span>
+      </div>
+
+      <div class="k-card">
+        <span class="k-label"><span class="k-nr">K25</span> · Auswahl</span>
+        <div class="b-field">
+          <label for="k25">Branch</label>
+          <div class="b-selectwrap">
+            <select id="k25" class="b-input"><option>bridge-3</option><option>main</option></select>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="k-card" style="grid-column: span 2">
+        <span class="k-label"><span class="k-nr">K26</span> · Kopierfeld</span>
+        <div class="b-copy">
+          <span class="b-copy__val">https://paddy-pc.dein-tailnet.ts.net</span>
+          
+          
+            <button class="b-copy__btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"></path></svg>Kopieren</button>
+          
+        </div>
+      </div>
+
+    </div>
+
+    <div class="k-card" style="flex: 1 1 0; padding: 0; overflow: hidden; box-shadow: 0 18px 40px rgba(14,26,51,.10)">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 0">
+        <span class="k-label"><span class="k-nr">K27</span> · Formular</span>
+      </div>
+      <div style="padding: 4px 22px 0; display: flex; flex-direction: column; gap: 4px">
+        <h2 style="margin: 0; font-family: 'Sora', sans-serif; font-size: 24px; font-weight: 600; letter-spacing: -0.02em">Server hinzufügen</h2>
+        <span style="font-size: 14px; color: #36435C">Läuft auf diesem PC, von außen erreichbar.</span>
+      </div>
+      <div style="padding: 18px 22px; display: flex; flex-direction: column; gap: 16px">
+        <div class="b-field"><label for="k27n">Name</label><input id="k27n" class="b-input" value="grove"></div>
+        <div style="display: flex; gap: 12px">
+          <div class="b-field" style="flex: 1"><label for="k27p">Port</label><div class="b-wrap"><button class="b-step" aria-label="minus">−</button><input id="k27p" class="mono" style="text-align: center" value="8081"><button class="b-step" aria-label="plus">+</button></div></div>
+          <div class="b-field" style="flex: 1"><label for="k27b">Branch</label><div class="b-selectwrap"><select id="k27b" class="b-input"><option>bridge-3</option></select><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></div></div>
+        </div>
+        <div class="b-field">
+          <span class="b-flabel">Erreichbarkeit</span>
+          <div class="b-seg" role="radiogroup" aria-label="Erreichbarkeit" style="width: 100%; box-sizing: border-box">
+            <label style="flex: 1"><input type="radio" name="k27e"><span style="justify-content: center">Nur lokal</span></label>
+            <label style="flex: 1"><input type="radio" name="k27e" checked><span style="justify-content: center">Tailscale Funnel</span></label>
+          </div>
+        </div>
+        <div class="b-field">
+          <span class="b-flabel">Funnel-Port</span>
+          <div class="b-seg b-seg--sm" role="radiogroup" aria-label="Funnel-Port">
+            <label><input type="radio" name="k27f"><span>443</span></label>
+            <label><input type="radio" name="k27f" checked><span>8443</span></label>
+            <label><input type="radio" name="k27f"><span>10000</span></label>
+          </div>
+        </div>
+        <div class="b-field">
+          <label for="k27pw">Admin-Passwort</label>
+          <div class="b-wrap"><input id="k27pw" class="mono" value="kranich-teich-47"><button class="b-in-icon" aria-label="Kopieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"></path></svg></button></div>
+          <span class="b-hint">Wird gespeichert und danach nicht mehr angezeigt.</span>
+        </div>
+        <label class="b-switch"><input type="checkbox" checked><span class="b-switch__track"><span class="b-switch__knob"></span></span>Beim App-Start mitstarten</label>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; padding: 16px 22px; background: #F7F8FB; border-top: 1px solid #D5DCE8">
+        <button class="b-btn b-btn--secondary">Abbrechen</button>
+        <button class="b-btn b-btn--primary">Server anlegen</button>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section class="k-sec" id="status">
+
+  <div style="display: flex; align-items: baseline; gap: 14px">
+    <h1 style="margin: 0; font-family: 'Sora', sans-serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em">Status &amp; Badges</h1>
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #56657F">K28–K36 · Zustände aus /api/servers</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px">
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K28</span> · Server-Zustand</span>
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <div class="k-row"><span class="cap">ready=true</span><span class="b-pill b-pill--ok"><span class="b-pill__dot b-pill__dot--live"></span>Läuft</span></div>
+        <div class="k-row"><span class="cap">running, !ready</span><span class="b-pill b-pill--info"><span class="b-pill__spin"></span>Startet …</span><span class="b-pill b-pill--warn"><span class="b-pill__spin"></span>Holt Daten von Partnern</span></div>
+        <div class="k-row"><span class="cap">wird gestoppt</span><span class="b-pill b-pill--neutral"><span class="b-pill__spin"></span>Stoppt …</span></div>
+        <div class="k-row"><span class="cap">running=false</span><span class="b-pill b-pill--neutral"><span class="b-pill__dot b-pill__dot--hollow"></span>Aus</span></div>
+        <div class="k-row"><span class="cap">Absturz</span><span class="b-pill b-pill--err"><span class="b-pill__dot b-pill__dot--square"></span>Abgestürzt</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K30</span> · Version (git)</span>
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <div class="k-row"><span class="cap">up_to_date</span><span class="b-pill b-pill--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>Aktuell</span><span class="b-chip">b451413</span></div>
+        <div class="k-row"><span class="cap">behind &gt; 0</span><span class="b-pill b-pill--warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>3 hinter</span><span class="b-chip">b451413 → c3f9e21</span></div>
+        <div class="k-row"><span class="cap">Update läuft</span><span class="b-pill b-pill--info"><span class="b-pill__spin"></span>Aktualisiert auf c3f9e21</span></div>
+        <div class="k-row"><span class="cap">git.error</span><span class="b-pill b-pill--err"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 7v6M12 16.5v.5"></path><circle cx="12" cy="12" r="9"></circle></svg>Git nicht erreichbar</span></div>
+        <div class="k-row"><span class="cap">!git.present</span><span class="b-pill b-pill--neutral">Kein Git-Stand</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K32</span> · Erreichbarkeit (Tunnel)</span>
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <div class="k-row"><span class="cap">tailscale, an</span><span class="b-pill b-pill--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path></svg>Öffentlich</span><span class="b-chip">paddy-pc.…ts.net:8443</span></div>
+        <div class="k-row"><span class="cap">tailscale, baut auf</span><span class="b-pill b-pill--info"><span class="b-pill__spin"></span>Tunnel baut auf</span></div>
+        <div class="k-row"><span class="cap">expose=none</span><span class="b-pill b-pill--neutral"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"></rect><path d="M8 21h8"></path></svg>Nur lokal</span></div>
+        <div class="k-row"><span class="cap">public_url manuell</span><span class="b-pill b-pill--neutral"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"></path><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"></path></svg>Eigene Adresse</span></div>
+        <div class="k-row"><span class="cap">Tailscale fehlt</span><span class="b-pill b-pill--warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 7v6M12 16.5v.5"></path><circle cx="12" cy="12" r="9"></circle></svg>Tailscale nicht installiert</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K33</span> · Vertrauen zu anderen Servern</span>
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <div class="k-row"><span class="cap">beidseitig</span><span class="b-pill b-pill--ok"><span class="b-pill__dot"></span>Verbunden</span></div>
+        <div class="k-row"><span class="cap">nur hier eingetragen</span><span class="b-pill b-pill--warn"><span class="b-pill__dot b-pill__dot--hollow"></span>Wartet auf Gegenseite</span></div>
+        <div class="k-row"><span class="cap">weg</span><span class="b-pill b-pill--err"><span class="b-pill__dot b-pill__dot--square"></span>Nicht erreichbar</span></div>
+        <div class="k-row"><span class="cap">hält Backup</span><span class="b-pill b-pill--info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6z"></path></svg>Hält dein Backup</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K29</span> · Live-Punkt</span>
+      <div class="k-row" style="gap: 26px">
+        <span style="display: inline-flex; align-items: center; gap: 10px"><span class="b-live b-live--ok"></span>läuft</span>
+        <span style="display: inline-flex; align-items: center; gap: 10px"><span class="b-live b-live--blue"></span>live</span>
+        <span style="display: inline-flex; align-items: center; gap: 10px"><span class="b-live b-live--amber"></span>Update da</span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K31</span> · Commit &amp; Branch</span>
+      <div class="k-row">
+        <span class="b-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3.5"></circle><path d="M3 12h5.5M15.5 12H21"></path></svg>b451413</span>
+        <span class="b-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><circle cx="18" cy="8" r="2.5"></circle><path d="M6 8.5v7M18 10.5c0 4-6 3-11 5.5"></path></svg>bridge-3</span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K34</span> · Zähler</span>
+      <div class="k-row" style="gap: 22px">
+        <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 500">Server <span class="b-count b-count--soft">4</span></span>
+        <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 500">Updates <span class="b-count b-count--amber">1</span></span>
+        <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 500">Neu <span class="b-count b-count--blue">12</span></span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K36</span> · Eckdaten-Tags</span>
+      <div class="k-row">
+        <span class="b-chip">Port 8081</span>
+        <span class="b-chip">Funnel 8443</span>
+        <span class="b-chip">bridge-3</span>
+        <span class="b-chip">Autostart</span>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 2">
+      <span class="k-label"><span class="k-nr">K35</span> · Kennzahlen-Leiste</span>
+      <div style="display: flex; gap: 12px">
+        <div class="b-stat"><span class="b-stat__val">4</span><span class="b-stat__lbl">Server</span></div>
+        <div class="b-stat"><span class="b-stat__val" style="color: #0B7A54">2</span><span class="b-stat__lbl">laufen</span></div>
+        <div class="b-stat"><span class="b-stat__val" style="color: #9A5B00">1</span><span class="b-stat__lbl">Update verfügbar</span></div>
+        <div class="b-stat"><span class="b-stat__val">3</span><span class="b-stat__lbl">öffentlich erreichbar</span></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section class="k-sec" id="laden">
+
+  <div style="display: flex; align-items: baseline; gap: 14px">
+    <h1 style="margin: 0; font-family: 'Sora', sans-serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em">Laden &amp; Fortschritt</h1>
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #56657F">K37–K46 · alles animiert</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px">
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K37</span> · Bogen-Loader (Logo zeichnet sich)</span>
+      <div class="k-stage">
+        <svg class="b-loader-arch" viewBox="0 0 48 48" role="img" aria-label="Lädt"><path class="b-loader-arch__arc" pathLength="100" d="M8 35C11 17 33 17 36 35"></path><path class="b-loader-arch__deck" pathLength="100" d="M6 35h32"></path><circle class="b-loader-arch__dot" cx="38" cy="12" r="3.6"></circle></svg>
+        <span class="k-cap">Verbindet …</span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K38</span> · Trittsteine-Loader</span>
+      <div class="k-stage">
+        <div class="b-stones" role="img" aria-label="Lädt">
+          <i style="left: 0; top: 34px; animation-delay: 0s"></i>
+          <i style="left: 26px; top: 18px; animation-delay: .12s"></i>
+          <i style="left: 54px; top: 12px; animation-delay: .24s"></i>
+          <i style="left: 82px; top: 18px; animation-delay: .36s"></i>
+          <i style="left: 108px; top: 34px; animation-delay: .48s"></i>
+        </div>
+        <span class="k-cap">Sucht Partner …</span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K45</span> · Start-Splash (App öffnet)</span>
+      <div class="l-splash">
+        <svg width="130" height="108" viewBox="0 0 58 48" role="img" aria-label="Bridge" style="filter: drop-shadow(0 4px 4px rgba(12,24,56,.25))"><text x="29" y="33" text-anchor="middle" transform="rotate(-8 29 26)" font-family="Sora, sans-serif" font-weight="700" font-size="26" letter-spacing="-1.2" fill="#3369FF" stroke="#FFFFFF" stroke-width="4.6" stroke-linejoin="round" paint-order="stroke">br.</text></svg>
+        <span>BridgeControll startet …</span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K39</span> · Ring (für Knöpfe und Zeilen)</span>
+      <div style="display: flex; align-items: center; gap: 28px; height: 70px">
+        <span class="b-ring" style="width: 16px; height: 16px; border-width: 2px" role="img" aria-label="Lädt"></span>
+        <span class="b-ring" style="width: 24px; height: 24px" role="img" aria-label="Lädt"></span>
+        <span class="b-ring" style="width: 36px; height: 36px; border-width: 4px" role="img" aria-label="Lädt"></span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K40</span> · Balken ohne Ende</span>
+      <div style="display: flex; flex-direction: column; gap: 10px; justify-content: center; height: 70px">
+        <div class="b-barhead"><span>Prüft Git …</span></div>
+        <div class="b-bar" role="progressbar" aria-label="Prüft Git"><span class="b-bar__run"></span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K41</span> · Balken mit Prozent</span>
+      <div style="display: flex; flex-direction: column; gap: 10px; justify-content: center; height: 70px">
+        <div class="b-barhead"><span>Holt c3f9e21</span><b>62 %</b></div>
+        <div class="b-bar" role="progressbar" aria-valuenow="62" aria-valuemin="0" aria-valuemax="100" aria-label="Holt c3f9e21"><span class="b-bar__fill" style="width: 62%"></span></div>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 2">
+      <span class="k-label"><span class="k-nr">K42</span> · Update-Schritte</span>
+      <div class="b-steps" style="padding: 10px 0 6px">
+        <div class="b-step-i is-done"><span class="b-step-i__dot"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>Backup sichern</div>
+        <div class="b-step-i is-done"><span class="b-step-i__dot"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>Partner hält Daten</div>
+        <div class="b-step-i is-now"><span class="b-step-i__dot"><span class="b-spin b-spin--blue"></span></span>Code holen</div>
+        <div class="b-step-i"><span class="b-step-i__dot">4</span>Neustart</div>
+        <div class="b-step-i"><span class="b-step-i__dot">5</span>Daten zurück</div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K44</span> · Platzhalter beim Laden</span>
+      <div class="b-skel" aria-hidden="true">
+        <div class="b-skel__row"><span class="b-sh" style="width: 24px; height: 12px"></span><span class="b-sh" style="width: 140px; height: 26px"></span><span style="flex: 1"></span><span class="b-sh" style="width: 40px; height: 40px; border-radius: 50%"></span></div>
+        <div class="b-skel__row"><span class="b-sh" style="width: 24px; height: 12px"></span><span class="b-sh" style="width: 110px; height: 26px"></span><span style="flex: 1"></span><span class="b-sh" style="width: 40px; height: 40px; border-radius: 50%"></span></div>
+        <div class="b-skel__row"><span class="b-sh" style="width: 24px; height: 12px"></span><span class="b-sh" style="width: 160px; height: 26px"></span><span style="flex: 1"></span><span class="b-sh" style="width: 40px; height: 40px; border-radius: 50%"></span></div>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 2">
+      <span class="k-label"><span class="k-nr">K43</span> · Alle rollend updaten</span>
+      <div class="b-roll">
+        <span class="b-roll__name">haupt</span>
+        <div class="b-bar"><span class="b-bar__fill" style="width: 100%; animation: none; background-image: none; background-color: #0B7A54"></span></div>
+        <span class="b-roll__state b-roll__state--ok">Fertig · wieder oben</span>
+        <span class="b-roll__name">grove</span>
+        <div class="b-bar"><span class="b-bar__fill k-grow"></span></div>
+        <span class="b-roll__state b-roll__state--now">Läuft gerade</span>
+        <span class="b-roll__name">spielwiese</span>
+        <div class="b-bar"></div>
+        <span class="b-roll__state">Wartet auf grove</span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K46</span> · Server startet</span>
+      <div style="display: flex; flex-direction: column; gap: 12px">
+        <span style="font-family: 'Sora', sans-serif; font-size: 22px; font-weight: 600; letter-spacing: -0.02em">grove</span>
+        <div class="b-checkrow"><span class="b-checkrow__ic b-checkrow__ic--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>Prozess läuft</div>
+        <div class="b-checkrow"><span class="b-spin b-spin--blue" style="width: 20px; height: 20px"></span><span style="color: #2152E6; font-weight: 600">Holt Daten von Partnern …</span></div>
+        <div class="b-checkrow"><span class="b-checkrow__ic b-checkrow__ic--wait"></span>Tunnel öffnen</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section class="k-sec" id="feedback">
+
+  <div style="display: flex; align-items: baseline; gap: 14px">
+    <h1 style="margin: 0; font-family: 'Sora', sans-serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em">Rückmeldungen</h1>
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #56657F">K47–K55 · Toasts, Dialoge, leere Zustände</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start">
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K47</span> · Toasts</span>
+      <div class="b-toast" role="status">
+        <span class="b-toast__ic" style="background: #E3F5EC; color: #0B7A54"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>
+        <span class="b-toast__body"><span class="b-toast__title">grove läuft</span><span class="b-toast__text">Erreichbar unter paddy-pc.…ts.net:8443</span></span>
+        <button class="b-toast__x" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg></button>
+      </div>
+      <div class="b-toast" role="status">
+        <span class="b-toast__ic" style="background: #FFF1DB; color: #9A5B00"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg></span>
+        <span class="b-toast__body"><span class="b-toast__title">Update verfügbar</span><span class="b-toast__text">3 neue Commits auf bridge-3</span><span style="padding-top: 6px"><button class="b-btn b-btn--secondary b-btn--sm">Jetzt updaten</button></span></span>
+        <button class="b-toast__x" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg></button>
+      </div>
+      <div class="b-toast" role="alert">
+        <span class="b-toast__ic" style="background: #FBE6E8; color: #A8242E"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 7v6M12 16.5v.5"></path></svg></span>
+        <span class="b-toast__body"><span class="b-toast__title">Start fehlgeschlagen</span><span class="b-toast__text">Port 8080 ist schon belegt.</span><span style="padding-top: 6px"><button class="b-btn b-btn--secondary b-btn--sm">Port ändern</button></span></span>
+        <button class="b-toast__x" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg></button>
+      </div>
+      <div class="b-toast b-toast--dark" role="status">
+        <span class="b-toast__body"><span class="b-toast__title">test gelöscht</span></span>
+        <button class="b-toast__undo">Rückgängig</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K50</span> · Dialog: Server stoppen</span>
+      <div class="k-dialog-demo">
+        <div class="b-dialog" role="dialog" aria-modal="true" aria-labelledby="k50t">
+          <h3 id="k50t">grove stoppen?</h3>
+          <p>Clients von grove verlieren kurz die Verbindung. Deine Partner heben die Daten so lange auf.</p>
+          <label class="b-check"><input type="checkbox" checked><span class="b-check__box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>Vorher Backup sichern</label>
+          <div class="b-dialog__btns"><button class="b-btn b-btn--secondary">Abbrechen</button><button class="b-btn b-btn--danger-solid">Stoppen</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K51</span> · Dialog: Löschen mit Bestätigung</span>
+      <div class="k-dialog-demo">
+        <div class="b-dialog" role="dialog" aria-modal="true" aria-labelledby="k51t">
+          <h3 id="k51t">test löschen?</h3>
+          <p>Der Server verschwindet aus BridgeControll. Was er im Speicher hat, ist danach weg.</p>
+          <label for="k51i" style="font-size: 13px; font-weight: 600">Tippe <span style="font-family: 'IBM Plex Mono', monospace">test</span> zum Bestätigen</label>
+          <input id="k51i" class="b-input" value="tes">
+          <div class="b-dialog__btns"><button class="b-btn b-btn--secondary">Abbrechen</button><button class="b-btn b-btn--danger-solid" disabled>Löschen</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K48</span> · Toast fliegt rein und raus</span>
+      <div class="t-stage" aria-hidden="true">
+        <div class="t-fly">
+          <div class="b-toast" style="padding-bottom: 18px">
+            <span class="b-toast__ic" style="background: #E3F5EC; color: #0B7A54"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>
+            <span class="b-toast__body"><span class="b-toast__title">Gespeichert</span><span class="b-toast__text">Port 8081 übernommen</span></span>
+          </div>
+          <span class="t-bar"><span></span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K53</span> · Leer: noch kein Server</span>
+      <div class="b-empty">
+        <svg class="b-float" width="110" height="110" viewBox="0 0 48 48" fill="none" stroke-linecap="round" aria-hidden="true" style="filter: drop-shadow(0 4px 4px rgba(12,24,56,.22))"><g transform="rotate(-9 24 28)"><path d="M8 35C11 17 33 17 36 35M6 35h32" stroke="#FFFFFF" stroke-width="10"></path><path d="M8 35C11 17 33 17 36 35M6 35h32" stroke="#3369FF" stroke-width="4.5"></path></g><circle cx="38" cy="12" r="6" fill="#FFFFFF"></circle><circle cx="38" cy="12" r="3.6" fill="#F5B544"></circle></svg>
+        <h3>Noch kein Server</h3>
+        <p>Leg deinen ersten Bridge-Server an. Er läuft auf diesem PC und ist über Tailscale von überall erreichbar.</p>
+        <button class="b-btn b-btn--sticker" style="margin-top: 4px">Ersten Server anlegen</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K54</span> · Kommt noch (Clients, Realms …)</span>
+      <div class="b-empty">
+        <svg width="150" height="90" viewBox="0 0 150 90" fill="none" stroke-linecap="round" aria-hidden="true"><path d="M10 74C24 26 66 18 75 22" stroke="#3369FF" stroke-width="7"></path><path class="b-build" d="M75 22C90 18 126 26 140 74" stroke="#8DACFF" stroke-width="4"></path><path d="M4 74h68" stroke="#0E1A33" stroke-width="5"></path><path class="b-build" d="M78 74h68" stroke="#8DACFF" stroke-width="4"></path><circle cx="75" cy="22" r="6" fill="#F5B544"></circle></svg>
+        <h3>Clients kommen bald</h3>
+        <p>Diese Ansicht braucht noch eine Schnittstelle in Bridge. Sobald sie da ist, siehst du hier, wer verbunden ist.</p>
+        <a href="#uebersicht" style="font-weight: 600; font-size: 14px">← Zurück zur Übersicht</a>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 2">
+      <span class="k-label"><span class="k-nr">K49</span> · Banner</span>
+      <div class="b-banner b-banner--warn" role="status">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#9A5B00" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v6M12 16.5v.5"></path></svg>
+        <span class="b-banner__text"><b>Tailscale ist nicht installiert.</b> Ohne Tailscale sind deine Server nur auf diesem PC erreichbar.</span>
+        <button class="b-btn b-btn--secondary b-btn--sm">Anleitung</button>
+        <button class="b-btn b-btn--ghost b-btn--sm">Später</button>
+      </div>
+      <div class="b-banner b-banner--info" role="status">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2152E6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
+        <span class="b-banner__text"><b>BridgeControll 0.2 ist da.</b> Neustart der App nötig, deine Server laufen weiter.</span>
+        <button class="b-btn b-btn--secondary b-btn--sm">App neu starten</button>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K52</span> · Tooltip</span>
+      <div style="display: flex; justify-content: space-around; align-items: flex-end; height: 110px; padding-bottom: 4px">
+        <span class="b-tip">
+          <span class="b-tip__bubble" role="tooltip">Git jetzt prüfen</span>
+          <button class="b-icon" aria-label="Git jetzt prüfen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v7h-7"></path></svg></button>
+        </span>
+        <span class="b-tip">
+          <span class="b-tip__bubble" role="tooltip" style="animation-delay: .4s">Stoppen <span class="b-tip__kbd">S</span></span>
+          <button class="b-icon" aria-label="Stoppen"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg></button>
+        </span>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 3">
+      <span class="k-label"><span class="k-nr">K55</span> · Verbindung zum Steuer-Dienst weg · Gespeichert-Häkchen</span>
+      <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap">
+        <div class="b-offline" role="status" style="flex: 1 1 520px">
+          <span class="b-spin"></span>
+          <span><b>Keine Verbindung zu BridgeControll.</b> <span class="m">Versuche es in 3 s erneut … Deine Server laufen weiter.</span></span>
+        </div>
+        <span class="b-saved" role="status"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>Gespeichert</span>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section class="k-sec" id="bewegung">
+
+  <div style="display: flex; align-items: baseline; gap: 14px">
+    <h1 style="margin: 0; font-family: 'Sora', sans-serif; font-size: 30px; font-weight: 600; letter-spacing: -0.02em">Bewegung</h1>
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #56657F">K56–K63 · aus, wenn „Bewegung reduzieren“ im System an ist</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start">
+
+    <div class="k-card" style="grid-column: span 2">
+      <span class="k-label"><span class="k-nr">K56</span> · Tempo-Stufen</span>
+      <div style="display: flex; flex-direction: column; gap: 14px">
+        <div class="m-row"><b>schnell · 120 ms</b><div class="m-track"><span class="m-dot" style="animation: m-t120 2s cubic-bezier(.2,.8,.2,1) infinite"></span></div><span class="d">Klick, Drücken</span></div>
+        <div class="m-row"><b>normal · 200 ms</b><div class="m-track"><span class="m-dot" style="animation: m-t200 2s cubic-bezier(.2,.8,.2,1) infinite"></span></div><span class="d">Hover, Farbwechsel</span></div>
+        <div class="m-row"><b>ruhig · 320 ms</b><div class="m-track"><span class="m-dot" style="animation: m-t320 2s cubic-bezier(.2,.8,.2,1) infinite"></span></div><span class="d">Schalter, Einblenden</span></div>
+        <div class="m-row"><b>lang · 600 ms</b><div class="m-track"><span class="m-dot" style="animation: m-t600 2s cubic-bezier(.65,0,.35,1) infinite"></span></div><span class="d">Seitenwechsel, Fortschritt</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K60</span> · Logo wackelt (fahr drüber)</span>
+      <div style="display: flex; align-items: center; justify-content: space-around; height: 180px">
+        <svg class="b-wiggle" width="100" height="100" viewBox="0 0 48 48" fill="none" stroke-linecap="round" role="img" aria-label="Bridge" style="filter: drop-shadow(0 4px 4px rgba(12,24,56,.25))"><g transform="rotate(-9 24 28)"><path d="M8 35C11 17 33 17 36 35M6 35h32" stroke="#FFFFFF" stroke-width="10"></path><path d="M8 35C11 17 33 17 36 35M6 35h32" stroke="#3369FF" stroke-width="4.5"></path></g><circle cx="38" cy="12" r="6" fill="#FFFFFF"></circle><circle cx="38" cy="12" r="3.6" fill="#F5B544"></circle></svg>
+        <svg class="m-auto" width="100" height="84" viewBox="0 0 58 48" role="img" aria-label="br." style="filter: drop-shadow(0 4px 4px rgba(12,24,56,.25))"><text x="29" y="33" text-anchor="middle" transform="rotate(-8 29 26)" font-family="Sora, sans-serif" font-weight="700" font-size="26" letter-spacing="-1.2" fill="#3369FF" stroke="#FFFFFF" stroke-width="4.6" stroke-linejoin="round" paint-order="stroke">br.</text></svg>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 2">
+      <span class="k-label"><span class="k-nr">K57</span> · Kurven</span>
+      <div style="display: flex; flex-direction: column; gap: 14px">
+        <div class="m-row"><b>raus</b><div class="m-track"><span class="m-dot" style="animation: m-go 1.3s cubic-bezier(.2,.8,.2,1) infinite alternate"></span></div><span class="d">Standard: schnell los, sanft ankommen</span></div>
+        <div class="m-row"><b>rein-raus</b><div class="m-track"><span class="m-dot" style="animation: m-go 1.3s cubic-bezier(.65,0,.35,1) infinite alternate"></span></div><span class="d">große Wege, Seiten</span></div>
+        <div class="m-row"><b>Feder</b><div class="m-track"><span class="m-dot" style="background: #F5B544; animation: m-go 1.3s cubic-bezier(.34,1.56,.64,1) infinite alternate"></span></div><span class="d">Schalter, Sticker, Häkchen</span></div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K63</span> · Update da = Amber-Punkt im Logo pulsiert</span>
+      <div style="display: flex; align-items: center; gap: 18px; height: 140px; justify-content: center">
+        <div style="width: 96px; height: 96px; border-radius: 24px; background: #DCE6FF; display: flex; align-items: center; justify-content: center">
+          <svg width="76" height="76" viewBox="0 0 48 48" fill="none" stroke-linecap="round" class="b-logo has-update" role="img" aria-label="Update verfügbar" style="overflow: visible; filter: drop-shadow(0 3px 3px rgba(12,24,56,.25))"><g transform="rotate(-9 24 28)"><path d="M8 35C11 17 33 17 36 35M6 35h32" stroke="#FFFFFF" stroke-width="10"></path><path d="M8 35C11 17 33 17 36 35M6 35h32" stroke="#3369FF" stroke-width="4.5"></path></g><circle class="b-logo__ring" cx="38" cy="12" r="5"></circle><circle cx="38" cy="12" r="6" fill="#FFFFFF"></circle><circle class="b-logo__dot" cx="38" cy="12" r="3.6" fill="#F5B544"></circle></svg>
+        </div>
+        <span style="font-size: 14px; color: #36435C; max-width: 140px">App-Icon und Tray zeigen so: es gibt ein Update.</span>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K58</span> · Zeile beim Drüberfahren</span>
+      <nav class="m-list" aria-label="Beispiel-Liste">
+        <a href="#a"><span class="nr">01</span><span class="nm">Übersicht</span><span class="go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></span></a>
+        <a href="#b"><span class="nr">02</span><span class="nm">Clients</span><span class="go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></span></a>
+        <a href="#c"><span class="nr">03</span><span class="nm">Realms</span><span class="go" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></span></a>
+      </nav>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K59</span> · Seitenwechsel: Liste → Bereich</span>
+      <div class="m-frame" aria-hidden="true">
+        <div class="m-page m-page--a">
+          <span style="font-family: 'Sora', sans-serif; font-weight: 600; font-size: 18px">01 Übersicht</span>
+          <span style="font-family: 'Sora', sans-serif; font-weight: 600; font-size: 18px; color: #2152E6">02 Clients</span>
+          <span style="font-family: 'Sora', sans-serif; font-weight: 600; font-size: 18px">03 Realms</span>
+          <span style="font-family: 'Sora', sans-serif; font-weight: 600; font-size: 18px">04 Nachrichten</span>
+        </div>
+        <div class="m-page m-page--b">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #56657F">← Start</span>
+          <span style="font-family: 'Sora', sans-serif; font-weight: 600; font-size: 24px; letter-spacing: -0.02em">Clients</span>
+          <span class="m-bar" style="width: 80%"></span><span class="m-bar" style="width: 64%"></span><span class="m-bar" style="width: 72%"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="k-card">
+      <span class="k-label"><span class="k-nr">K62</span> · Zahl-Taste springt in den Bereich</span>
+      <div style="display: flex; flex-direction: column; gap: 12px">
+        <div style="display: flex; align-items: center; gap: 10px; font-size: 14px; color: #36435C"><span class="m-key">2</span>drückt …</div>
+        <div class="m-list">
+          <a href="#x" style="pointer-events: none"><span class="nr">01</span><span class="nm">Übersicht</span></a>
+          <a href="#y" class="m-flash" style="pointer-events: none"><span class="nr">02</span><span class="nm">Clients</span></a>
+          <a href="#z" style="pointer-events: none"><span class="nr">03</span><span class="nm">Realms</span></a>
+        </div>
+      </div>
+    </div>
+
+    <div class="k-card" style="grid-column: span 3">
+      <span class="k-label"><span class="k-nr">K61</span> · Neue Log-Zeile schiebt sich rein</span>
+      <div class="b-log" aria-hidden="true">
+        <div class="b-log__line is-new"><span class="b-log__time">14:02:12</span><span class="b-log__kind">task</span><span>add → bob</span></div>
+        <div class="b-log__line"><span class="b-log__time">14:02:11</span><span class="b-log__kind">response</span><span>bob → alice · 6 ms</span></div>
+        <div class="b-log__line"><span class="b-log__time">14:02:09</span><span class="b-log__kind">direct</span><span>erin → alice</span></div>
+        <div class="b-log__line"><span class="b-log__time">14:01:58</span><span class="b-log__kind">backup</span><span>an 2 Partner</span></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+</main>
+</body>
+</html>

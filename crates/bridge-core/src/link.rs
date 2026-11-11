@@ -195,8 +195,9 @@ mod tests {
         assert_eq!(JoinLink::parse(&text)?, link);
         let pinned_only = JoinLink { tls: None, code: None, ..link.clone() };
         assert_eq!(JoinLink::parse(&pinned_only.to_link())?, pinned_only, "node alone pins over the Internet");
-        // The longest possible link still fits: a 200-character address, every byte escaped, code, node and pin.
-        let long = JoinLink { gateway: format!("https://{}", "%".repeat(192)), code: Some("a".repeat(64)), ..link };
+        // The longest possible link still fits: a 200-character address with as many escaped bytes as an address can
+        // have (only `/` and `:` need escapes), code, node and pin.
+        let long = JoinLink { gateway: format!("http://a:1{}", "/a".repeat(95)), code: Some("a".repeat(64)), ..link };
         assert!(long.to_link().len() <= MAX_LINK_CHARS, "{}", long.to_link().len());
         assert_eq!(JoinLink::parse(&long.to_link())?, long);
 

@@ -33,7 +33,7 @@ use rand_core::{OsRng, RngCore};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use crate::network::{META_URLS, store_membership, stored_membership};
+use crate::network::{META_URLS, WatchMemory, store_membership, stored_membership, watch_status_of};
 use crate::{Clock as _, DB_FILE, keyfile};
 
 /// File of the delegated admin key inside the data folder.
@@ -67,8 +67,23 @@ pub struct Created {
     pub link: String,
 }
 
-/// Creates a new network in `data_dir` (see module docs). `url`: the public address of the owner node.
+/// Creates a new network in `data_dir` (see module docs) with 24 new words. `url`: the public address of the owner
+/// node.
 pub fn create_network(data_dir: &Path, name: &str, url: &str, mode: JoinMode, now_ms: i64) -> Result<Created, String> {
+    create_network_with_words(data_dir, name, url, mode, now_ms, &Mnemonic::generate(&mut OsRng))
+}
+
+/// Like [`create_network`], with words made (and shown) before: BridgeControll shows the words in one step of its
+/// assistant and creates the network in a later one, holding them only in memory in between (ADR 0017). The words
+/// are the caller's to wipe; nothing here stores them.
+pub fn create_network_with_words(
+    data_dir: &Path,
+    name: &str,
+    url: &str,
+    mode: JoinMode,
+    now_ms: i64,
+    words: &Mnemonic,
+) -> Result<Created, String> {
     check_url(url).map_err(|_| "--url: eine Adresse wie https://pc.tail1234.ts.net:8443/knoten1".to_owned())?;
     std::fs::create_dir_all(data_dir).map_err(|e| format!("Daten-Ordner: {e}"))?;
     if data_dir.join(ADMIN_KEY_FILE).exists() {
@@ -80,7 +95,6 @@ pub fn create_network(data_dir: &Path, name: &str, url: &str, mode: JoinMode, no
     }
     let node = keyfile::load_or_create(data_dir)?;
     let tls = keyfile::load_or_create_tls(data_dir)?.fingerprint();
-    let words = Mnemonic::generate(&mut OsRng);
     let master = words.to_identity().map_err(|e| e.to_string())?;
     let net = master.id().clone();
     let node_card =
@@ -310,6 +324,32 @@ impl AdminClient {
                 card.id()
             ));
         }
+        self.seal_card(card, node_id, level, services).await
+    }
+
+    /// Seals a node with a card given directly (BridgeControll's "Knoten-Ausweis", ADR 0017): the card is
+    /// self-signed (checked when it was parsed), must be a node card with at least one address, at most 5 minutes
+    /// in the future (else the seal would not count, docs/06 §6), and must belong to `node_id` - the ID the owner
+    /// confirmed from the node itself.
+    pub async fn seal_card(
+        &self,
+        card: KeyCard,
+        node_id: &Id,
+        level: u8,
+        services: Services,
+    ) -> Result<(Statement, Submitted), String> {
+        if card.id() != node_id {
+            return Err(format!(
+                "Abgebrochen: Die Karte gehört zu {}, bestätigt war {node_id} - nichts wurde gesiegelt.",
+                card.id()
+            ));
+        }
+        if card.role() != Role::Node || card.urls().is_empty() {
+            return Err("Das ist keine Knoten-Karte mit Adresse - nichts wurde gesiegelt.".into());
+        }
+        if card.iat() > Self::now().saturating_add(5 * 60 * 1000) {
+            return Err("Die Karte ist in der Zukunft ausgestellt (Uhr falsch?) - nichts wurde gesiegelt.".into());
+        }
         let seal = Seal { subject: card.id().clone(), level, services, card: Some(card) };
         let statement = self.sign(&seal, YEAR_MS).map_err(|e| format!("Siegel: {e}"))?;
         let submitted = self.submit(&statement).await?;
@@ -537,6 +577,108 @@ impl AdminClient {
     }
 }
 
+/// What `bridge-node net watch-status` shows (docs/06 §11.7): read from the data folder alone (database and log),
+/// also while the node runs there. Creates nothing: a folder without a node key or database is refused.
+pub fn watch_status(data_dir: &Path, now_ms: i64) -> Result<crate::WatchStatus, String> {
+    let (key, db) = (data_dir.join(keyfile::KEY_FILE), data_dir.join(DB_FILE));
+    if !key.exists() || !db.exists() {
+        return Err(format!(
+            "{} ist kein Daten-Ordner eines Knotens (node-key.json/node.db fehlen)",
+            data_dir.display()
+        ));
+    }
+    let me = keyfile::load_or_create_at(&key)?.id().clone();
+    let store = Store::open(&db).map_err(|e| format!("Datenbank: {e}"))?;
+    let stored = stored_membership(&store)?.ok_or("Dieser Knoten gehört zu keinem Netz.")?;
+    let entries =
+        store.net_log_load(stored.net.as_str(), bridge_net::merkle::MAX_TREE_SIZE).map_err(|e| format!("Log: {e}"))?;
+    if entries.is_empty() {
+        return Err("Der Knoten hat das Log seines Netzes noch nicht geladen.".into());
+    }
+    let state = NetState::replay(&stored.net, &entries).map_err(|e| format!("Log ungültig: {e}"))?;
+    let memory = WatchMemory::load(&store, &stored.net)?;
+    watch_status_of(&store, &state, &me, &memory, now_ms)
+}
+
+/// How many nodes are registered for probes at the watcher in `data_dir` for `net` (registrations not ended at
+/// `now_ms`), read from its database alone - for a dashboard that already holds the network state (review 8:
+/// BridgeControll used [`watch_status`] every few seconds, which replays the whole log). Creates nothing.
+pub fn watch_registered(data_dir: &Path, net: &Id, now_ms: i64) -> Result<usize, String> {
+    let db = data_dir.join(DB_FILE);
+    if !db.exists() {
+        return Err(format!("{} ist kein Daten-Ordner eines Knotens (node.db fehlt)", data_dir.display()));
+    }
+    let store = Store::open(&db).map_err(|e| format!("Datenbank: {e}"))?;
+    let memory = WatchMemory::load(&store, net)?;
+    Ok(memory.nodes.values().filter(|watched| watched.expires > now_ms).count())
+}
+
+/// An app a node hosts, as BridgeControll's owner dashboard shows it (read from the node's database).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedApp {
+    /// App ID.
+    pub app: Id,
+    /// Owner ID.
+    pub owner: Id,
+    /// Name of the version served (empty while the first version is still fetched).
+    pub name: String,
+    /// Highest version decided on.
+    pub version: u64,
+    /// Hosts listed by the version served.
+    pub hosts: Vec<Id>,
+    /// `serving` or `fetching`.
+    pub state: &'static str,
+}
+
+/// The apps the node in `data_dir` hosts (at most `max`), read from its database - also while the node runs (like
+/// [`watch_status`]). Creates nothing.
+pub fn hosted_apps(data_dir: &Path, max: usize) -> Result<Vec<HostedApp>, String> {
+    let store = open_existing(data_dir)?;
+    let rows = store.apps_active(max).map_err(|e| format!("Datenbank: {e}"))?;
+    let mut apps = Vec::with_capacity(rows.len());
+    for row in rows {
+        let (Ok(app), Ok(owner)) = (Id::parse(&row.app), Id::parse(&row.owner)) else { continue };
+        let manifest = row
+            .current
+            .as_deref()
+            .and_then(|bytes| bridge_core::AppManifest::parse_statement(bytes).ok())
+            .and_then(|statement| bridge_core::AppManifest::from_body(statement.body()).ok());
+        let state = if manifest.is_some() { "serving" } else { "fetching" };
+        let (name, hosts) = manifest.map(|manifest| (manifest.name, manifest.hosts)).unwrap_or_default();
+        apps.push(HostedApp { app, owner, name, version: row.version, hosts, state });
+    }
+    Ok(apps)
+}
+
+/// The key cards the node in `data_dir` knows for `ids` (from logins and exchanged `home` entries), for names in
+/// BridgeControll's member list. Unknown IDs are left out; at most 1,024 IDs are looked up.
+pub fn known_cards(data_dir: &Path, ids: &[Id]) -> Result<Vec<KeyCard>, String> {
+    let store = open_existing(data_dir)?;
+    let mut cards = Vec::new();
+    for id in ids.iter().take(1024) {
+        if let Some(bytes) = store.get_card(id.as_str()).map_err(|e| format!("Datenbank: {e}"))? {
+            if let Ok(card) = KeyCard::parse(&bytes) {
+                if card.id() == id {
+                    cards.push(card);
+                }
+            }
+        }
+    }
+    Ok(cards)
+}
+
+/// The database of an existing node folder (refused when key or database are missing - nothing is created).
+fn open_existing(data_dir: &Path) -> Result<Store, String> {
+    let (key, db) = (data_dir.join(keyfile::KEY_FILE), data_dir.join(DB_FILE));
+    if !key.exists() || !db.exists() {
+        return Err(format!(
+            "{} ist kein Daten-Ordner eines Knotens (node-key.json/node.db fehlen)",
+            data_dir.display()
+        ));
+    }
+    Store::open(&db).map_err(|e| format!("Datenbank: {e}"))
+}
+
 /// Parses `gateway,log,...` into services.
 pub fn parse_services(text: &str) -> Result<Services, String> {
     let mut services = Vec::new();
@@ -663,6 +805,38 @@ pub fn parse_ids(text: &str) -> Result<Vec<Id>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review 8, finding 10b: the dashboard's count of registrations comes from the database alone - no log is
+    /// loaded or replayed for it (a folder without a log works, [`watch_status`] needs one).
+    #[test]
+    fn registrations_are_counted_without_the_log() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let net = Id::of_sign_key(&[1; 32]);
+        assert!(watch_registered(dir.path(), &net, 0).is_err(), "no database: refused, nothing created");
+        assert!(!dir.path().join(DB_FILE).exists());
+        let store = Store::open(&dir.path().join(DB_FILE)).map_err(|e| e.to_string())?;
+        let node = Identity::from_secret_bytes(&[2; 32], &[3; 32]);
+        let card = node
+            .key_card_with(Role::Node, None, &["https://n.example".into()], None, 0)
+            .and_then(|card| card.to_bytes())
+            .map_err(|e| e.to_string())?;
+        let id = node.id().to_string();
+        let registration = bridge_store::Registration {
+            node: &id,
+            card: &card,
+            card_iat: 0,
+            services: "web",
+            expires: 1_000,
+            at: 0,
+            restart: false,
+        };
+        store.watch_register(net.as_str(), &registration, 8).map_err(|e| e.to_string())?;
+        drop(store);
+        assert_eq!(watch_registered(dir.path(), &net, 999)?, 1);
+        assert_eq!(watch_registered(dir.path(), &net, 1_000)?, 0, "ended");
+        assert!(watch_status(dir.path(), 999).is_err(), "the full status needs key and log");
+        Ok(())
+    }
 
     #[test]
     fn create_once_and_load_the_admin_key() -> Result<(), String> {

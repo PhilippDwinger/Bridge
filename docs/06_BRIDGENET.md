@@ -18,9 +18,47 @@ Netz-Teile von `bridge-node`.
 
 ## 2. Schlüsselkarte von Knoten: Adressen
 Knoten-Karten (`role: "node"`) dürfen ein Feld `urls` haben: 1–4 verschiedene Adressen (`https://…` oder
-`http://…`, je max. 200 Zeichen, nur druckbares ASCII). Es ist mit-signiert, also kann niemand einem Knoten eine
-fremde Adresse unterschieben. Karten anderer Rollen mit `urls` oder `tls` sind ungültig. Clients und
-andere Knoten erreichen ihn darüber.
+`http://…`, je max. 200 Zeichen). Es ist mit-signiert, also kann niemand einem Knoten eine fremde Adresse
+unterschieben. Karten anderer Rollen mit `urls` oder `tls` sind ungültig. Clients und andere Knoten erreichen ihn
+darüber.
+
+*Nach Prüfung 8* – **Form einer Adresse** (eine Regel für Karten, Start-Empfänger im Manifest, `gw` im
+Einladungslink, `--url`, BridgeControll; `bridge_core::keys::check_url`): genau `http(s)://host[:port][/pfad]`.
+`host` ist ein DNS-Name (Teile aus `A–Z a–z 0–9 - _`, durch einzelne Punkte getrennt, kein leerer Teil, kein Punkt am
+Ende), eine IPv4-Adresse in dieser Form oder eine IPv6-Adresse in eckigen Klammern (ohne Zone); `port` 1–65535, nur
+Ziffern; `pfad` nur `/` und `A–Z a–z 0–9 - . _ ~`, keine Teile `.` oder `..`. Also kein `?`, `#`, `@`, keine
+Benutzer-Angabe, keine `%`-Kodierung, keine Leer- oder Steuerzeichen. Grund: Knoten hängen ihre API-Pfade an diese
+Adressen an (`<url>/v4/info`); mit `http://10.0.0.1/admin?x=` würde daraus eine ganz andere Anfrage. Karten im Log, die
+das nicht erfüllen, sind ungültig (das Abspielen überspringt ihre Siegel).
+
+*Nach Prüfung 8* – **Adress-Schutz** (`bridge-node`, `bridge_transport::HttpClient::new_public`): Adressen, die ein
+Knoten **allein** gewählt hat, ruft ein anderer Knoten nur auf öffentlichen IP-Adressen an – sonst könnte jedes
+Mitglied ihn gegen sein eigenes Netz richten (`http://127.0.0.1:7380/…`, `http://169.254.169.254/…`, der Router).
+„Allein gewählt“ sind die Adressen einer **Anmeldung beim Wächter** (§11.5) und die Adressen einer Karte, die **nur
+ein Wächter** gesiegelt hat (Stufe-1-Siegel, §11). Adressen, für die ein Admin oder der Hauptschlüssel eingestanden
+hat (Karte in einem Siegel, das nicht von einem Wächter allein ist; Start-Empfänger im Manifest), gelten wie bisher
+(`NetState::vetted_urls`).
+- Ein Name wird für jeden Aufruf neu aufgelöst (höchstens 3 s, höchstens 8 Adressen); nur öffentliche Adressen
+  bleiben, und genau mit ihnen wird verbunden (der Name ist für diesen Aufruf darauf festgelegt – keine zweite
+  Auflösung, die anders antworten könnte; kein Proxy dazwischen). IP-Adressen werden in der Form geprüft, die der
+  HTTP-Client selbst benutzt (`http://2130706433/` ist `127.0.0.1`).
+- **Nicht öffentlich**: 0.0.0.0/8, Loopback, privat (10/8, 172.16/12, 192.168/16), 100.64/10 (CGNAT – auch Tailscale),
+  Link-Local (169.254/16), Multicast, Broadcast und 240/4, Dokumentation, 198.18/15, 192.0.0/24; bei IPv6 `::`, `::1`,
+  fc00::/7 (ULA), fe80::/10, fec0::/10, Multicast, ::/96, 100::/64, Teredo, 2001:db8::/32 – IPv4 in IPv6 (`::ffff:…`,
+  64:ff9b::/96, 2002::/16) nach der IPv4-Adresse darin.
+- **Ausnahme LAN**: Ein Knoten, der im LAN über seinen **gepinnten** TLS-Fingerabdruck erreicht wird, ist geprüft –
+  ohne passendes Zertifikat geht keine Anfrage hinaus.
+- **Regel** `bridge-node --peer-addresses public|tailnet|any` (`NodeConfig::peer_addresses`,
+  `bridge_transport::PeerAddresses`):
+  - `public` (Standard von `bridge-node`): nur öffentliche Adressen wie oben.
+  - `tailnet`: öffentliche Adressen **und** die Bereiche von Tailscale – IPv4 100.64.0.0/10 und IPv6
+    fd7a:115c:a1e0::/48 (auch als `::ffff:100.64.…`), sonst nichts: Loopback, RFC 1918, Link-Local, andere ULAs bleiben
+    gesperrt. Grund: Im eigenen Tailnet löst MagicDNS `<gerät>.<tailnet>.ts.net` (auch Funnel-Adressen) zu einer
+    100.x-Adresse auf – ein Wächter auf einem Tailnet-PC erreicht die Funnel-Adressen der anderen eigenen Knoten sonst
+    nicht. Bleibt: Jedes Gerät im selben Tailnet ist so erreichbar (wer das nicht will, nimmt `public`).
+    **Standard in BridgeControll v2** (je Knoten einstellbar: „Öffentlich“ / „Öffentlich + Tailnet“ / „Alle
+    (unsicher)“; ADR 0017).
+  - `any`: keine Prüfung – nur für Netze in einem LAN und für Tests auf 127.0.0.1.
 Für das LAN (ADR 0004) kommt optional `tls` dazu: Base64url(SHA-256 des DER-Zertifikats) des selbst-signierten
 TLS-Zertifikats des Knotens. Wer die Karte kennt, verbindet sich im LAN nur mit genau diesem Zertifikat (Pinning
 statt Zertifizierungsstelle). mDNS-Ankündigungen (`_bridge4._tcp`, TXT `id=<knoten-id>`) sind nur Hinweise, wo
@@ -113,8 +151,8 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 | `delegation` | `{"admin":"<id>","rights":["members","seals","bans","rules"],"card":<karte des admins>}` | nur Hauptschlüssel; `exp` Standard 90 Tage |
 | `invite` | `{"code_hash":"<SHA-256 des Codes>","uses":1–1000}` | Admin mit `members` |
 | `member` | `{"member":"<id>","invite":"<code_hash>"?}` → Stufe 0 | Empfänger (Siegel mit Dienst `gateway`, Stufe ≥ 2) oder Admin mit `members`; eine bestehende Mitgliedschaft ersetzt nur ihr Aussteller, ein Admin mit `members` (bzw. der Hauptschlüssel) oder jeder, sobald sie abgelaufen ist – ein Nicht-Admin nie mit früherem `exp` |
-| `seal` | `{"subject":"<id>","level":1–3,"services":[…],"card":<schlüsselkarte>?}` | Stufe 1–2: Admin mit `seals`. Stufe 3: `approvals.seal3` Admins mit `seals` (Mehr-Augen) oder Hauptschlüssel |
-| `revoke` | `{"statement":"<hash>"}` oder `{"identity":"<id>","cascade":false}`, dazu `"reason"` (max. 200 Zeichen) | wer die Aussage ausstellen durfte, ein Admin mit dem passenden Recht, oder der Hauptschlüssel |
+| `seal` | `{"subject":"<id>","level":1–3,"services":[…],"card":<schlüsselkarte>?}` | Stufe 1–2: Admin mit `seals`. Stufe 3: `approvals.seal3` Admins mit `seals` (Mehr-Augen) oder Hauptschlüssel. Stufe 1 auch ein **Wächter** allein, nach den Regeln in §11 |
+| `revoke` | `{"statement":"<hash>"}` oder `{"identity":"<id>","cascade":false}`, dazu `"reason"` (max. 200 Zeichen) | wer die Aussage ausstellen durfte (ein Wächter also seine eigenen Stufe-1-Siegel, §11), ein Admin mit dem passenden Recht, oder der Hauptschlüssel |
 | `ban` | `{"subject":"<id>","reason":"…"}` | Admin mit `bans` (Dauer = `exp`; höchstens 1.000 je Admin und Tag) |
 | `head` | `{"size":n,"root":"<32 Byte>"}` | Log-Führer (im Manifest) – **steht nicht im Log** |
 | `cosign` | `{"head":"<hash des head>","log":"<id>","size":n,"root":"<32 Byte>"}` | Zeuge (im Manifest); für den Übergangs-Kopf einer Not-Wiederherstellung auch der Hauptschlüssel (§5) – **steht nicht im Log** |
@@ -169,7 +207,8 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 - Grenzen: `name` 1–64 Zeichen, `description` max. 500 (Zeilenumbruch erlaubt), `pow_bits` ≤ 28, `approvals`
   je 1–16, `limits.members` 1–1.000.000, `limits.log_entries_per_day` 1–100.000. Alle Felder sind Pflicht – außer
   dem optionalen `apps` (Phase 4a, 07 §3): `{"min_level":0-3}`, die Stufe, die ein Owner zum Veröffentlichen von Apps
-  braucht (ohne das Feld: 0). Fehlt es, bleibt es weg (ältere Manifeste behalten ihre Bytes und ihren Hash).
+  braucht (ohne das Feld: 0), und dem optionalen `watch` (Regeln der Wächter, §11.3; ohne das Feld: die
+  Standardwerte dort). Fehlen sie, bleiben sie weg (ältere Manifeste behalten ihre Bytes und ihren Hash).
 - Das neueste Manifest gilt bis zur nächsten Version; sein `exp` zählt nur beim Annehmen.
 - `version` steigt bei jeder Änderung um genau 1. Das jeweils neueste gültige Manifest gilt.
 - `logs`: 1–3 Log-Führer, `witnesses`: 1–16 Zeugen, `1 ≤ witness_threshold ≤ len(witnesses)`. Beide Listen dürfen die
@@ -435,6 +474,9 @@ selben Ergebnis.
 4. Grenzen: Mitglieder nach `limits.members` (höchstens 1.000.000), je 10.000 Admins, Siegel, Sperren (davon max.
    8 je Identität) und Einladungen. Einträge nach `limits.log_entries_per_day` (Tag nach Prüfzeit); Einträge des
    Hauptschlüssels zählen nicht, `revoke`/`ban` haben 10 % Reserve (Admins können nach einer Flut noch handeln).
+   *Nach Prüfung 8*: Die 10.000 Siegel sind die von Admins und Hauptschlüssel; Siegel von Wächtern haben eine eigene
+   Tabelle (höchstens `limits.members`) und Einträge von Wächtern einen eigenen Topf von `log_entries_per_day` (§11.2)
+   – ein Wächter kann Admins nie aussperren.
    Sperren: höchstens 1.000 je Admin und Tag (nach Prüfzeit); der Hauptschlüssel ist davon und von der Grenze je
    Identität ausgenommen und hat 1.000 eigene Plätze über den 10.000 – Admins können ihn nie aussperren.
    Abgelaufenes wird vergessen, sobald die Log-Uhr 5 min darüber ist.
@@ -453,7 +495,12 @@ selben Ergebnis.
   - `net create` zeigt einen Link mit `node` (ohne `tls`, der Knoten läuft da noch nicht); `net invite` holt die
     geprüfte Karte des Owner-Knotens (`/v4/info`, ID wie in `admin-key.json`) und setzt `node` und – wenn die Karte
     `tls` hat, der Knoten also mit `--lan` läuft – `tls`.
-  - Als QR-Code später in BridgeControll.
+  - Als QR-Code in BridgeControll v2 (ADR 0017; SVG aus dem Programm).
+- **Knoten-Ausweis** (BridgeControll v2, ADR 0017): `bridge4://node?card=<Base64url der kanonischen Knoten-Karte>`,
+  höchstens 4.096 Zeichen. Damit gibt ein Knoten-PC dem Owner seine selbst-signierte Karte (Rolle `node`, mindestens
+  eine Adresse) zum Siegeln – auch wenn der Owner ihn nicht über `http` erreicht (nur LAN). Der Owner bestätigt dazu
+  mindestens die ersten 12 Zeichen der Knoten-ID, abgelesen am Knoten-PC (wie `--node-id` bei `net seal`). Streng:
+  genau dieses Präfix und ein Wert; eine Karte mit falscher Signatur, anderer Rolle oder ohne Adresse wird abgelehnt.
 - Ablauf (Client):
   1. Empfänger anfragen: `/v4/info` (Karte, `net` muss passen; mit `node`: ID muss passen; über das LAN: `tls` der
      Karte muss der benutzte Pin sein).
@@ -524,13 +571,14 @@ Teilbäumen: Wurzeln und Nachweise in O(log n), gerechnet ohne die Sperre des Ne
 | `POST /v4/net/{netz}/log` `{"from":i,"max":n}` | alle | `{"entries":["<Base64url>",…],"size":n}` (genaue Bytes, max. 256 Einträge bzw. 1 MiB) |
 | `POST /v4/net/{netz}/proof` `{"index":i,"size":n}` | alle | `{"index","size","proof":["<hash>",…]}` (Inclusion) |
 | `POST /v4/net/{netz}/consistency` `{"from":m,"to":n}` | alle | `{"from","to","proof":[…]}` (Consistency) |
-| `POST /v4/net/{netz}/submit` | Hauptschlüssel, Admins, Empfänger | `rq` mit `op:"submit"`, `body:{"statement":…}` → `{"index","size","hash"}` (beim aktiven Log-Führer; ein Empfänger, der es nicht ist, reicht Aussagen des Hauptschlüssels und der Admins einmal an ihn weiter – Empfänger-Anfragen nie, also keine Schleifen) |
+| `POST /v4/net/{netz}/submit` | Hauptschlüssel, Admins, Empfänger, Wächter (§11) | `rq` mit `op:"submit"`, `body:{"statement":…}` → `{"index","size","hash"}` (beim aktiven Log-Führer; ein Empfänger, der es nicht ist, reicht Aussagen des Hauptschlüssels und der Admins einmal an ihn weiter – Empfänger-Anfragen nie, also keine Schleifen) |
 | `POST /v4/net/{netz}/cosign` | Zeugen | die `cosign`-Aussage selbst → `{"ok":true,"witnessed":bool}` (beim Log-Führer) |
 | `GET /v4/net/{netz}/evidence` / `POST …` | alle | `{"evidence":[{"a":<kopf>,"b":<kopf>},…]}` / einen Beweis melden → `{"ok":true,"new":bool}` (geprüft, nie blind übernommen) |
 | `POST /v4/net/join` | Clients | Beitritt (§7) |
 | `POST /v4/node/relay` | Empfänger | Weiterleitung (§8) → `{"ok":true}` |
 | `POST /v4/node/homes` | Empfänger | `home`-Einträge austauschen (§8) |
 | `POST /v4/node/app` | Hosts einer App | eine App-Version anbieten (Phase 4a, 07 §5/§7) |
+| `POST /v4/node/watch` | Knoten (Mitglieder) | beim Wächter zu Proben anmelden (§11.5) → `{"ok":true,"since":<ms>\|null}` |
 
 Fehler wie 04 §9 (z. B. falsches `aud` → 401 `BAD_SIGNATURE`, Weiterleitung von einem Nicht-Empfänger → 403
 `FORBIDDEN`, Empfänger wohnt nicht hier → 404 `UNKNOWN_IDENTITY`, wiederholte Anfrage → 409 `REPLAY`). Ein Knoten
@@ -547,7 +595,9 @@ ohne Netz kennt keinen dieser Endpunkte (404); ein Knoten, der sein Log noch lä
   - Die mDNS-Suche liest nur `id`, `v` und den Port; `net` ist ein Hinweis für spätere Werkzeuge.
   - `net seal --node-url` holt die Karte eines Knotens noch nicht gepinnt über das LAN (nur `http(s)://`; die
     erwartete ID schützt trotzdem).
-- **BridgeControll v2** (Tauri, Assistent „Neues BridgeNet“) folgt. Bis dahin gibt es eine Kommandozeile:
+- **BridgeControll v2** ist gebaut (ADR 0017, `apps/bridgecontroll`): Assistent „Neues BridgeNet“, Beitritt per Link,
+  Siegeln mit ID-Bestätigung (Knoten dieses PCs oder Knoten-Ausweis, §7), Siegel entziehen, Sperren, Einladungen mit
+  QR-Code, Owner-Dashboard. Daneben (und für alles, was die 24 Wörter braucht) gibt es die Kommandozeile:
   - `bridge-node net create --data <ordner> --name <text> --url <öffentliche adresse> [--template open|invite|closed]`
     zeigt die 24 Wörter **einmal** an, legt die Knoten-Identität (falls nötig), den delegierten Admin-Schlüssel
     `admin-key.json` (alle Rechte, 90 Tage, nur für den Besitzer lesbar), Genesis-Manifest (1 Jahr), Delegation und
@@ -589,7 +639,9 @@ ohne Netz kennt keinen dieser Endpunkte (404); ein Knoten, der sein Log noch lä
   - Ein zweiter Knoten: `bridge-node --data <ordner> --join-net <link> --url <öffentliche adresse> [--lan <port>]` –
     er lädt das Log (mit `node` + `tls` im Link zuerst über das LAN) und folgt ihm; Empfänger wird er mit seinem
     Siegel. Die Mitgliedschaft im Netz wird im Daten-Ordner gespeichert. Soll er im LAN für andere Knoten erreichbar
-    sein, läuft er schon beim Siegeln mit `--lan` (§2).
+    sein, läuft er schon beim Siegeln mit `--lan` (§2). *Nach Prüfung 8*: `--join-net-file <datei>` liest den Link aus
+    einer Datei (höchstens 4 KiB) – so steht kein Einladungscode in der Prozessliste, die jeder Benutzer des PCs lesen
+    kann (BridgeControll macht es so); `--peer-addresses public|tailnet|any` siehe §2 „Adress-Schutz“.
   - Die `net`-Befehle reden mit dem laufenden Owner-Knoten (Adresse aus `admin-key.json` oder `--node`), alles mit
     dem Admin-Schlüssel signiert (`net rescue`: mit dem Hauptschlüssel). Admin-Verlängerung und `cascade` brauchen
     die 24 Wörter (noch kein Befehl).
@@ -633,7 +685,7 @@ ohne Netz kennt keinen dieser Endpunkte (404); ein Knoten, der sein Log noch lä
   - Gegen einen Fälscher mit **demselben** mDNS-Instanznamen wie der echte Knoten hilft die Regel aus §2 nicht (die
     letzte Ankündigung gilt); er scheitert am Pin, kann aber die LAN-Adressen des echten Knotens verdrängen – dann
     gehen die Anfragen über dessen `urls`.
-- Bürgen, Wächter-Proben und automatische Stufe 1 kommen mit dem Dienst `watch`.
+- Wächter-Proben und automatische Stufe 1 sind gebaut (§11, ADR 0016); Bürgen kommen später.
 - **Query-Strings**: Der Transport gibt dem Knoten nur den Pfad. Sobald `bridge-transport` die Query mitliefert,
   können `log`, `proof`, `consistency` zusätzlich als `GET …?from=…` angeboten werden (gleiche Antworten).
 - **Folgen über große Lücken**: Wer mehr als 65.536 Einträge hinterher ist, kommt so nicht nach (dafür bräuchte es
@@ -645,3 +697,212 @@ ohne Netz kennt keinen dieser Endpunkte (404); ein Knoten, der sein Log noch lä
   die Aussagen an den neuen Log-Führer weiter. Gibt es 30 Tage lang keinen neuen Eintrag, läuft der letzte bezeugte
   Kopf ab (der neue Log-Führer stellt erst mit dem ersten neuen Eintrag einen eigenen aus).
 - **Umzug eines Mitglieds** zu einem anderen Empfänger: Post, die beim alten noch liegt, bleibt dort bis zum Ablauf.
+
+## 11. Wächter (`watch`): automatische Stufe 1
+Stufe 1 „Geprüft“ (02 §6) vergibt kein Mensch, sondern ein **Wächter**: ein Knoten, der Mitglieder nach Zeit und
+Verhalten und Knoten nach bestandenen Proben beurteilt und dafür Siegel der Stufe 1 ins Log stellt. Was er darf, prüft
+der Netz-Zustand (§6, deterministisch, `bridge-net`); was er beobachtet (Proben), steht nicht im Log – dafür bleibt
+sein Schaden begrenzt (nur Stufe 1, feste Dienste, Budget, kurze Lebensdauer, widerrufbar). Entscheidungen: ADR 0016.
+
+### 11.1 Wer Wächter ist
+- Ein Wächter ist eine Identität mit einem **aktiven Siegel der Stufe ≥ 2 mit Dienst `watch` und Karte** (§6 Abfrage
+  zur Prüfzeit; nicht gesperrt, nicht per `cascade` widerrufen). Allein aus dem Log, wie alle Rollen (§5).
+- So ein Siegel vergibt nur, wer Stufe 2 bzw. 3 vergeben darf (§3), z. B.
+  `bridge-node net seal … --level 2 --services gateway,watch` (ein Wächter muss kein Empfänger sein; über die `urls`
+  seiner Karte erreichen ihn die Knoten, die sich anmelden).
+- Ohne Wächter im Netz gibt es Stufe 1 nur von Admins (wie bisher).
+
+### 11.2 Was ein Wächter unterschreiben darf (Zustand, §6)
+Ein `seal`, das nicht nach §3 von Admins/Hauptschlüssel getragen ist, gilt nur, wenn **alle** Punkte zutreffen
+(sonst wird es übersprungen bzw. beim Log-Führer abgelehnt, Fehler `FORBIDDEN`, beim Budget `QUOTA_EXCEEDED`):
+1. **Genau ein Unterzeichner**, und der ist zur Prüfzeit Wächter (11.1). Mehr-Augen-Siegel gibt es nur von Admins.
+2. **`level` = 1.** Stufe 2 und 3 nie.
+3. **Inhaber** ≠ der Wächter selbst, und zur Prüfzeit **Mitglied** (aktive Mitgliedschaft, nicht gesperrt): Stufe 1
+   baut auf Stufe 0 auf – der Beitritt nach dem Modus des Netzes (`open`/`invite`/`closed`) bleibt das Tor, auch für
+   Knoten. Die üblichen Regeln für Inhaber (§6: nicht die Netz-ID, nicht kaskadiert, nicht per Identitäts-Widerruf
+   für ältere Aussagen gesperrt) gelten weiter.
+4. **Art des Siegels** – genau eine von zwei:
+   - **Mitglied** (ohne `card`): `services` leer. Die geltende Mitgliedschaft wurde spätestens `iat des Siegels −
+     member_age` (11.3) **angenommen** – gezählt ab ihrer Prüfzeit beim Abspielen (Log-Uhr), nicht ab ihrem `iat`
+     (*nach Prüfung 8*: ein Empfänger, der eine Mitgliedschaft zurückdatiert, macht sie nicht älter) –, und das Ende
+     der letzten Sperre des Inhabers, die der Zustand kennt, liegt mindestens
+     `member_age` vor dem `iat` des Siegels („keine Verstöße“ = keine Sperre in dieser Zeit; eine vorzeitig widerrufene
+     Sperre zählt bis zu ihrem `exp`). Der Zustand merkt sich dafür je Identität das späteste Sperr-Ende, bis
+     365 Tage danach, höchstens 100.000 Identitäten; ist die Liste voll, gilt bis zum spätesten so vergessenen Ende
+     + 365 Tage **kein** Mitglieds-Siegel eines Wächters (fail closed).
+   - **Knoten** (`card` mit Rolle `node` und mindestens einer Adresse in `urls`): `services` ⊆ **{`web`}**. Kein
+     Mindestalter der Mitgliedschaft – die Beobachtungszeit der Proben (11.6) ersetzt es; die Proben selbst kann der
+     Zustand nicht prüfen. Eine Karte einer anderen Rolle ist ungültig.
+   Erlaubte Dienste sind eine feste Liste im Code, das Manifest kann sie nicht erweitern: nur `web`, weil Websites
+   und Apps vom Client geprüft werden (Hash-Listen, zwei Signaturen, 07) – ein schlechter Host kann nur ausfallen, das
+   messen die Proben. `storage`, `compute` und `names` kommen erst mit ihren eigenen Proben (Speicher-Proben,
+   Nachrechnen, Namens-Prüfung) dazu; `gateway`, `log`, `witness` und `watch` sind Infrastruktur und bleiben bei
+   Admins (Stufe ≥ 2).
+5. **Lebensdauer** `exp − iat ≤ seal_s` (11.3).
+6. **Nur ein Stufe-1-Siegel je Inhaber zählt** (es gibt je Inhaber und Stufe ohnehin nur eines, §6). Ein Wächter
+   ersetzt ein bestehendes nur, wenn es **von ihm selbst** ist (Verlängerung, neueres `iat`) oder sein Aussteller zur
+   Prüfzeit **kein Wächter mehr** ist (verwaistes Siegel, z. B. Wächter abgesetzt). Ein Stufe-1-Siegel von Admins,
+   vom Hauptschlüssel oder von einem anderen aktiven Wächter ersetzt er nie. Admins ersetzen Wächter-Siegel wie bisher
+   (neueres `iat`). Damit ist bei zwei Wächtern, die gleichzeitig siegeln, das erste im Log das gültige, das zweite
+   wird abgelehnt.
+7. **Budget**: je Wächter höchstens `seals_per_day` Siegel je Tag (Tag nach Prüfzeit, wie Sperren je Admin); auch
+   Verlängerungen zählen. Widerrufe zählen **nicht** (Abstieg muss immer gehen; ein Wächter kann ohnehin nur seine
+   eigenen, also höchstens so viele widerrufen, wie er ausgestellt hat).
+8. *Nach Prüfung 8* – **Eigene Tabelle, eigener Topf** (vorher füllten Wächter die gemeinsame Tabelle von 10.000
+   Siegeln, danach konnte kein Admin mehr siegeln):
+   - Siegel, die ein Wächter allein unterschrieben hat, stehen in einer **eigenen Tabelle** mit höchstens
+     `limits.members` Plätzen (je Mitglied ein Stufe-1-Siegel, dazu Platz für Mitglieder, die gegangen sind und deren
+     Siegel noch läuft). Ist sie voll, wird ein neues Wächter-Siegel abgelehnt (`QUOTA_EXCEEDED`); eine Verlängerung
+     passt immer. Die 10.000 Plätze für Siegel von Admins und Hauptschlüssel berührt das nie; ersetzt ein Admin ein
+     Wächter-Siegel, wandert es in deren Tabelle (und braucht dort Platz).
+   - Einträge von Wächtern – ihre Siegel und die Widerrufe ihrer eigenen Siegel durch einen Unterzeichner ohne
+     Admin-Rechte – zählen in einem **eigenen Topf** von `limits.log_entries_per_day` je Tag (gleich groß, Widerrufe
+     mit 10 % Reserve), nicht im Topf von Admins und Empfängern.
+
+**Widerruf**: Seine eigenen Siegel widerruft ein Wächter mit `revoke` + `statement` (§3: Unterzeichner der Aussage –
+das geht, solange er irgendein aktives Siegel mit Karte hat); fremde nie, `revoke` mit `identity` nie. Admins mit
+`seals` und der Hauptschlüssel widerrufen Wächter-Siegel wie jedes Siegel.
+
+**Ende eines Wächters (keine Kaskade)**: Läuft das `watch`-Siegel ab, wird es ersetzt oder widerrufen, bleiben die
+Stufe-1-Siegel, die der Wächter ausgestellt hat, bis zu ihrem `exp` gültig (höchstens `seal_s`, Standard 30 Tage) –
+wie die Aussagen eines Admins, dessen Delegation endet. Andere Wächter dürfen sie ersetzen (Punkt 6), Admins einzeln
+widerrufen. Für einen gestohlenen Wächter-Schlüssel gibt es den Widerruf mit `cascade` (Hauptschlüssel, §3): er
+entfernt alles, was der Wächter ausgestellt hat. Begründung: Ein vergessenes Verlängern des Wächter-Siegels ließe sonst
+alle Stufe-1-Siegel des Netzes auf einmal fallen (Zuverlässigkeit); der Schaden eines bösen Wächters ist durch
+Stufe 1, die Dienst-Liste, das Budget und die Lebensdauer begrenzt.
+
+### 11.3 Regeln im Manifest (`watch`, optional)
+```json
+"watch":{"member_age_s":604800,"probe_interval_s":300,"node_observe_s":86400,"success_pct":90,
+         "fail_limit":3,"seal_s":2592000,"renew_s":604800,"seals_per_day":1000}
+```
+| Feld | Bedeutung | Grenzen | Standard |
+|---|---|---|---|
+| `member_age_s` | Mindestalter der Mitgliedschaft (und Abstand zur letzten Sperre) für Mitglieds-Siegel | 1 – 31.536.000 (365 Tage) | 604.800 (7 Tage) |
+| `probe_interval_s` | Abstand der Proben je Knoten | 1 – 86.400 | 300 (5 min) |
+| `node_observe_s` | Beobachtungszeit: so lange muss ein Knoten bestanden haben, und so lang ist das Fenster für den Anteil | 1 – 2.592.000 (30 Tage) | 86.400 (24 h) |
+| `success_pct` | Mindestanteil bestandener Proben im Fenster | 50 – 100 | 90 |
+| `fail_limit` | Fehlschläge in Folge bis zum Abstieg | 1 – 100 | 3 |
+| `seal_s` | höchste Lebensdauer eines Wächter-Siegels | 60 – 7.776.000 (90 Tage) | 2.592.000 (30 Tage) |
+| `renew_s` | verlängert wird, wenn weniger als das übrig ist | 1 ≤ `renew_s` < `seal_s` | 604.800 (7 Tage) |
+| `seals_per_day` | Budget je Wächter und Tag | 1 – 10.000, höchstens ¼ von `log_entries_per_day` | 1.000 |
+
+- Streng wie alle Bodies: genau diese acht Felder, alle Pflicht, ganze Zahlen in den Grenzen; sonst ist das Manifest
+  ungültig. Ohne das Feld gelten die Standardwerte (ein Siegel mit `watch` ist die bewusste Entscheidung des Owners).
+- *Nach Prüfung 8*: `seals_per_day` ist höchstens ein Viertel von `limits.log_entries_per_day` (mindestens 1; beim
+  Standard 10.000 also 2.500) – mindestens vier Wächter passen mit vollem Budget in ihren Topf (11.2 Punkt 8), keiner
+  verbraucht ihn allein. Sonst ist das Manifest ungültig.
+- Ändern wie jede Manifest-Änderung (`rules`, §3). Der Zustand prüft daraus nur `member_age_s`, `seal_s` und
+  `seals_per_day` (11.2); die übrigen Felder steuern den Wächter (11.4–11.6) und sind so für alle sichtbar.
+- Tests setzen kurze Zeiten über genau dieses Feld (z. B. `member_age_s: 2`, `probe_interval_s: 1`).
+
+### 11.4 Proben (`bridge-node`, nur der Wächter)
+- Je angemeldetem Knoten (11.5) frühestens alle `probe_interval_s` eine Probe; der Wächter-Takt läuft alle 10 s
+  (Tests 200 ms) und startet je Takt höchstens 16 Proben gleichzeitig.
+- Weg: wie jede Knoten-Anfrage (§2) – LAN mit dem Pin `tls` der **angemeldeten** Karte zuerst (wenn der Knoten im LAN
+  gesehen wurde), dann ihre `urls`; die erste Adresse, die überhaupt antwortet, zählt. *Nach Prüfung 8*: Die `urls`
+  der Anmeldung hat der Knoten selbst gewählt – sie gehen nur an öffentliche IP-Adressen, je Aufruf aufgelöst und
+  festgelegt (§2 „Adress-Schutz“; mit `tailnet` auch Tailscale, mit `any` alle). Eine Adresse, die auf den Rechner des
+  Wächters oder ins private Netz zeigt, ist eine fehlgeschlagene Probe, ohne dass eine Verbindung aufgebaut wird. Je
+  Takt höchstens 16 Proben, je Probe höchstens 4 Adressen (+ 4 im LAN), alles in den 5 s der Probe.
+- Eine Probe **besteht**, wenn alles stimmt:
+  1. `GET /v4/info`: Karte mit genau der ID des Knotens, Rolle `node`; die Aussage `info` ist von dieser Karte
+     signiert, Art `info`, Netz = dieses Netz, ihr `iat` höchstens 5 min von der Uhr des Wächters entfernt (falsche
+     Uhren fallen auf, 02 §7 Nr. 14).
+  2. `GET /v4/net/{netz}/head`: ein Kopf, dessen Größe n höchstens 64 neben der eigenen Log-Größe s liegt. Für
+     n ≤ s + 1 voll geprüft wie beim Folgen (`check_witnessed`), für n ≤ s muss zusätzlich die Wurzel genau die des
+     eigenen Logs bei Größe n sein (**konsistent**) und n ≥ (eigene bezeugte Größe − 64) gelten (**nicht weit
+     hinten**). Für n > s + 1 (der Wächter hängt selbst hinterher) genügt die gültige Signatur eines Log-Führers der
+     aktuellen Regeln.
+  3. Beide Antworten zusammen in **höchstens 5 s**.
+- Jede Probe wird gespeichert (11.7). `seit` = Zeit der ersten bestandenen Probe nach der Anmeldung bzw. nach der
+  letzten Serie von `fail_limit` Fehlschlägen; einzelne Fehlschläge darunter setzen `seit` nicht zurück.
+
+### 11.5 Anmeldung von Knoten
+- **Endpunkt** `POST /v4/node/watch` (beim Wächter): `rq` mit `op:"watch"`,
+  `body:{"card":<karte des knotens>,"services":[…]}`. Prüfung billig zuerst: dieser Knoten ist Wächter (sonst 403
+  `FORBIDDEN`) → `rq` für ihn und frisch → Body genau diese zwei Felder, Karte Rolle `node` mit `id = iss`, 1–4
+  `urls`, `iat` der Karte höchstens 5 min voraus; `services` ⊆ {`web`} → Signatur → Nonce einmalig (`REPLAY`) → Rate
+  je Identität → Aufrufer ist Mitglied und nicht gesperrt (`NOT_MEMBER`, `BANNED`).
+- **Tabelle** (gespeichert): höchstens 1.024 Knoten. Eine erneute Anmeldung verlängert die bestehende und übernimmt
+  Dienste und Karte (eine Karte mit älterem `iat` als die gespeicherte wird nicht übernommen). Eine Anmeldung gilt
+  24 Anmelde-Takte (Standard 24 × 10 min = 4 h); danach räumt der Wächter sie samt Proben weg.
+- *Nach Prüfung 8* – **Volle Tabelle**: Vorher hielten 1.024 Anmeldungen, die nie eine Probe bestehen, jeden neuen
+  Knoten draußen. Jetzt nimmt ein neuer Knoten den Platz der Anmeldung, die **nicht besteht** – zuerst ohne `seit`
+  (geprüfte vor noch nie geprüften), dann mit Fehlschlägen in Folge –, und darunter der **ältesten** (Zeit der ersten
+  Anmeldung, Schema 8); sie geht samt Proben. Knoten, die bestehen, verdrängt niemand; sind alle so, gibt es 429
+  `QUOTA_EXCEEDED`.
+- *Nach Prüfung 8* – **Grenzen je Absender**: neue Anmeldungen höchstens 16 je Adresse (IPv4, IPv6 je /64) und Stunde
+  (gemerkt höchstens 4.096 Adressen; ist das voll und keine Stunde abgelaufen, wird abgelehnt), sonst 429; je Identität
+  gilt die Rate für signierte Anfragen. **Keine** Stufe und kein Rätsel für die Anmeldung: Das Tor ist die
+  Mitgliedschaft (Beitritt nach Modus des Netzes, in offenen Netzen mit `join.pow_bits`; jede Mitgliedschaft kostet einen
+  Log-Eintrag aus `log_entries_per_day`). Wer massenhaft Mitglieder anlegt, um die Tabelle zu leeren, verdrängt nur
+  Anmeldungen, die nicht bestehen, und braucht dafür mehr Mitgliedschaften, als das Log je Tag annimmt.
+- *Nach Prüfung 8* – **Neue Adressen = neue Beobachtung**: Ändern sich mit einer (neueren) Karte die `urls` oder der
+  Pin `tls`, beginnt `seit` neu (Speicher und Datenbank) – die Beobachtungszeit der alten Adressen gilt nicht für die
+  neuen.
+- **Knoten-Seite**: `bridge-node … --probe web` (bzw. `--probe -` für Stufe 1 ohne Dienste). Alle 10 min (Tests
+  500 ms): Ist der Knoten noch kein Mitglied, tritt er bei einem Empfänger aus dem Log bei wie ein Client (§7: Challenge,
+  ggf. Rätsel, `POST /v4/net/join` mit seiner Knoten-Karte; ein Einladungscode aus dem Link von `--join-net` wird
+  mitgeschickt, er bleibt nur im Speicher). Sonst meldet er sich bei bis zu 8 Wächtern aus dem Log an.
+
+### 11.6 Was der Wächter entscheidet (je Takt)
+- **Knoten** (angemeldet): bereit, wenn `jetzt − seit ≥ node_observe_s`, unter den gespeicherten Proben der letzten
+  `node_observe_s` mindestens `success_pct` % bestanden sind, die letzte Probe bestanden hat und 11.2 erfüllt ist →
+  Siegel Stufe 1 mit der angemeldeten Karte, Dienste = die angefragten (⊆ {`web`}), `exp = iat + seal_s`.
+- **Mitglieder**: je Takt höchstens 256 Mitglieder, reihum nach ID; bei diesem Wächter angemeldete Knoten werden dabei
+  übersprungen (sie bekommen ein Knoten-Siegel). Bereit, wenn 11.2 (Mitglieds-Siegel) erfüllt ist → Siegel Stufe 1
+  ohne Dienste und ohne Karte.
+- **Keine Doppelten**: übersprungen wird jeder Inhaber mit einer aktiven Stufe ≥ 2 oder mit einem aktiven
+  Stufe-1-Siegel, das nicht von diesem Wächter ist und nicht verwaist (11.2 Punkt 6).
+- **Verlängern**: ein eigenes Siegel mit weniger als `renew_s` Rest, wenn der Inhaber weiter bereit ist (Knoten: der
+  Anteil im Fenster stimmt und weniger als `fail_limit` Fehlschläge in Folge; Mitglied: 11.2). *Nach Prüfung 8*: Das
+  gilt nur für eine **reine Verlängerung** mit derselben Karte (gleiche `urls` und `tls`). Haben sich `urls` oder `tls`
+  der angemeldeten Karte gegenüber der im Siegel geändert, wird neu gesiegelt erst, wenn der Knoten mit der neuen Karte
+  **bereit** ist (volle Beobachtungszeit seit dem Neubeginn von `seit`, 11.5, Anteil, letzte Probe bestanden) – vorher
+  reichte eine einzige bestandene Probe.
+- **Abstieg**: `fail_limit` Fehlschläge in Folge → der Wächter widerruft sein Siegel (`revoke` + `statement`, Grund
+  „Proben fehlgeschlagen“) und `seit` beginnt neu. Ist der Inhaber eines eigenen Siegels gesperrt oder kein Mitglied
+  mehr, widerruft er es ebenso (sonst gälte es nach dem Ende einer Sperre wieder).
+- *Nach Prüfung 8* – **Anmeldung abgelaufen**: Ein Knoten konnte seinen Proben ausweichen, indem er sich nicht mehr
+  anmeldete – dann wurde er nicht mehr geprüft und behielt sein Siegel bis `exp` (bis 90 Tage). Jetzt widerruft der
+  Wächter ein eigenes **Knoten**-Siegel (mit Karte), sobald die Anmeldung des Inhabers abgelaufen (oder verdrängt) ist,
+  Grund „Anmeldung abgelaufen“. Entschieden gegen „mit der Karte aus dem Siegel weiter proben“: ein Siegel ohne
+  Anmeldung hätte keine Verlängerung und keine Grenze in der Tabelle, und „kein Siegel ohne Anmeldung“ ist einfach zu
+  prüfen. Damit ein Neustart des Wächters nach langer Pause nicht alle Siegel auf einmal widerruft, gilt das erst,
+  wenn der Wächter seit 2 Anmelde-Takten wieder läuft (die Knoten melden sich bis dahin neu an). Mitglieds-Siegel
+  (ohne Karte) betrifft das nicht.
+- **Grenzen**: je Takt höchstens 16 Aussagen und nie mehr Siegel als das Budget des Tages noch zulässt (aus dem
+  Zustand). Eingereicht wird über `submit` beim aktiven Log-Führer wie bei Admins (Anfrage vom Wächter-Knoten
+  signiert); `submit` nimmt dafür auch Wächter an. Eine Ablehnung (z. B. ein anderer Wächter war schneller) wird nur
+  protokolliert.
+
+### 11.7 Speichern und Status
+- **SQLite, Schema 7** (nur angehängt): `watch_nodes` (je Netz und Knoten: Karte, Dienste, gültig bis, `seit`,
+  Fehlschläge in Folge, letzte Probe; *Schema 8, nach Prüfung 8*: Zeit der ersten Anmeldung für die Verdrängung,
+  ältere Zeilen 0) und `watch_probes` (Zeit, bestanden, Dauer in ms). Je Knoten höchstens 1.024
+  Proben (die neuesten; älter als das Fenster `node_observe_s` werden gelöscht). Ein Neustart verliert nichts: Fenster
+  und `seit` laufen weiter.
+- `bridge-node net watch-status --data <ordner>` zeigt (aus Datenbank und Log des Ordners, auch während der Knoten
+  läuft): ob der Knoten Wächter ist, die Regeln, das heutige Budget, seine Stufe-1-Siegel und die angemeldeten Knoten
+  mit Proben, Anteil und Fehlschlägen.
+
+### 11.8 Grenzen und offene Punkte
+- Proben stehen nicht im Log: Wer einem Wächter (Stufe ≥ 2 von einem Admin) misstraut, widerruft sein `watch`-Siegel;
+  seine Stufe-1-Siegel laufen dann aus (11.2) oder werden einzeln widerrufen. Eine Kaskade nur für Wächter-Siegel durch
+  Admins gibt es nicht (nur `cascade` mit dem Hauptschlüssel).
+- Ein verwaistes Siegel (Wächter weg) kann nur ein anderer Wächter ersetzen, ein Admin widerrufen oder sein Ablauf
+  beenden – ein anderer Wächter kann es nicht widerrufen.
+- „Verstöße“ sind bisher nur Sperren. Bürgen (02 §6) fehlen noch.
+- Mehrere Wächter teilen die Arbeit nicht auf: jeder probt alle Knoten, die sich bei ihm anmelden.
+- In `invite`-Netzen braucht ein Knoten einen Code im Link, in `closed`-Netzen ein Admin, der ihn aufnimmt (dafür gibt
+  es noch keinen Befehl).
+- Nur `web` als Dienst; `storage`/`compute`/`names` erst mit ihren Proben (Phase 4/5).
+- Der Wächter ist (wie der Empfänger) ein Teil von `bridge-node` (Modul `network::watcher`), noch kein Plugin unter
+  `services/` (03 §1) – das Plugin-Gerüst fehlt noch; die Regeln liegen ohnehin im Netz-Zustand (`bridge-net`).
+- *Nach Prüfung 8*: Das Alter einer Mitgliedschaft zählt ab der Log-Uhr beim Annehmen. In einem Log, in dem lange
+  nichts eingetragen wurde, steht die Log-Uhr auf dem letzten Eintrag – um diese Zeit kann ein Empfänger eine
+  Mitgliedschaft noch zurückdatieren (nicht weiter). Eine Prüfung „frisch“ beim Log-Führer gibt es dafür noch nicht.
+- *Nach Prüfung 8*: Mit `--peer-addresses public` bekommen Knoten, die nur über private oder Tailnet-Adressen
+  erreichbar sind, keine Stufe 1 vom Wächter (Proben schlagen fehl) und keine Apps von Knoten, die ihnen nur über eine
+  Wächter-Karte folgen – über Tailscale `tailnet` (BridgeControll-Standard), in reinen LAN-Netzen `any` (§2).
