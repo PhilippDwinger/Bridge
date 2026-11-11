@@ -197,7 +197,12 @@ dependencies = [
  "bridge-core",
  "bridge-net",
  "bridge-node",
+ "bridge-sdk",
+ "bridge-tests",
+ "rand_core 0.6.4",
  "rustix",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -220,6 +225,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

@@ -209,6 +209,12 @@ impl AdminClient {
         &self.net
     }
 
+    /// ID of the owner node.
+    #[must_use]
+    pub fn node_id(&self) -> &Id {
+        &self.node
+    }
+
     /// Address of the owner node.
     #[must_use]
     pub fn node_url(&self) -> &str {

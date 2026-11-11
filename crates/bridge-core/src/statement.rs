@@ -18,6 +18,9 @@ use crate::{CLOCK_SKEW_MS, PROTOCOL_VERSION, field_i64, field_str};
 
 /// Maximum size of a statement in bytes.
 pub const MAX_STATEMENT_BYTES: usize = 64 * 1024;
+/// Largest statement of a kind that allows more than [`MAX_STATEMENT_BYTES`] (app manifests, docs/07 §3) - it must
+/// still fit into one request (1 MiB).
+pub const MAX_LARGE_STATEMENT_BYTES: usize = 960 * 1024;
 /// Maximum number of signers of one statement.
 pub const MAX_SIGNERS: usize = 16;
 /// Maximum lifetime of a statement (2 years).
@@ -69,6 +72,12 @@ impl Statement {
     /// Signs a draft by several identities (`sigs`) - for "k of n admins" actions. The entries are ordered by
     /// signer ID (the only accepted order).
     pub fn sign_multi(draft: &Draft<'_>, signers: &[&Identity]) -> CoreResult<Self> {
+        Self::sign_multi_with_limit(draft, signers, MAX_STATEMENT_BYTES)
+    }
+
+    /// Like [`Statement::sign_multi`] for kinds that may be larger than [`MAX_STATEMENT_BYTES`] (app manifests,
+    /// docs/07 §3) - at most `max_bytes` (never more than [`MAX_LARGE_STATEMENT_BYTES`]).
+    pub fn sign_multi_with_limit(draft: &Draft<'_>, signers: &[&Identity], max_bytes: usize) -> CoreResult<Self> {
         if signers.is_empty() || signers.len() > MAX_SIGNERS {
             return Err(CoreError::format("sigs: 1..=16 signers"));
         }
@@ -82,7 +91,7 @@ impl Statement {
             .collect();
         let mut raw = raw;
         raw.insert("sigs".into(), Value::Array(sigs));
-        Self::from_value(Value::Object(raw))
+        Self::from_value_with_limit(Value::Object(raw), max_bytes)
     }
 
     /// Parses bytes and checks the form (not the signatures).
@@ -90,11 +99,23 @@ impl Statement {
         Self::from_value(parse_strict(bytes, MAX_STATEMENT_BYTES)?)
     }
 
+    /// Like [`Statement::parse`] with another size limit (at most [`MAX_LARGE_STATEMENT_BYTES`]) - only for kinds
+    /// whose rules allow it (app manifests, docs/07 §3). The caller checks the kind.
+    pub fn parse_with_limit(bytes: &[u8], max_bytes: usize) -> CoreResult<Self> {
+        let max_bytes = max_bytes.min(MAX_LARGE_STATEMENT_BYTES);
+        Self::from_value_with_limit(parse_strict(bytes, max_bytes)?, max_bytes)
+    }
+
     /// Checks the form of a statement given as JSON value (not the signatures). Also the size: the canonical form
     /// must fit into [`MAX_STATEMENT_BYTES`].
     pub fn from_value(value: Value) -> CoreResult<Self> {
+        Self::from_value_with_limit(value, MAX_STATEMENT_BYTES)
+    }
+
+    /// Like [`Statement::from_value`] with another size limit (at most [`MAX_LARGE_STATEMENT_BYTES`]).
+    pub fn from_value_with_limit(value: Value, max_bytes: usize) -> CoreResult<Self> {
         let bytes = canonical(&value)?;
-        if bytes.len() > MAX_STATEMENT_BYTES {
+        if bytes.len() > max_bytes.min(MAX_LARGE_STATEMENT_BYTES) {
             return Err(CoreError::TooLarge("statement".into()));
         }
         let Value::Object(raw) = value else {

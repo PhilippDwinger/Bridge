@@ -48,6 +48,9 @@ pub enum Role {
     Net,
     /// An admin key delegated by a network's main key.
     Admin,
+    /// The key of a Bridge app (docs/07 §2): its ID is the app ID. It only signs app manifests (together with the
+    /// owner) and never logs in.
+    App,
 }
 
 impl Role {
@@ -59,6 +62,7 @@ impl Role {
             Self::Node => "node",
             Self::Net => "net",
             Self::Admin => "admin",
+            Self::App => "app",
         }
     }
 
@@ -68,6 +72,7 @@ impl Role {
             "node" => Ok(Self::Node),
             "net" => Ok(Self::Net),
             "admin" => Ok(Self::Admin),
+            "app" => Ok(Self::App),
             _ => Err(CoreError::format("role: unknown")),
         }
     }

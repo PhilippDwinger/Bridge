@@ -476,7 +476,9 @@ impl NetState {
             Kind::Seal => self.check_seal(statement, &signers, by_master, at)?,
             Kind::Revoke => self.check_revoke(statement, &signers, at)?,
             Kind::Ban => self.check_ban(statement, &signers, at)?,
-            Kind::Head | Kind::Cosign | Kind::Home => return Err(NetError::format("entry: not a log kind")),
+            Kind::Head | Kind::Cosign | Kind::Home | Kind::App => {
+                return Err(NetError::format("entry: not a log kind"));
+            }
         };
         // Effects that remember a revoked or replaced statement need room for it (soft cap; a cascade may add a
         // bounded number more).

@@ -11,8 +11,8 @@ Ein Protokoll für alles: Clients ↔ Knoten und Knoten ↔ Knoten. Alles, was r
   (`key`, `env`, `rq`, `pow`, bei Aussagen ihre Art wie `seal`) – eine Signatur für das eine kann nie für etwas
   anderes gelten. Die Arten `env`, `key`, `rq`, `pow`, `part` sind für Aussagen gesperrt.
 - **Grenzen vor dem Parsen**: Anfrage max. 1 MiB, Umschlag max. 256 KiB (Größeres als Strom, §6), JSON-Tiefe max. 32
-  (Umschlag max. 8, damit er verpackt in Antworten immer lesbar bleibt), Schlüsselkarte max. 2 KiB,
-  Strings/IDs mit festen Mustern.
+  (Umschlag max. 8, damit er verpackt in Antworten immer lesbar bleibt), Schlüsselkarte max. 2 KiB, Aussage max.
+  64 KiB (Ausnahme: App-Manifeste der Art `app` max. 960 KiB, 07 §3), Strings/IDs mit festen Mustern.
 - **Strenges JSON** (Z3): doppelte Schlüssel, Kommazahlen und ganze Zahlen außerhalb ±(2^53−1) werden abgelehnt
   (`BAD_FORMAT`) – so lesen alle Sprachen dasselbe Objekt gleich, und die kanonische Form ist eindeutig.
   Binärfelder müssen kanonisches Base64url sein (genau eine Schreibweise pro Wert).
@@ -24,9 +24,10 @@ z. B. `k3x7q2...`.
 **Schlüsselkarte** (selbst-signiert):
 ```json
 {"v":4,"t":"key","id":"<id>","sign":"<ed25519-pub>","box":"<x25519-pub>",
- "role":"client|node|net|admin","name":"optional","iat":1794200000000,"sig":"<ed25519>"}
+ "role":"client|node|net|admin|app","name":"optional","iat":1794200000000,"sig":"<ed25519>"}
 ```
-Prüfung: `id == ID(sign)`, Signatur gültig, `role` erlaubt.
+Prüfung: `id == ID(sign)`, Signatur gültig, `role` erlaubt. Rolle `app` (Phase 4a, 07 §2): der Schlüssel einer
+Bridge-App, ID = App-ID; er signiert nur App-Versionen (zusammen mit dem Owner) und meldet sich nie an.
 
 ## 3. Aussagen (signierte Erklärungen)
 ```json
@@ -47,6 +48,7 @@ die Signaturen weg (ADR 0010).
 | `ban` | Identität, Dauer, Grund | Admin |
 | `name` | Name → Ziel-ID, Dienst-Art, Beschreibung, Schlagworte | Inhaber des Ziels (+ Freigabe nach Namensregel) |
 | `log` | Log-Eintrag: Nummer, Hash des Vorgängers, Aussage | Stufe-3-Wächter |
+| `app` | Eine Version einer Bridge-App: Dateien (Pfad → Blob), Hosts, Karten von App-Schlüssel und Owner (07 §3) | App-Schlüssel **und** Owner (`sigs`, beide Pflicht); steht nicht im Log |
 
 Jede Aussage, die Rechte gibt oder nimmt, gilt nur, wenn sie im **Transparenz-Log** steht.
 
@@ -127,6 +129,13 @@ signiert sind, dient die Transport-Verschlüsselung nur dem Schutz der Metadaten
 | POST | `/v4/ack` | Abgeholtes bestätigen (wird dann gelöscht) |
 | POST | `/v4/node/relay` · `/v4/node/homes` | Knoten → Knoten: Umschlag weiterreichen, `home`-Einträge (06 §8) |
 | POST | `/v4/node/probe` | Wächter-Proben |
+| POST | `/v4/blob/begin` · `/chunk` · `/info` · `/hashes` · `/get` | Dateien nach Inhalt hochladen und lesen (Phase 4a, 07 §7) |
+| POST | `/v4/app/publish` · `/v4/app/manifest` · `/v4/node/app` | App-Versionen abgeben, abfragen, unter Hosts anbieten (07 §7) |
+| GET | `/app/<app-id>/<pfad>` | Dateien einer App in abgeschotteter Herkunft ausliefern (07 §5) |
+| OPTIONS | `/v4/…` | CORS-Vorabfrage von Browsern (07 §5) |
+
+Die Bridge-API erlaubt Aufrufe aus Apps im Browser (Phase 4a): jede Antwort unter `/v4/` trägt
+`Access-Control-Allow-Origin: *`, nie `Allow-Credentials` (Sitzungen nur per Bearer-Token, keine Cookies).
 
 Sitzungen sind nur für Billiges (Abholen). Alles, was etwas verändert, ist zusätzlich signiert (Z2).
 
@@ -167,6 +176,9 @@ Künftige Operationen, die beides nicht sind, merken sich (`iss`, `n`) im Zeitfe
 - Transport: Kopfzeilen müssen in 10 s da sein, der Inhalt in weiteren 10 s, jede Anfrage endet nach 35 s.
   Die Adress-Prüfung läuft, bevor der Inhalt gelesen wird. `X-Forwarded-For` zählt nur von vertrauten Proxys und
   nur der letzte Eintrag (der, den der Proxy selbst angehängt hat).
+  Antworten als Strom (große App-Dateien, 07 §5): höchstens 8 je Adresse und 128 je Knoten, mindestens 16 KiB/s im
+  Schnitt (ab 10 s), höchstens 1 Stunde – auch hinter vertrauten Proxys. Fehler, die der Transport selbst erzeugt,
+  bekommen dieselben Köpfe wie die des Knotens (CORS unter `/v4/`).
 
 ## 8. Proof-of-Work (nur optional / unter Last)
 Rätsel vom Knoten:

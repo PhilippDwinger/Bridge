@@ -26,7 +26,13 @@ const MAX_TLS_FILE_BYTES: u64 = 16 * 1024;
 
 /// Loads the node identity, or creates it if there is none yet.
 pub fn load_or_create(data_dir: &Path) -> Result<Identity, String> {
-    let path = data_dir.join(KEY_FILE);
+    load_or_create_at(&data_dir.join(KEY_FILE))
+}
+
+/// Loads an identity from a secret file (`{"v":4,"t":"secret","sign","box"}`), or creates it there (owner-only
+/// file, written under a temporary name first). A damaged file is an error, never replaced (Z8).
+pub fn load_or_create_at(path: &Path) -> Result<Identity, String> {
+    let path = path.to_path_buf();
     if path.exists() {
         let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         return parse(&bytes).map_err(|e| format!("{} is damaged ({e}); not starting", path.display()));
@@ -36,7 +42,7 @@ pub fn load_or_create(data_dir: &Path) -> Result<Identity, String> {
     let content = zeroize::Zeroizing::new(
         json!({"v": 4, "t": "secret", "sign": b64(sign.as_slice()), "box": b64(receive.as_slice())}).to_string(),
     );
-    let temporary = data_dir.join(format!("{KEY_FILE}.new"));
+    let temporary = path.with_extension("new");
     // A leftover from a crash during creation was never used (the rename did not happen) - safe to replace.
     let _ = fs::remove_file(&temporary);
     {
@@ -91,7 +97,7 @@ fn parse(bytes: &[u8]) -> Result<Identity, CoreError> {
 
 /// Writes a new secret file (never replaces one): readable only by its owner from the first byte on, written to a
 /// temporary name first and then renamed, so a crash never leaves half a file under the real name.
-pub(crate) fn write_new_secret(path: &Path, content: &[u8]) -> Result<(), String> {
+pub fn write_new_secret(path: &Path, content: &[u8]) -> Result<(), String> {
     if path.exists() {
         return Err(format!("{} already exists", path.display()));
     }

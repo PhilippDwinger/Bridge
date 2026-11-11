@@ -12,6 +12,10 @@
 //! first and connect with exactly that certificate; only if that does not work, they use the Internet address.
 //! Everything above the connection is checked the same way on both paths.
 //!
+//! Files and apps (docs/07, module [`apps`]): upload blobs, download them from several hosts at once (verified per
+//! part, resumable), publish an app folder as a version signed by the app key and the owner, fetch and verify app
+//! versions, pick a host (LAN first).
+//!
 //! Depends only on the protocol (`bridge-core`) and `bridge-transport` - never on node internals.
 
 use std::collections::{HashMap, VecDeque};
@@ -29,6 +33,13 @@ use bridge_transport::{ClientResponse, Discovery, HttpClient, TransportError};
 use rand_core::OsRng;
 use serde_json::{Value, json};
 use thiserror::Error;
+
+pub mod apps;
+
+pub use apps::{
+    Announced, AppDraft, AppVersion, BlobSource, DownloadReport, FolderFile, Published, announce_app, download_blob,
+    fetch_app, fetch_blob, fetch_hash_list, pick_host, reach_host, reachable_hosts, scan_app_folder,
+};
 
 /// Errors of the SDK.
 #[derive(Debug, Error)]

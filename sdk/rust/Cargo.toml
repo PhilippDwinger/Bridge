@@ -17,3 +17,4 @@ bridge-transport.workspace = true
 serde_json.workspace = true
 rand_core.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

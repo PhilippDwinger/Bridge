@@ -2,17 +2,20 @@
 //!
 //! Data types, strict and canonical JSON (RFC 8785), the crypto suite B4-1 (Ed25519, X25519, HKDF-SHA256,
 //! ChaCha20-Poly1305, SHA-256), identities and key cards, master keys from 24 BIP-39 words, signed statements,
-//! envelopes, error codes.
+//! envelopes, error codes, blobs (files by content), private-file encryption and app manifests (docs/07).
 //! No I/O, no clock and no randomness unless passed in - fully testable. All cryptography of Bridge lives here
 //! (Zero Trust rule Z10, nonce invariant N1 in ADR 0008).
 //!
 //! Layering (docs/03_ARCHITEKTUR.md): this crate depends on no other Bridge crate.
 
+pub mod app;
+pub mod blob;
 pub mod content;
 pub mod crypto;
 pub mod encoding;
 pub mod envelope;
 pub mod error;
+pub mod file;
 pub mod id;
 pub mod json;
 pub mod keys;
@@ -23,9 +26,12 @@ pub mod request;
 pub mod statement;
 pub mod stream;
 
+pub use app::{AppFile, AppManifest, FileType};
+pub use blob::{BlobId, HashList};
 pub use content::{Content, ContentType, Payload, StreamTicket};
 pub use envelope::{Address, Envelope, Kind};
 pub use error::{CoreError, CoreResult};
+pub use file::FileKey;
 pub use id::Id;
 pub use keys::{Identity, KeyCard, Role};
 pub use link::JoinLink;

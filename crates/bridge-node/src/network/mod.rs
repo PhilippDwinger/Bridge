@@ -55,7 +55,7 @@ use tokio::task::JoinHandle;
 use crate::{Node, lock};
 
 pub(crate) use gateway::Route;
-pub(crate) use peer::Peers;
+pub(crate) use peer::{Endpoint, Peers};
 
 /// Meta keys in the store (the network a data folder belongs to survives restarts).
 pub(crate) const META_NET: &str = "net.id";
@@ -96,6 +96,8 @@ pub struct NetTiming {
     pub peer_gap: Duration,
     /// Join: wait at most this long until the new membership is in a witnessed head here.
     pub join_wait: Duration,
+    /// Apps: ask the other hosts of every hosted app for newer versions this often (docs/07 §4).
+    pub apps: Duration,
 }
 
 impl Default for NetTiming {
@@ -111,6 +113,7 @@ impl Default for NetTiming {
             peer_timeout: Duration::from_secs(10),
             peer_gap: Duration::from_secs(1),
             join_wait: Duration::from_secs(20),
+            apps: Duration::from_secs(30),
         }
     }
 }
@@ -130,6 +133,7 @@ impl NetTiming {
             peer_timeout: Duration::from_secs(3),
             peer_gap: Duration::from_millis(100),
             join_wait: Duration::from_secs(10),
+            apps: Duration::from_millis(200),
         }
     }
 }

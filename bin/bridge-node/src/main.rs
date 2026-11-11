@@ -3,6 +3,7 @@
 //! ```text
 //! bridge-node --data <folder> [--listen 127.0.0.1:7400] [--name <text>] [--url <public url>]...
 //!             [--trust-proxy <ip>]... [--pow-bits <n>] [--join-net <link>] [--lan <port>|<ip:port>]
+//!             [--standalone-blobs <MiB>]
 //! bridge-node net create --data <folder> --name <text> --url <public url> [--template open|invite|closed]
 //! bridge-node net invite --data <folder> [--uses 1] [--days 30] [--node <url>]
 //! bridge-node net seal   --data <folder> --node-url <url> --node-id <id> [--level <1-3>] [--services <list>]
@@ -11,6 +12,10 @@
 //! bridge-node net ban    --data <folder> --identity <id> [--days 30] [--reason <text>] [--node <url>]
 //! bridge-node net rescue --data <folder> (--witnesses <ids> [--threshold <n>] [--logs <ids>] | --file <json>)
 //!                        [--node <url>]
+//! bridge-node app create  --data <folder> --name <text>
+//! bridge-node app publish --data <folder> --app <id> --folder <path> [--host <node-id>]... [--entry <file>]
+//!                         [--description <text>] [--node <url>]
+//! bridge-node app hosts   --data <folder> --app <id> [--add <node-id>]... [--remove <node-id>]... [--node <url>]
 //! ```
 //! `net rescue` reads the 24 words from the terminal or standard input (one line, never shown, stored or logged; past
 //! std's stdin buffer, see `secret`).
@@ -18,6 +23,8 @@
 //! LAN (docs/06 §2): `--lan 7443` listens with TLS on 0.0.0.0:7443, announces the node via mDNS and finds other
 //! nodes of its network there; the node's card then carries the fingerprint of its certificate (`node-tls.pem`).
 //! The `net` commands talk to the running owner node (address from `admin-key.json`, or `--node`).
+//! `--standalone-blobs 1024`: a node without a network takes blob uploads (off by default - every identity is
+//! anonymous there), at most this many MiB for all blobs together (docs/07 §5).
 
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
@@ -31,12 +38,15 @@ use bridge_node::admin::{self, AdminClient};
 use bridge_node::{Clock as _, LanConfig, NetConfig, NodeConfig, SystemClock};
 use tokio::net::TcpListener;
 
+mod apps;
 mod secret;
 
 const USAGE: &str = "Aufruf:
   bridge-node --data <ordner> [--listen 127.0.0.1:7400] [--name <text>] [--url <öffentliche adresse>]...
               [--trust-proxy <ip>]... [--pow-bits <0-28>] [--join-net <link>] [--lan <port>]
+              [--standalone-blobs <MiB>]
               (--lan 7443: auch im LAN per TLS auf 0.0.0.0:7443, per mDNS angekündigt; oder --lan <ip:port>)
+              (--standalone-blobs: Hochladen von Dateien auf einem Knoten ohne Netz erlauben, höchstens so viele MiB)
   bridge-node net create --data <ordner> --name <text> --url <öffentliche adresse> [--template open|invite|closed]
   bridge-node net invite --data <ordner> [--uses 1] [--days 30] [--node <adresse>]
   bridge-node net seal   --data <ordner> --node-url <adresse> --node-id <id> [--level 1-3] [--services gateway,…]
@@ -45,7 +55,13 @@ const USAGE: &str = "Aufruf:
   bridge-node net revoke --data <ordner> (--statement <hash> | --identity <id>) [--reason <text>] [--node <adresse>]
   bridge-node net ban    --data <ordner> --identity <id> [--days 30] [--reason <text>] [--node <adresse>]
   bridge-node net rescue --data <ordner> (--witnesses <id,…> [--threshold n] [--logs <id,…>] | --file <json>)
-                         [--node <adresse>]   (Not-Wiederherstellung mit den 24 Wörtern, siehe docs/06 §5)";
+                         [--node <adresse>]   (Not-Wiederherstellung mit den 24 Wörtern, siehe docs/06 §5)
+  bridge-node app create  --data <ordner> --name <text>   (App-Schlüssel in <ordner>/apps/<app-id>.json)
+  bridge-node app publish --data <ordner> --app <id> --folder <pfad> [--host <knoten-id>]... [--entry index.html]
+                          [--description <text>] [--node <adresse>]   (neue Version; Hosts brauchen ein Siegel mit
+                          Dienst web, ohne --host: die der letzten Version, sonst der Owner-Knoten)
+  bridge-node app hosts   --data <ordner> --app <id> [--add <knoten-id>]... [--remove <knoten-id>]... [--node <adresse>]
+                          (neue Version mit denselben Dateien und geänderten Hosts)";
 
 /// Flags as `(name, value)` pairs; every flag takes a value.
 fn flags(args: impl Iterator<Item = String>) -> Result<Vec<(String, String)>, String> {
@@ -102,7 +118,17 @@ struct Run {
 }
 
 fn run_args(flags: &Flags) -> Result<Run, String> {
-    flags.only(&["--data", "--listen", "--name", "--url", "--trust-proxy", "--pow-bits", "--join-net", "--lan"])?;
+    flags.only(&[
+        "--data",
+        "--listen",
+        "--name",
+        "--url",
+        "--trust-proxy",
+        "--pow-bits",
+        "--join-net",
+        "--lan",
+        "--standalone-blobs",
+    ])?;
     let mut config = NodeConfig::new(flags.need("--data")?);
     let listen = match flags.one("--listen") {
         Some(text) => text.parse().map_err(|_| "--listen: z. B. 127.0.0.1:7400".to_owned())?,
@@ -129,6 +155,13 @@ fn run_args(flags: &Flags) -> Result<Run, String> {
     }
     if let Some(lan) = flags.one("--lan") {
         config.lan = Some(LanConfig::new(lan_address(lan)?));
+    }
+    if flags.one("--standalone-blobs").is_some() {
+        let mib: u64 = flags.number("--standalone-blobs", 0)?;
+        let bytes =
+            mib.checked_mul(1024 * 1024).filter(|bytes| (1..=config.limits.blobs.max_node_bytes).contains(bytes));
+        let max = config.limits.blobs.max_node_bytes / (1024 * 1024);
+        config.limits.standalone_blobs = Some(bytes.ok_or_else(|| format!("--standalone-blobs: 1-{max} (MiB)"))?);
     }
     Ok(Run { config, listen })
 }
@@ -289,6 +322,72 @@ async fn admin_command(command: &str, flags: &Flags) -> Result<(), String> {
     Ok(())
 }
 
+fn ids(flags: &Flags, name: &str) -> Result<Vec<Id>, String> {
+    flags
+        .all(name)
+        .into_iter()
+        .map(|id| Id::parse(id).map_err(|_| format!("{name}: eine Knoten-ID (32 Zeichen)")))
+        .collect()
+}
+
+/// `bridge-node app …` (docs/07 §8).
+async fn app_command(command: &str, flags: &Flags) -> Result<(), String> {
+    let data = PathBuf::from(flags.need("--data")?);
+    if command == "create" {
+        flags.only(&["--data", "--name"])?;
+        let app = apps::create(&data, flags.need("--name")?)?;
+        println!("Neue App erstellt.");
+        println!("  App-ID:      {app}");
+        println!(
+            "  Schlüssel:   {} (nur für dich lesbar, nie auf einen Host kopieren)",
+            data.join(apps::APPS_DIR).join(format!("{app}.json")).display()
+        );
+        println!("Veröffentlichen: bridge-node app publish --data {} --app {app} --folder <ordner>", data.display());
+        return Ok(());
+    }
+    let app = Id::parse(flags.need("--app")?).map_err(|_| "--app: eine App-ID (32 Zeichen)".to_owned())?;
+    let done = match command {
+        "publish" => {
+            flags.only(&["--data", "--app", "--folder", "--host", "--entry", "--description", "--node"])?;
+            let folder = PathBuf::from(flags.need("--folder")?);
+            apps::publish(
+                &data,
+                &app,
+                &folder,
+                ids(flags, "--host")?,
+                flags.one("--entry"),
+                flags.one("--description"),
+                flags.one("--node"),
+            )
+            .await?
+        }
+        "hosts" => {
+            flags.only(&["--data", "--app", "--add", "--remove", "--node"])?;
+            let (add, remove) = (ids(flags, "--add")?, ids(flags, "--remove")?);
+            if add.is_empty() && remove.is_empty() {
+                return Err(format!("app hosts: --add oder --remove fehlt\n{USAGE}"));
+            }
+            apps::change_hosts(&data, &app, add, remove, flags.one("--node")).await?
+        }
+        other => return Err(format!("unbekannter Befehl app {other}\n{USAGE}")),
+    };
+    println!("App {app}: Version {} an Host {} übergeben.", done.version, done.host);
+    if done.active {
+        println!("Dort wird sie jetzt ausgeliefert: {}/app/{app}/", done.url.trim_end_matches('/'));
+    } else {
+        println!("Der Host holt noch Dateien und stellt um, sobald alles da und geprüft ist.");
+    }
+    let hosts: Vec<String> = done.hosts.iter().map(Id::to_string).collect();
+    println!("Hosts: {} (die anderen holen sich die Version selbst)", hosts.join(", "));
+    for id in &done.retired {
+        println!("Kein Host mehr: {id} (benachrichtigt, liefert die App nicht mehr aus)");
+    }
+    for id in &done.unreached {
+        println!("Warnung: alter Host {id} nicht erreicht - er hört auf, sobald er die neue Version erfährt.");
+    }
+    Ok(())
+}
+
 /// The change of `net rescue`: flags or a JSON file (not both).
 fn rescue_change(flags: &Flags) -> Result<admin::RulesChange, String> {
     let by_flags = ["--witnesses", "--threshold", "--logs"].iter().any(|flag| flags.one(flag).is_some());
@@ -338,7 +437,14 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
     let mut args = std::env::args().skip(1).peekable();
-    let result = if args.peek().map(String::as_str) == Some("net") {
+    let result = if args.peek().map(String::as_str) == Some("app") {
+        args.next();
+        let command = args.next().unwrap_or_default();
+        match flags(args) {
+            Ok(flags) => app_command(&command, &Flags(flags)).await,
+            Err(message) => Err(message),
+        }
+    } else if args.peek().map(String::as_str) == Some("net") {
         args.next();
         let command = args.next().unwrap_or_default();
         match flags(args) {
@@ -384,6 +490,17 @@ mod tests {
         assert!(run_args(&args(&["--data", "d"])?)?.config.lan.is_none(), "LAN is off by default");
         for bad in ["0", "70000", "x", "1.2.3.4", "1.2.3.4:0", ""] {
             assert!(run_args(&args(&["--data", "d", "--lan", bad])?).is_err(), "{bad}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn standalone_blobs_flag() -> Result<(), String> {
+        assert_eq!(run_args(&args(&["--data", "d"])?)?.config.limits.standalone_blobs, None, "off by default");
+        let on = run_args(&args(&["--data", "d", "--standalone-blobs", "1024"])?)?;
+        assert_eq!(on.config.limits.standalone_blobs, Some(1 << 30));
+        for bad in ["0", "-1", "x", "99999999999999999", "20481"] {
+            assert!(run_args(&args(&["--data", "d", "--standalone-blobs", bad])?).is_err(), "{bad}");
         }
         Ok(())
     }

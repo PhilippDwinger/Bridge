@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use bridge_core::pow::{MAX_POW_BITS, POW_LIFETIME_MS};
 use bridge_core::{Id, Puzzle};
-use bridge_store::{MailboxLimits, RelayLimits};
+use bridge_store::{BlobLimits, MailboxLimits, RelayLimits};
 use thiserror::Error;
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
@@ -83,12 +83,24 @@ pub struct Limits {
     pub challenges_per_address: Rate,
     /// Merkle proofs, consistency proofs and evidence per address (unauthenticated, docs/06 §9).
     pub proofs_per_address: Rate,
+    /// Unauthenticated reads of blobs and apps per address (`/v4/blob/info|hashes|get`, `/v4/app/manifest`,
+    /// `GET /app/…`; docs/07 §7) - on top of the general bucket.
+    pub reads_per_address: Rate,
     /// Sent envelopes per identity.
     pub sends_per_identity: Rate,
     /// Mailbox quotas.
     pub mailbox: MailboxLimits,
     /// Quotas of the relay outbox (envelopes waiting for another gateway, docs/06 §8).
     pub relay: RelayLimits,
+    /// Storage for blobs: quotas per level, node totals (docs/07 §1).
+    pub blobs: BlobLimits,
+    /// Apps a node hosts at most at once (docs/07 §4).
+    pub max_hosted_apps: u64,
+    /// Apps of one owner a node hosts at most at once, by the owner's level: 0, 1, 2 and above (docs/07 §5).
+    pub max_apps_per_owner: [u64; 3],
+    /// Blob uploads on a node without a network (docs/07 §5): `None` = off (default - every logged-in identity is
+    /// anonymous there), `Some(bytes)` = on, with this cap for all blobs of the node together.
+    pub standalone_blobs: Option<u64>,
     /// Concurrent long polls per identity.
     pub polls_per_identity: u32,
     /// Identities (key cards) a node remembers at most (phase 3: membership replaces this).
@@ -105,6 +117,7 @@ impl Default for Limits {
             per_address: Rate { per_second: 20, burst: 40 },
             challenges_per_address: Rate { per_second: 2, burst: 10 },
             proofs_per_address: Rate { per_second: 5, burst: 10 },
+            reads_per_address: Rate { per_second: 10, burst: 40 },
             sends_per_identity: Rate { per_second: 10, burst: 30 },
             mailbox: MailboxLimits {
                 max_envelopes: 1_000,
@@ -114,11 +127,32 @@ impl Default for Limits {
                 max_seen_per_sender: 20_000,
             },
             relay: RelayLimits { max_entries: 10_000, max_bytes: 256 * 1024 * 1024, max_per_target: 5_000 },
+            blobs: BlobLimits {
+                quota: [50 * MIB, 1024 * MIB, 10 * 1024 * MIB],
+                max_node_bytes: 20 * 1024 * MIB,
+                max_blobs: 1_000_000,
+                max_keep_days: 30,
+                max_staged_per_owner: 4,
+                max_staged: 64,
+            },
+            max_hosted_apps: 64,
+            max_apps_per_owner: [4, 16, 64],
+            standalone_blobs: None,
             max_identities: 100_000,
             polls_per_identity: 2,
             max_tracked: 100_000,
             pow: PowPolicy { always_bits: 0, load_bits: 20, load_challenges_per_minute: 600 },
         }
+    }
+}
+
+const MIB: u64 = 1024 * 1024;
+
+impl Limits {
+    /// Apps an owner of `level` may have hosted at once on this node.
+    #[must_use]
+    pub fn apps_for(&self, level: u8) -> u64 {
+        self.max_apps_per_owner[usize::from(level.min(2))]
     }
 }
 
@@ -305,6 +339,7 @@ pub struct Guard {
     per_address: RateLimiter<IpAddr>,
     challenges_per_address: RateLimiter<IpAddr>,
     proofs_per_address: RateLimiter<IpAddr>,
+    reads_per_address: RateLimiter<IpAddr>,
     sends: RateLimiter<Id>,
     nonces: Mutex<NonceTable>,
     challenges: Mutex<ChallengeTable>,
@@ -320,6 +355,7 @@ impl Guard {
             per_address: RateLimiter::new(limits.per_address, limits.max_tracked),
             challenges_per_address: RateLimiter::new(limits.challenges_per_address, limits.max_tracked),
             proofs_per_address: RateLimiter::new(limits.proofs_per_address, limits.max_tracked),
+            reads_per_address: RateLimiter::new(limits.reads_per_address, limits.max_tracked),
             sends: RateLimiter::new(limits.sends_per_identity, limits.max_tracked),
             nonces: Mutex::new(NonceTable::new(limits.max_tracked)),
             challenges: Mutex::new(ChallengeTable {
@@ -354,6 +390,11 @@ impl Guard {
     /// A Merkle proof, consistency proof or evidence request for this address (tighter than the general bucket)?
     pub fn admit_proof(&self, ip: IpAddr, now_ms: i64) -> GuardResult<()> {
         self.proofs_per_address.check(&address_key(ip), now_ms)
+    }
+
+    /// An unauthenticated blob or app read for this address (tighter than the general bucket, docs/07 §7)?
+    pub fn admit_read(&self, ip: IpAddr, now_ms: i64) -> GuardResult<()> {
+        self.reads_per_address.check(&address_key(ip), now_ms)
     }
 
     /// How many proof-of-work bits a new challenge needs right now (0 = none).

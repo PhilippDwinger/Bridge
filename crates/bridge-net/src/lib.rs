@@ -1,7 +1,7 @@
 //! # bridge-net – BridgeNet (docs/06)
 //!
 //! Pure logic of a network: typed statements (manifest, delegation, invite, member, seal, revoke, ban, head, cosign,
-//! home), the transparency log as an RFC 6962 Merkle tree with signed heads, witness cosignatures and split-view
+//! home, app), the transparency log as an RFC 6962 Merkle tree with signed heads, witness cosignatures and split-view
 //! evidence (ADR 0006), and the network state that every node computes by replaying the log in order (ADR 0009).
 //!
 //! No I/O, no clock (times are passed in), no global state, no randomness - every function is deterministic and
@@ -26,12 +26,14 @@ use std::collections::BTreeMap;
 
 use bridge_core::{Id, KeyCard};
 
+pub mod apps;
 pub mod error;
 pub mod log;
 pub mod merkle;
 pub mod state;
 pub mod statements;
 
+pub use apps::{CheckedApp, check_app, check_standing, is_web_host, valid_hosts};
 pub use error::{NetError, NetResult};
 pub use log::{
     Evidence, Head, Log, WitnessedHead, check_new_entries, issue_cosign, issue_head, parse_entry, verify_cosign,
@@ -40,8 +42,8 @@ pub use log::{
 pub use merkle::{Hash, Tree};
 pub use state::{Ahead, Applied, Endorsement, NetState, RulesAhead, Transition, Transitions};
 pub use statements::{
-    Approvals, Ban, Body, Cosign, Delegation, GatewayEntry, HeadBody, Home, Invite, Join, JoinMode, Kind, Limits,
-    LogRules, Manifest, Member, Revoke, RevokeTarget, Right, Rights, Seal, Service, Services,
+    AppRules, Approvals, Ban, Body, Cosign, Delegation, GatewayEntry, HeadBody, Home, Invite, Join, JoinMode, Kind,
+    Limits, LogRules, Manifest, Member, Revoke, RevokeTarget, Right, Rights, Seal, Service, Services,
 };
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.

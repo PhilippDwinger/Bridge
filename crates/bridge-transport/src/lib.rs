@@ -1,14 +1,20 @@
 //! # bridge-transport – moving bytes
 //!
-//! Connections only, no network logic (docs/03, ADR 0004): an HTTP/1.1 server that hands a node plain [`Request`]s,
-//! and a client for SDKs and node-to-node calls. Internet: HTTP behind a TLS proxy such as Tailscale Funnel, or HTTPS
+//! Connections only, no network logic (docs/03, ADR 0004): an HTTP/1.1 server that hands a node plain [`Request`]s
+//! (GET, POST, and OPTIONS for CORS preflights) and sends its [`Response`]s (JSON by default, other content types and
+//! headers when the node sets them, large bodies streamed from a bounded channel - [`BodyStream`]), and a client for
+//! SDKs and node-to-node calls. Internet: HTTP behind a TLS proxy such as Tailscale Funnel, or HTTPS
 //! as a client. LAN ([`lan`]): the same server over TLS with a self-signed certificate ([`serve_tls`]), clients that
 //! trust exactly the pinned certificate ([`HttpClient::new_pinned`]), and mDNS hints where nodes are.
 //!
 //! Zero Trust at the door (Z5): limited connections, a timeout for headers (slowloris), the body size is checked
 //! from `Content-Length` *before* reading and again while reading, every request has a total time limit, and
-//! `X-Forwarded-For` is only believed from configured proxies. The client limits response sizes too - a node can
-//! be malicious as well.
+//! `X-Forwarded-For` is only believed from configured proxies. Streamed answers are limited too (slow readers):
+//! at most `max_streams` at once and `max_streams_per_address` per caller (behind a trusted proxy: the forwarded
+//! address), each must average `stream_min_bytes_per_s` after `stream_grace` and ends after `stream_max_duration` -
+//! otherwise its connection is cut. Answers the transport makes itself (405, 413, timeouts, too many streams) go
+//! through [`Handler::decorate`], so they carry the same headers as the node's own (CORS, sandbox). The client
+//! limits response sizes too - a node can be malicious as well.
 //!
 //! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core` (address keys, hashes, IDs).
 
@@ -18,15 +24,19 @@ pub use lan::{Discovery, LanAnnouncer, LanHints, LanPeer, TlsIdentity};
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http::{HeaderValue, StatusCode, header};
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Incoming;
+use http_body_util::{BodyExt, Either, Full, Limited};
+use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -34,7 +44,7 @@ use hyper_util::server::graceful::{GracefulShutdown, Watcher};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
@@ -65,6 +75,8 @@ pub enum Method {
     Get,
     /// POST
     Post,
+    /// OPTIONS (CORS preflight of browsers, docs/07 §5)
+    Options,
 }
 
 /// A request as the node sees it.
@@ -82,24 +94,36 @@ pub struct Request {
     pub body: Bytes,
 }
 
-/// A response (always JSON).
+/// A response: JSON unless `headers` name another `Content-Type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     /// HTTP status.
     pub status: u16,
-    /// JSON body.
+    /// Body (ignored when `stream` is set).
     pub body: Vec<u8>,
     /// `Retry-After` in seconds.
     pub retry_after: Option<u32>,
     /// Close the connection after this answer (set when the request body was not read).
     pub close: bool,
+    /// Further headers (name in lower case, value). `content-type` and `cache-control` replace the defaults
+    /// (`application/json`, `no-store`); `x-content-type-options: nosniff` is always sent.
+    pub headers: Vec<(String, String)>,
+    /// A body produced while it is sent (large files) instead of `body`.
+    pub stream: Option<BodyStream>,
 }
 
 impl Response {
     /// 200 with a JSON body.
     #[must_use]
     pub fn ok(body: Vec<u8>) -> Self {
-        Self { status: 200, body, retry_after: None, close: false }
+        Self { status: 200, body, retry_after: None, close: false, headers: Vec::new(), stream: None }
+    }
+
+    /// The same response with one more header.
+    #[must_use]
+    pub fn with_header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.push((name.to_ascii_lowercase(), value.into()));
+        self
     }
 
     /// An error in the protocol's format (docs/04 §9).
@@ -110,9 +134,161 @@ impl Response {
             body.push_str(&format!(r#","retry_after":{seconds}"#));
         }
         body.push('}');
-        Self { status, body: body.into_bytes(), retry_after, close: false }
+        Self { status, body: body.into_bytes(), retry_after, close: false, headers: Vec::new(), stream: None }
     }
 }
+
+/// A response body produced while it is sent: chunks from a bounded channel ([`BodyStream::channel`]), so a large
+/// file never sits in memory as a whole. The declared length is sent as `Content-Length`; if the producer stops
+/// before it (a part did not verify, the disk failed), the connection is cut - the client never sees a short body
+/// as complete.
+#[derive(Clone)]
+pub struct BodyStream {
+    receiver: Arc<Mutex<Option<mpsc::Receiver<Bytes>>>>,
+    length: u64,
+}
+
+impl BodyStream {
+    /// A body of exactly `length` bytes and the sender that produces it (`capacity`: chunks buffered at most).
+    #[must_use]
+    pub fn channel(length: u64, capacity: usize) -> (StreamSender, Self) {
+        let (sender, receiver) = mpsc::channel(capacity.max(1));
+        (StreamSender(sender), Self { receiver: Arc::new(Mutex::new(Some(receiver))), length })
+    }
+
+    /// The declared length.
+    #[must_use]
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
+    fn take(&self) -> Option<mpsc::Receiver<Bytes>> {
+        self.receiver.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    }
+}
+
+impl fmt::Debug for BodyStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BodyStream({} bytes)", self.length)
+    }
+}
+
+impl PartialEq for BodyStream {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.receiver, &other.receiver)
+    }
+}
+
+impl Eq for BodyStream {}
+
+/// The producing side of a [`BodyStream`].
+pub struct StreamSender(mpsc::Sender<Bytes>);
+
+impl StreamSender {
+    /// Sends the next chunk; waits at most `timeout` for room (a client that does not read is given up). `false`:
+    /// the client is gone or too slow - stop producing.
+    pub async fn send(&self, chunk: Vec<u8>, timeout: Duration) -> bool {
+        matches!(tokio::time::timeout(timeout, self.0.send(Bytes::from(chunk))).await, Ok(Ok(())))
+    }
+}
+
+/// How far one streamed answer got: bytes handed to the connection since it started (watched per connection).
+struct Meter {
+    started: Instant,
+    sent: AtomicU64,
+    done: AtomicBool,
+}
+
+impl Meter {
+    /// Whether the answer is over its time or below its minimum rate (after the grace time).
+    fn too_slow(&self, config: &ServerConfig) -> bool {
+        let elapsed = self.started.elapsed();
+        if elapsed >= config.stream_max_duration {
+            return true;
+        }
+        if elapsed < config.stream_grace {
+            return false;
+        }
+        let needed = u128::from(config.stream_min_bytes_per_s).saturating_mul(elapsed.as_millis()) / 1000;
+        u128::from(self.sent.load(Ordering::Relaxed)) < needed
+    }
+}
+
+/// The streams of a server: all of them and per caller address.
+struct Streams {
+    all: Arc<Semaphore>,
+    per_address: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+/// One streamed answer counted against the server and its caller; dropping it frees both.
+struct StreamPermit {
+    _all: OwnedSemaphorePermit,
+    _address: PerAddress,
+    meter: Arc<Meter>,
+}
+
+impl Streams {
+    fn new(config: &ServerConfig) -> Self {
+        Self { all: Arc::new(Semaphore::new(config.max_streams)), per_address: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    /// A permit for one more stream to `client` (the forwarded address behind a trusted proxy - no exemption).
+    fn acquire(&self, client: IpAddr, config: &ServerConfig) -> Option<StreamPermit> {
+        let all = Arc::clone(&self.all).try_acquire_owned().ok()?;
+        let address =
+            PerAddress::take(&self.per_address, bridge_core::address_key(client), config.max_streams_per_address)?;
+        let meter = Arc::new(Meter { started: Instant::now(), sent: AtomicU64::new(0), done: AtomicBool::new(false) });
+        Some(StreamPermit { _all: all, _address: address, meter })
+    }
+}
+
+/// The hyper body of a [`BodyStream`]: counts what it hands out and holds the stream's permit until it is dropped.
+struct ChannelBody {
+    receiver: mpsc::Receiver<Bytes>,
+    remaining: u64,
+    permit: StreamPermit,
+}
+
+impl Drop for ChannelBody {
+    fn drop(&mut self) {
+        self.permit.meter.done.store(true, Ordering::Relaxed);
+    }
+}
+
+impl hyper::body::Body for ChannelBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        match this.receiver.poll_recv(cx) {
+            Poll::Ready(Some(chunk)) => {
+                let length = chunk.len() as u64;
+                if length > this.remaining {
+                    return Poll::Ready(Some(Err(std::io::Error::other("body longer than declared"))));
+                }
+                this.remaining -= length;
+                this.permit.meter.sent.fetch_add(length, Ordering::Relaxed);
+                Poll::Ready(Some(Ok(Frame::data(chunk))))
+            }
+            Poll::Ready(None) if this.remaining > 0 => {
+                Poll::Ready(Some(Err(std::io::Error::other("body ended before its length"))))
+            }
+            Poll::Ready(None) => {
+                this.permit.meter.done.store(true, Ordering::Relaxed);
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.remaining)
+    }
+}
+
+/// What the server sends: a body in memory or a stream.
+type HttpBody = Either<Full<Bytes>, ChannelBody>;
 
 fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
@@ -137,6 +313,11 @@ pub trait Handler: Send + Sync + 'static {
     }
     /// Answers one request.
     fn handle(&self, request: Request) -> impl Future<Output = Response> + Send;
+    /// Adds the node's headers to an answer the transport made itself for `path` (405, 413, timeouts, too many
+    /// streams, …) - e.g. CORS, so a browser sees the error instead of a CORS failure.
+    fn decorate(&self, _path: &str, response: Response) -> Response {
+        response
+    }
 }
 
 /// Server limits.
@@ -158,6 +339,17 @@ pub struct ServerConfig {
     pub trusted_proxies: Vec<IpAddr>,
     /// Max time for the TLS handshake ([`serve_tls`] only): slow or silent handshakes must not hold connection slots.
     pub tls_handshake_timeout: Duration,
+    /// Max streamed answers (large files) at once, all callers together.
+    pub max_streams: usize,
+    /// Max streamed answers at once per caller address (IPv6: one /64; behind a trusted proxy: the forwarded one).
+    pub max_streams_per_address: usize,
+    /// A streamed answer must average at least this many bytes per second once `stream_grace` is over - a slower
+    /// reader is cut off (it would hold a connection and a stream for hours).
+    pub stream_min_bytes_per_s: u64,
+    /// Time before the minimum rate of a stream counts.
+    pub stream_grace: Duration,
+    /// Longest time for one streamed answer.
+    pub stream_max_duration: Duration,
 }
 
 impl Default for ServerConfig {
@@ -171,6 +363,11 @@ impl Default for ServerConfig {
             max_connections_per_address: 32,
             trusted_proxies: Vec::new(),
             tls_handshake_timeout: Duration::from_secs(10),
+            max_streams: 128,
+            max_streams_per_address: 8,
+            stream_min_bytes_per_s: 16 * 1024,
+            stream_grace: Duration::from_secs(10),
+            stream_max_duration: Duration::from_secs(3600),
         }
     }
 }
@@ -236,6 +433,7 @@ fn run<H: Handler>(
         let (closing, _) = watch::channel(());
         let connections = Arc::new(Semaphore::new(config.max_connections));
         let per_address: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let streams = Arc::new(Streams::new(&config));
         loop {
             tokio::select! {
                 _ = &mut stopped => break,
@@ -254,6 +452,7 @@ fn run<H: Handler>(
                         config: Arc::clone(&config),
                         handler: Arc::clone(&handler),
                         watcher: graceful.watcher(),
+                        streams: Arc::clone(&streams),
                     };
                     let tls = tls.clone();
                     let closing = closing.subscribe();
@@ -278,7 +477,11 @@ struct Connection<H> {
     config: Arc<ServerConfig>,
     handler: Arc<H>,
     watcher: Watcher,
+    streams: Arc<Streams>,
 }
+
+/// The stream a connection is sending right now (HTTP/1.1: one answer at a time), for its watchdog.
+type StreamSlot = watch::Sender<Option<Arc<Meter>>>;
 
 impl<H: Handler> Connection<H> {
     async fn run(self, stream: TcpStream, tls: Option<TlsAcceptor>, mut closing: watch::Receiver<()>) {
@@ -301,20 +504,61 @@ impl<H: Handler> Connection<H> {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let Self { peer, config, handler, watcher } = self;
+        let Self { peer, config, handler, watcher, streams } = self;
         let header_timeout = config.header_timeout;
+        let (slot, watched) = watch::channel(None);
+        let slot = Arc::new(slot);
+        let limits = Arc::clone(&config);
         let service = service_fn(move |request| {
             let handler = Arc::clone(&handler);
             let config = Arc::clone(&config);
-            async move { Ok::<_, Infallible>(answer(request, peer, &config, handler).await) }
+            let (streams, slot) = (Arc::clone(&streams), Arc::clone(&slot));
+            async move {
+                let context = Answering { peer, config: &config, streams: &streams, slot: &slot };
+                Ok::<_, Infallible>(answer(request, &context, handler).await)
+            }
         });
         let connection = http1::Builder::new()
             .timer(TokioTimer::new())
             .header_read_timeout(header_timeout)
             .max_buf_size(64 * 1024)
             .serve_connection(TokioIo::new(stream), service);
-        let _ = watcher.watch(connection).await;
+        // A slow reader of a stream loses its connection: dropping the connection future closes the socket, drops
+        // the body (freeing its stream permit) and stops the producer.
+        tokio::select! {
+            _ = watcher.watch(connection) => {}
+            () = watchdog(watched, &limits) => tracing::debug!(%peer, "stream too slow or too long: connection cut"),
+        }
     }
+}
+
+/// Returns when the stream the connection is sending is too slow or too long (never while none is sent).
+async fn watchdog(mut slot: watch::Receiver<Option<Arc<Meter>>>, config: &ServerConfig) {
+    let tick = (config.stream_grace / 4).clamp(Duration::from_millis(50), Duration::from_secs(1));
+    loop {
+        let meter = slot.borrow_and_update().clone();
+        match meter {
+            Some(meter) if !meter.done.load(Ordering::Relaxed) => {
+                tokio::time::sleep(tick).await;
+                if !meter.done.load(Ordering::Relaxed) && meter.too_slow(config) {
+                    return;
+                }
+            }
+            _ => {
+                if slot.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+}
+
+/// What answering one request needs from its connection.
+struct Answering<'a> {
+    peer: IpAddr,
+    config: &'a ServerConfig,
+    streams: &'a Streams,
+    slot: &'a StreamSlot,
 }
 
 /// One open connection counted against its address; dropping it frees the slot.
@@ -328,10 +572,17 @@ impl PerAddress {
         if config.trusted_proxies.contains(&ip) {
             return Some(Self { table: Arc::clone(table), key: None }); // a proxy carries many callers
         }
-        let key = bridge_core::address_key(ip);
+        Self::take(table, bridge_core::address_key(ip), config.max_connections_per_address)
+    }
+
+    /// One more slot for `key`, if it has fewer than `max`.
+    fn take(table: &Arc<Mutex<HashMap<IpAddr, usize>>>, key: IpAddr, max: usize) -> Option<Self> {
         let mut counts = table.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let count = counts.entry(key).or_insert(0);
-        if *count >= config.max_connections_per_address {
+        if *count >= max {
+            if *count == 0 {
+                counts.remove(&key);
+            }
             return None;
         }
         *count += 1;
@@ -372,28 +623,49 @@ fn client_ip(request: &http::Request<Incoming>, peer: IpAddr, config: &ServerCon
 
 async fn answer<H: Handler>(
     request: http::Request<Incoming>,
-    peer: IpAddr,
-    config: &ServerConfig,
+    context: &Answering<'_>,
     handler: Arc<H>,
-) -> http::Response<Full<Bytes>> {
-    let response =
-        match tokio::time::timeout(config.request_timeout, read_and_handle(request, peer, config, handler)).await {
-            Ok(response) => response,
-            Err(_) => Response::error(503, "UNAVAILABLE", "request took too long", None),
-        };
-    to_http(response)
+) -> http::Response<HttpBody> {
+    let config = context.config;
+    let path = request.uri().path().to_owned();
+    let client = client_ip(&request, context.peer, config);
+    let reading = read_and_handle(request, client, &path, config, handler.as_ref());
+    let response = match tokio::time::timeout(config.request_timeout, reading).await {
+        Ok(response) => response,
+        Err(_) => handler.decorate(&path, Response::error(503, "UNAVAILABLE", "request took too long", None)),
+    };
+    if response.stream.is_none() {
+        return to_http(response, None);
+    }
+    match context.streams.acquire(client, config) {
+        Some(permit) => {
+            context.slot.send_replace(Some(Arc::clone(&permit.meter)));
+            to_http(response, Some(permit))
+        }
+        // Too many streams: the stream is dropped unsent (its producer stops), the caller may come back.
+        None => to_http(
+            handler.decorate(&path, Response::error(429, "RATE_LIMITED", "too many downloads at once", Some(5))),
+            None,
+        ),
+    }
 }
 
 async fn read_and_handle<H: Handler>(
     request: http::Request<Incoming>,
     peer: IpAddr,
+    path: &str,
     config: &ServerConfig,
-    handler: Arc<H>,
+    handler: &H,
 ) -> Response {
+    // Answers made here (the request is not read further) carry the node's headers too.
+    let refuse = |status: u16, code: &str, message: &str| {
+        handler.decorate(path, unread(Response::error(status, code, message, None)))
+    };
     let method = match *request.method() {
         http::Method::GET => Method::Get,
         http::Method::POST => Method::Post,
-        _ => return unread(Response::error(405, "NOT_FOUND", "method not allowed", None)),
+        http::Method::OPTIONS => Method::Options,
+        _ => return refuse(405, "NOT_FOUND", "method not allowed"),
     };
     let declared = request
         .headers()
@@ -401,13 +673,12 @@ async fn read_and_handle<H: Handler>(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     if declared.is_some_and(|length| length > config.max_body_bytes as u64) {
-        return unread(Response::error(413, "TOO_LARGE", "request body too large", None));
+        return refuse(413, "TOO_LARGE", "request body too large");
     }
-    let peer = client_ip(&request, peer, config);
-    let path = request.uri().path().to_owned();
     if path.len() > 256 {
-        return unread(Response::error(404, "NOT_FOUND", "not found", None));
+        return refuse(404, "NOT_FOUND", "not found");
     }
+    let path = path.to_owned();
     if let Some(refused) = handler.admit(peer, &path) {
         return unread(refused); // e.g. rate limited: the body is never read
     }
@@ -422,10 +693,10 @@ async fn read_and_handle<H: Handler>(
     let body = match tokio::time::timeout(config.body_timeout, reading).await {
         Ok(Ok(collected)) => collected.to_bytes(),
         Ok(Err(error)) if error.is::<http_body_util::LengthLimitError>() => {
-            return unread(Response::error(413, "TOO_LARGE", "request body too large", None));
+            return refuse(413, "TOO_LARGE", "request body too large");
         }
-        Ok(Err(_)) => return unread(Response::error(400, "BAD_FORMAT", "could not read the request body", None)),
-        Err(_) => return unread(Response::error(408, "BAD_FORMAT", "request body too slow", None)),
+        Ok(Err(_)) => return refuse(400, "BAD_FORMAT", "could not read the request body"),
+        Err(_) => return refuse(408, "BAD_FORMAT", "request body too slow"),
     };
     handler.handle(Request { method, path, peer, bearer, body }).await
 }
@@ -435,12 +706,38 @@ fn unread(response: Response) -> Response {
     Response { close: true, ..response }
 }
 
-fn to_http(response: Response) -> http::Response<Full<Bytes>> {
-    let mut out = http::Response::new(Full::new(Bytes::from(response.body)));
+fn to_http(response: Response, permit: Option<StreamPermit>) -> http::Response<HttpBody> {
+    let body = match (&response.stream, permit) {
+        (Some(stream), Some(permit)) => match stream.take() {
+            Some(receiver) => Either::Right(ChannelBody { receiver, remaining: stream.length, permit }),
+            None => return to_http(Response::error(503, "UNAVAILABLE", "body already sent", None), None),
+        },
+        (Some(_), None) => return to_http(Response::error(503, "UNAVAILABLE", "no stream permit", None), None),
+        (None, _) => Either::Left(Full::new(Bytes::from(response.body))),
+    };
+    let mut out = http::Response::new(body);
     *out.status_mut() = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let headers = out.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    for (name, value) in &response.headers {
+        // Only well-formed names and values (no line breaks): anything else is dropped, never sent half.
+        if let (Ok(name), Ok(value)) = (http::HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(value)) {
+            if name == header::CONTENT_LENGTH || name == header::CONNECTION {
+                continue;
+            }
+            if name == header::CONTENT_TYPE || name == header::CACHE_CONTROL {
+                headers.insert(name, value);
+            } else {
+                headers.append(name, value);
+            }
+        }
+    }
+    if let Some(stream) = &response.stream {
+        if let Ok(value) = HeaderValue::from_str(&stream.length.to_string()) {
+            headers.insert(header::CONTENT_LENGTH, value);
+        }
+    }
     headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
     if response.close {
         headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
@@ -660,6 +957,225 @@ mod tests {
         drop(open);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(client.get("/x").await?.status, 200, "slots are freed");
+        server.shutdown().await;
+        Ok(())
+    }
+
+    struct Files;
+
+    impl Handler for Files {
+        async fn handle(&self, request: Request) -> Response {
+            match (request.method, request.path.as_str()) {
+                (Method::Options, _) => {
+                    Response { status: 204, ..Response::ok(Vec::new()) }.with_header("access-control-allow-origin", "*")
+                }
+                (Method::Get, "/file") => {
+                    let (sender, stream) = BodyStream::channel(3 * 65_536, 2);
+                    tokio::spawn(async move {
+                        for byte in [1u8, 2, 3] {
+                            if !sender.send(vec![byte; 65_536], Duration::from_secs(5)).await {
+                                return;
+                            }
+                        }
+                    });
+                    Response { stream: Some(stream), ..Response::ok(Vec::new()) }
+                        .with_header("Content-Type", "text/html; charset=utf-8")
+                        .with_header("etag", "\"x\"")
+                        .with_header("bad", "line\nbreak")
+                }
+                (Method::Get, "/short") => {
+                    let (sender, stream) = BodyStream::channel(100, 2);
+                    tokio::spawn(async move {
+                        sender.send(vec![0u8; 10], Duration::from_secs(5)).await;
+                    });
+                    Response { stream: Some(stream), ..Response::ok(Vec::new()) }
+                }
+                // 64 MiB as fast as the reader takes it.
+                (Method::Get, "/big") => stream_of(BIG, Duration::ZERO),
+                // 64 KiB every 50 ms (about 1.3 MB/s) - never done within a test.
+                (Method::Get, "/trickle") => stream_of(BIG, Duration::from_millis(50)),
+                _ => Response::error(404, "NOT_FOUND", "not found", None),
+            }
+        }
+
+        fn decorate(&self, path: &str, response: Response) -> Response {
+            response.with_header("x-decorated", path.to_owned())
+        }
+    }
+
+    const BIG: u64 = 64 << 20;
+
+    fn stream_of(length: u64, pause: Duration) -> Response {
+        let (sender, stream) = BodyStream::channel(length, 4);
+        tokio::spawn(async move {
+            for _ in 0..length / 65_536 {
+                if !pause.is_zero() {
+                    tokio::time::sleep(pause).await;
+                }
+                if !sender.send(vec![7u8; 65_536], Duration::from_secs(30)).await {
+                    return;
+                }
+            }
+        });
+        Response { stream: Some(stream), ..Response::ok(Vec::new()) }
+    }
+
+    /// Sends a raw GET (optionally with `X-Forwarded-For`) and returns the stream after the request was written.
+    async fn raw(addr: SocketAddr, path: &str, forwarded: Option<&str>) -> TransportResult<TcpStream> {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stream = TcpStream::connect(addr).await.map_err(|e| TransportError::Connection(e.to_string()))?;
+        let extra = forwarded.map(|ip| format!("X-Forwarded-For: {ip}\r\n")).unwrap_or_default();
+        let request = format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{extra}\r\n");
+        stream.write_all(request.as_bytes()).await.map_err(|e| TransportError::Connection(e.to_string()))?;
+        Ok(stream)
+    }
+
+    /// Reads until the connection ends (or 20 s pass): bytes read, and the status of the answer.
+    async fn drain(mut stream: TcpStream) -> (usize, u16, String) {
+        use tokio::io::AsyncReadExt as _;
+        let mut total = 0usize;
+        let mut head = Vec::new();
+        let mut buffer = vec![0u8; 1 << 16];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while let Ok(Ok(read)) = tokio::time::timeout_at(deadline, stream.read(&mut buffer)).await {
+            if read == 0 {
+                break;
+            }
+            if head.len() < 1024 {
+                head.extend_from_slice(&buffer[..read.min(1024)]);
+            }
+            total += read;
+        }
+        let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+        let status = text.split(' ').nth(1).and_then(|code| code.parse().ok()).unwrap_or(0);
+        (total, status, text)
+    }
+
+    async fn files(config: ServerConfig) -> TransportResult<RunningServer> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| TransportError::Config(e.to_string()))?;
+        serve(listener, config, Arc::new(Files))
+    }
+
+    #[tokio::test]
+    async fn a_slow_reader_is_cut_off_a_fast_one_is_not() -> TransportResult<()> {
+        let config = ServerConfig {
+            stream_min_bytes_per_s: 16 << 20,
+            stream_grace: Duration::from_millis(300),
+            ..ServerConfig::default()
+        };
+        let server = files(config).await?;
+        // A reader that takes nothing for 3 s: the server cuts it long before 64 MiB went out.
+        let slow = raw(server.local_addr(), "/big", None).await?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let (total, status, _) = drain(slow).await;
+        assert_eq!(status, 200);
+        assert!(total < BIG as usize / 2, "cut off after {total} bytes");
+        // A reader that reads at once gets everything.
+        let (total, status, _) = drain(raw(server.local_addr(), "/big", None).await?).await;
+        assert_eq!(status, 200);
+        assert!(total > BIG as usize, "{total}");
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stream_ends_after_its_longest_time() -> TransportResult<()> {
+        let config = ServerConfig {
+            stream_min_bytes_per_s: 1,
+            stream_grace: Duration::from_millis(100),
+            stream_max_duration: Duration::from_millis(600),
+            ..ServerConfig::default()
+        };
+        let server = files(config).await?;
+        let started = std::time::Instant::now();
+        let (total, status, _) = drain(raw(server.local_addr(), "/trickle", None).await?).await;
+        assert_eq!(status, 200);
+        assert!(total < BIG as usize && started.elapsed() < Duration::from_secs(10), "{total}");
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streams_are_bounded_per_address_also_behind_a_proxy() -> TransportResult<()> {
+        let proxy: IpAddr = [127, 0, 0, 1].into();
+        let config = ServerConfig {
+            trusted_proxies: vec![proxy],
+            max_streams_per_address: 2,
+            max_streams: 3,
+            stream_min_bytes_per_s: 1,
+            ..ServerConfig::default()
+        };
+        let server = files(config).await?;
+        let addr = server.local_addr();
+        // Two streams of one forwarded caller: a third is refused (with the handler's headers), another caller
+        // gets one, then the server's total is reached.
+        let first = raw(addr, "/trickle", Some("203.0.113.1")).await?;
+        let second = raw(addr, "/trickle", Some("203.0.113.1")).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (_, status, head) = drain(raw(addr, "/trickle", Some("203.0.113.1")).await?).await;
+        assert_eq!(status, 429, "{head}");
+        assert!(head.contains("x-decorated: /trickle") && head.contains("retry-after: 5"), "{head}");
+        let other = raw(addr, "/trickle", Some("203.0.113.2")).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (_, status, _) = drain(raw(addr, "/trickle", Some("203.0.113.3")).await?).await;
+        assert_eq!(status, 429, "all streams of the server are taken");
+        // Freed when a reader goes.
+        drop((first, second, other));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let again = raw(addr, "/trickle", Some("203.0.113.1")).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut again = again;
+        let mut head = [0u8; 12];
+        tokio::io::AsyncReadExt::read_exact(&mut again, &mut head)
+            .await
+            .map_err(|e| TransportError::Connection(e.to_string()))?;
+        assert_eq!(&head, b"HTTP/1.1 200");
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transport_errors_carry_the_handlers_headers() -> TransportResult<()> {
+        let config = ServerConfig { max_body_bytes: 10, ..ServerConfig::default() };
+        let server = files(config).await?;
+        let base = format!("http://{}", server.local_addr());
+        let client = reqwest::Client::new();
+        let error = |e: reqwest::Error| TransportError::Connection(e.to_string());
+        let put = client.put(format!("{base}/v4/x")).send().await.map_err(error)?;
+        assert_eq!(put.status().as_u16(), 405);
+        assert_eq!(put.headers().get("x-decorated").map(|v| v.as_bytes()), Some(&b"/v4/x"[..]));
+        let large = client.post(format!("{base}/v4/y")).body(vec![0u8; 11]).send().await.map_err(error)?;
+        assert_eq!(large.status().as_u16(), 413);
+        assert_eq!(large.headers().get("x-decorated").map(|v| v.as_bytes()), Some(&b"/v4/y"[..]));
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn options_headers_and_streamed_bodies() -> TransportResult<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| TransportError::Config(e.to_string()))?;
+        let server = serve(listener, ServerConfig::default(), Arc::new(Files))?;
+        let base = format!("http://{}", server.local_addr());
+        let client = reqwest::Client::new();
+        let error = |e: reqwest::Error| TransportError::Connection(e.to_string());
+        let preflight = client.request(reqwest::Method::OPTIONS, format!("{base}/v4/x")).send().await.map_err(error)?;
+        assert_eq!(preflight.status().as_u16(), 204);
+        assert_eq!(preflight.headers().get("access-control-allow-origin").map(|v| v.as_bytes()), Some(&b"*"[..]));
+        let file = client.get(format!("{base}/file")).send().await.map_err(error)?;
+        let headers = file.headers().clone();
+        assert_eq!(headers.get("content-type").map(|v| v.as_bytes()), Some(&b"text/html; charset=utf-8"[..]));
+        assert_eq!(headers.get("content-length").map(|v| v.as_bytes()), Some(&b"196608"[..]));
+        assert_eq!(headers.get("x-content-type-options").map(|v| v.as_bytes()), Some(&b"nosniff"[..]));
+        assert!(headers.get("etag").is_some() && headers.get("bad").is_none(), "bad header values are dropped");
+        let body = file.bytes().await.map_err(error)?;
+        assert_eq!(body.len(), 3 * 65_536);
+        assert_eq!((body[0], body[65_536], body[3 * 65_536 - 1]), (1, 2, 3));
+        // A stream that ends before its length: the client sees an error, never a short "complete" body.
+        let short = client.get(format!("{base}/short")).send().await.map_err(error)?;
+        assert!(short.bytes().await.is_err());
+        // Other methods are still refused.
+        let put = client.put(format!("{base}/file")).send().await.map_err(error)?;
+        assert_eq!(put.status().as_u16(), 405);
         server.shutdown().await;
         Ok(())
     }

@@ -5,10 +5,11 @@
 überall – auch im Heimnetz ohne Internet. Sicher nach dem Zero-Trust-Prinzip: Inhalte sind Ende-zu-Ende
 verschlüsselt, alles Wichtige ist signiert, niemand muss einem einzelnen Knoten vertrauen.
 
-> Status: **Phase 3 – BridgeNet in Arbeit.** Ein Knoten nimmt Ende-zu-Ende verschlüsselte Nachrichten an, hält sie
-> bis zur Abholung (auch über Neustarts) und kann sie nicht lesen. Mehrere Knoten bilden ein Netz mit
-> Transparenz-Log, Mitgliedern, Siegeln und Weiterleitung zwischen Empfängern – auch im LAN ohne Internet (noch ohne
-> BridgeControll v2).
+> Status: **Phase 3 – BridgeNet in Arbeit, Phase 4a (Dateien und Apps) gebaut.** Ein Knoten nimmt Ende-zu-Ende
+> verschlüsselte Nachrichten an, hält sie bis zur Abholung (auch über Neustarts) und kann sie nicht lesen. Mehrere
+> Knoten bilden ein Netz mit Transparenz-Log, Mitgliedern, Siegeln und Weiterleitung zwischen Empfängern – auch im LAN
+> ohne Internet (noch ohne BridgeControll v2). Dateien werden nach Inhalt übertragen (geprüft, von mehreren Hosts
+> zugleich); Bridge-Apps laufen auf mehreren Hosts und im Browser abgeschottet.
 > Die laufende Version für Spiele und Bots ist weiterhin Bridge 3 (Branch `bridge-3`).
 
 ## Knoten starten
@@ -36,6 +37,21 @@ bridge-node net invite --data netz1 --uses 5                                    
 `net create` zeigt die 24 Wiederherstellungs-Wörter genau einmal – aufschreiben! `net seal` braucht die ID, die k2
 beim Start anzeigt (`--node-id`), sonst siegelt es nichts. k2 läuft beim Siegeln schon mit `--lan`, damit andere
 Knoten ihn im LAN erkennen. Details: `docs/06_BRIDGENET.md` §2 und §10.
+
+## Bridge-Apps (Phase 4a, Kommandozeile)
+```
+bridge-node net seal --data netz1 --node-url https://<pc>.ts.net:8443/k1 --node-id <owner-id> --level 3 \
+                     --services gateway,log,witness,web                          # Owner-Knoten wird Host
+bridge-node net seal --data netz1 --node-url https://<pc2>.ts.net:8443/k2 --node-id <id> --services gateway,web
+bridge-node app create  --data netz1 --name "Mein Spiel"                         # zeigt die App-ID
+bridge-node app publish --data netz1 --app <app-id> --folder ./spiel --host <owner-id> --host <id>
+bridge-node app hosts   --data netz1 --app <app-id> --remove <id>                # neue Version ohne diesen Host
+```
+Die Befehle laufen im Ordner des Owner-Knotens (mit `admin-key.json`): Der App-Schlüssel liegt in
+`netz1/apps/<app-id>.json` (nie auf einen Host kopieren), der Owner ist `netz1/owner-key.json` (wird beim ersten Mal
+angelegt und als Mitglied aufgenommen). Hosts brauchen ein Siegel mit Dienst `web`; veröffentlicht wird beim ersten
+Host, der auch Empfänger ist, die anderen holen sich die Version selbst. Die App läuft dann unter
+`https://<host>/app/<app-id>/` in einer abgeschotteten Herkunft. Details: `docs/07_APPS_UND_DATEIEN.md`.
 
 - Doku: [docs/](docs/README.md)
 - Aufbau: Rust-Workspace, ein Crate pro Abteil (`crates/`), Dienste (`services/`), Programm (`bin/bridge-node`),

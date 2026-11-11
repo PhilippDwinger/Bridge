@@ -24,7 +24,7 @@
 | Abteil | Aufgabe | Besitzt | Darf benutzen |
 |---|---|---|---|
 | `core` | Datentypen, kanonisches JSON, Krypto-Suite B4-1, Identität/Schlüsselkarte, Umschlag bauen/öffnen/prüfen, Adressen, Fehler-Codes, Zeit | nichts (reine Funktionen) | nur Standardbibliothek + Krypto-Bibliotheken |
-| `store` | Speichern und Laden (SQLite, WAL), Migrationen, Datei-Ablage für große Blobs | Datenbank-Dateien eines Knotens | `core` |
+| `store` | Speichern und Laden (SQLite, WAL), Migrationen, Datei-Ablage für große Blobs (`blobs/`, Phase 4a) | Datenbank-Dateien eines Knotens | `core` |
 | `guard` | Zentrale Prüfung **jeder** Anfrage: Wer ist das, was darf er, Limits, Kontingente, Proof-of-Work, Ruf | Zähler, Ruf-Werte (über `store`) | `core`, `store` |
 | `transport` | Verbindungen: Internet (HTTPS-Server/-Client), LAN (mDNS-Suche, TLS mit Schlüssel-Pinning), später weitere; liefert nur Bytes/Umschläge, kennt keine Netz-Logik | offene Verbindungen | `core` |
 | `net` | Netz-Logik: Manifest, Mitgliedsausweise, Stufen, Siegel, Delegationen, Widerrufe, Transparenz-Log (Merkle, Zeugen) | Netz-Zustand (über `store`) | `core`, `store`, `guard` |
@@ -39,6 +39,8 @@
 - Plugins sehen nur die Plugin-API, nie Interna von `node`, `net`, `store`.
 - `core` hat kein I/O, keine Zeitabfrage ohne Übergabe, keinen Zufall ohne Übergabe → komplett testbar.
 - Kein globaler Zustand (S3): Alles hängt an einem `Node`-Objekt. Tests starten mehrere Knoten in einem Prozess.
+- Das Programm `bin/bridge-node` ist die oberste Schicht: Für `app publish|hosts` (Phase 4a) handelt es als Client
+  des Owners und nutzt dafür `sdk/rust` (Hochladen, Signieren, Abgeben) – kein Abteil hängt davon ab.
 
 ## 3. Repo-Struktur (Branch `bridge-4`)
 ```

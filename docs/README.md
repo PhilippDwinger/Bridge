@@ -9,4 +9,5 @@
 | [04_PROTOKOLL_V4](04_PROTOKOLL_V4.md) | Formate: Schlüsselkarte, Aussagen, Umschlag, Strom, Endpunkte, PoW, Fehler |
 | [05_FAHRPLAN](05_FAHRPLAN.md) | Phasen mit Abnahme, offene Fragen |
 | [06_BRIDGENET](06_BRIDGENET.md) | Phase 3: Hauptschlüssel, Netz-Aussagen, Transparenz-Log, Netz-Zustand, Beitritt, Weiterleitung |
-| `adr/` | Entscheidungen: 0001 Zero Trust + Abteile · 0002 Lizenz · 0003 Rust/Tauri · 0004 Transport (Internet/LAN) · 0005 Plugin-Isolation · 0006 Merkle-Log mit Zeugen · 0007 PoW optional · 0008 Nonce-Invariante · 0009 Netz-Zustand aus dem Log · 0010 Aussage-Identität + Log-Regel-Wechsel · 0011 TLS im Transport · 0012 Not-Wiederherstellung · 0013 Übergangs-Köpfe beim Aufholen · 0014 Not-Form nur mit dem ersten Log-Führer |
+| [07_APPS_UND_DATEIEN](07_APPS_UND_DATEIEN.md) | Phase 4a: Dateien nach Inhalt, Bridge-Apps mit mehreren Hosts, Ausliefern, spätere Daten-Werkzeuge |
+| `adr/` | Entscheidungen: 0001 Zero Trust + Abteile · 0002 Lizenz · 0003 Rust/Tauri · 0004 Transport (Internet/LAN) · 0005 Plugin-Isolation · 0006 Merkle-Log mit Zeugen · 0007 PoW optional · 0008 Nonce-Invariante · 0009 Netz-Zustand aus dem Log · 0010 Aussage-Identität + Log-Regel-Wechsel · 0011 TLS im Transport · 0012 Not-Wiederherstellung · 0013 Übergangs-Köpfe beim Aufholen · 0014 Not-Form nur mit dem ersten Log-Führer · 0015 Apps und Dateien |

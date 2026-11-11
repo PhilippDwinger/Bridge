@@ -19,10 +19,17 @@ workspace = true
 bridge-core.workspace = true
 bridge-net.workspace = true
 bridge-node.workspace = true
+bridge-sdk.workspace = true
+serde_json.workspace = true
+rand_core.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+bridge-tests = { path = "../../tests/e2e" }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

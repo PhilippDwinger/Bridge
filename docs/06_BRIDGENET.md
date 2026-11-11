@@ -119,6 +119,7 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 | `head` | `{"size":n,"root":"<32 Byte>"}` | Log-Führer (im Manifest) – **steht nicht im Log** |
 | `cosign` | `{"head":"<hash des head>","log":"<id>","size":n,"root":"<32 Byte>"}` | Zeuge (im Manifest); für den Übergangs-Kopf einer Not-Wiederherstellung auch der Hauptschlüssel (§5) – **steht nicht im Log** |
 | `home` | `{"node":"<id des Empfängers>"}` | das Mitglied selbst – **steht nicht im Log** (§8) |
+| `app` | eine Version einer Bridge-App (07 §3) | App-Schlüssel **und** Owner (`sigs`) – **steht nicht im Log**, die Hosts behalten sie (Phase 4a) |
 
 - **Hash einer Aussage** = Base64url(SHA-256(kanonische Bytes der Aussage **ohne** `sig` bzw. `sigs`)). Er ist die
   Identität der Aussage für Widerruf (`revoke` mit `statement`), Ersetzen („neuer ersetzt älter“), Doppelte und
@@ -166,7 +167,9 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
  "card":<karte des hauptschlüssels>}
 ```
 - Grenzen: `name` 1–64 Zeichen, `description` max. 500 (Zeilenumbruch erlaubt), `pow_bits` ≤ 28, `approvals`
-  je 1–16, `limits.members` 1–1.000.000, `limits.log_entries_per_day` 1–100.000. Alle Felder sind Pflicht.
+  je 1–16, `limits.members` 1–1.000.000, `limits.log_entries_per_day` 1–100.000. Alle Felder sind Pflicht – außer
+  dem optionalen `apps` (Phase 4a, 07 §3): `{"min_level":0-3}`, die Stufe, die ein Owner zum Veröffentlichen von Apps
+  braucht (ohne das Feld: 0). Fehlt es, bleibt es weg (ältere Manifeste behalten ihre Bytes und ihren Hash).
 - Das neueste Manifest gilt bis zur nächsten Version; sein `exp` zählt nur beim Annehmen.
 - `version` steigt bei jeder Änderung um genau 1. Das jeweils neueste gültige Manifest gilt.
 - `logs`: 1–3 Log-Führer, `witnesses`: 1–16 Zeugen, `1 ≤ witness_threshold ≤ len(witnesses)`. Beide Listen dürfen die
@@ -527,6 +530,7 @@ Teilbäumen: Wurzeln und Nachweise in O(log n), gerechnet ohne die Sperre des Ne
 | `POST /v4/net/join` | Clients | Beitritt (§7) |
 | `POST /v4/node/relay` | Empfänger | Weiterleitung (§8) → `{"ok":true}` |
 | `POST /v4/node/homes` | Empfänger | `home`-Einträge austauschen (§8) |
+| `POST /v4/node/app` | Hosts einer App | eine App-Version anbieten (Phase 4a, 07 §5/§7) |
 
 Fehler wie 04 §9 (z. B. falsches `aud` → 401 `BAD_SIGNATURE`, Weiterleitung von einem Nicht-Empfänger → 403
 `FORBIDDEN`, Empfänger wohnt nicht hier → 404 `UNKNOWN_IDENTITY`, wiederholte Anfrage → 409 `REPLAY`). Ein Knoten

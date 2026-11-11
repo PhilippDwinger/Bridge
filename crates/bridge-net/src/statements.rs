@@ -75,6 +75,8 @@ pub enum Kind {
     Cosign,
     /// Home gateway of a member (not in the log).
     Home,
+    /// One version of a Bridge app (docs/07 §3; not in the log - hosts keep it).
+    App,
 }
 
 impl Kind {
@@ -96,6 +98,7 @@ impl Kind {
             Self::Head => "head",
             Self::Cosign => "cosign",
             Self::Home => "home",
+            Self::App => "app",
         }
     }
 
@@ -113,6 +116,7 @@ impl Kind {
             "head" => Self::Head,
             "cosign" => Self::Cosign,
             "home" => Self::Home,
+            "app" => Self::App,
             _ => return None,
         })
     }
@@ -450,6 +454,13 @@ pub struct GatewayEntry {
     pub card: Option<KeyCard>,
 }
 
+/// Rules for Bridge apps in the network (docs/07 §3): optional manifest field `apps`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppRules {
+    /// Lowest level an owner needs to publish apps (0-3; without the field: 0).
+    pub min_level: u8,
+}
+
 /// Limits of the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -487,6 +498,8 @@ pub struct Manifest {
     pub limits: Limits,
     /// Key card of the net master key.
     pub card: KeyCard,
+    /// Rules for apps (optional field `apps`, docs/07 §3; `None` = not in the body, the defaults hold).
+    pub apps: Option<AppRules>,
 }
 
 /// Who runs and who witnesses the log: the part of a manifest that heads are checked against (docs/06 §5). Which
@@ -540,6 +553,7 @@ impl Manifest {
             gateways: vec![GatewayEntry { id: owner_node.clone(), url: owner_gateway_url.to_owned(), card: None }],
             limits: Limits { members: 100_000, log_entries_per_day: 10_000 },
             card: master_card,
+            apps: None,
         };
         manifest.to_body()?;
         Ok(manifest)
@@ -553,6 +567,12 @@ impl Manifest {
             witnesses: self.witnesses.clone(),
             witness_threshold: self.witness_threshold,
         }
+    }
+
+    /// Lowest level an owner needs to publish apps (`apps.min_level`, default 0).
+    #[must_use]
+    pub fn app_min_level(&self) -> u8 {
+        self.apps.map_or(0, |apps| apps.min_level)
     }
 
     /// A copy with the version increased by one - the start of every change.
@@ -586,7 +606,7 @@ impl Body for Manifest {
 
     fn from_body(body: &Value) -> NetResult<Self> {
         let object = object(body, "manifest")?;
-        fields(object, &MANIFEST_FIELDS, &[], "manifest")?;
+        fields(object, &MANIFEST_FIELDS, &["apps"], "manifest")?;
         let name = text(object, "name")?;
         check_text(name, 1, MAX_NET_NAME_CHARS, false, "name")?;
         let description = text(object, "description")?;
@@ -622,6 +642,14 @@ impl Body for Manifest {
         if logs.contains(card.id()) || witnesses.contains(card.id()) {
             return Err(NetError::format("logs/witnesses: the net key can not be log operator or witness"));
         }
+        let apps = if object.contains_key("apps") {
+            let apps = sub_object(object, "apps", &["min_level"])?;
+            let min_level =
+                u8::try_from(number(apps, "min_level", 0, 3)?).map_err(|_| NetError::format("apps.min_level"))?;
+            Some(AppRules { min_level })
+        } else {
+            None
+        };
         Ok(Self {
             name: name.to_owned(),
             description: description.to_owned(),
@@ -635,6 +663,7 @@ impl Body for Manifest {
             gateways,
             limits,
             card,
+            apps,
         })
     }
 
@@ -652,7 +681,7 @@ impl Body for Manifest {
                 Value::Object(entry)
             })
             .collect();
-        checked::<Self>(json!({
+        let mut body = json!({
             "name": self.name,
             "description": self.description,
             "version": self.version,
@@ -665,7 +694,11 @@ impl Body for Manifest {
             "gateways": gateways,
             "limits": {"members": self.limits.members, "log_entries_per_day": self.limits.log_entries_per_day},
             "card": self.card.to_value(),
-        }))
+        });
+        if let Some(apps) = self.apps {
+            body["apps"] = json!({"min_level": apps.min_level});
+        }
+        checked::<Self>(body)
     }
 }
 
@@ -1244,6 +1277,18 @@ mod tests {
         let mut tampered = master()?.1.to_value();
         tampered["name"] = json!("x");
         r(&valid, &["card"], tampered);
+        // The optional `apps` field: min_level 0-3, nothing else in it.
+        let mut with_apps = valid.clone();
+        with_apps["apps"] = json!({"min_level": 2});
+        assert_eq!(Manifest::from_body(&with_apps)?.app_min_level(), 2);
+        assert_eq!(Manifest::from_body(&valid)?.app_min_level(), 0, "without the field: 0");
+        assert_eq!(Manifest::from_body(&with_apps)?.to_body()?, with_apps, "kept exactly");
+        assert_eq!(Manifest::from_body(&valid)?.to_body()?, valid, "not added");
+        r(&with_apps, &["apps", "min_level"], json!(4));
+        r(&with_apps, &["apps", "min_level"], json!(-1));
+        r(&with_apps, &["apps", "min_level"], Value::Null);
+        r(&with_apps, &["apps", "max"], json!(1));
+        r(&with_apps, &["apps"], json!(1));
         // Limits at the edges are fine
         let mut edge = valid.clone();
         edge["limits"]["members"] = json!(MAX_MEMBERS_LIMIT);
@@ -1370,7 +1415,7 @@ mod tests {
             assert_eq!(Kind::parse(kind.as_str()), Some(kind));
             assert!(kind.is_log_kind());
         }
-        for kind in [Kind::Head, Kind::Cosign, Kind::Home] {
+        for kind in [Kind::Head, Kind::Cosign, Kind::Home, Kind::App] {
             assert_eq!(Kind::parse(kind.as_str()), Some(kind));
             assert!(!kind.is_log_kind());
         }

@@ -7,6 +7,9 @@
 //! without a network behaves exactly as in phase 2.
 //! LAN ([`LanConfig`], docs/06 §2): the same node also listens with TLS and its own certificate (fingerprint in its
 //! card), announces itself via mDNS and reaches other nodes of its network over the pinned LAN path first.
+//! Phase 4a (docs/07): blobs (files by content: upload with quotas, read by ID, parts verified on every read) and
+//! Bridge apps (versions signed by app key and owner, hosted by several nodes that fetch new versions from each
+//! other, served under `/app/<id>/` in a sandboxed origin). The Bridge API answers browsers with CORS (`*`).
 //! All state hangs on one [`Node`] (no global state, S3) - tests run several nodes in one process.
 //!
 //! What a node knows about a message: network, from, to, time, kind, size. Never the content (Z1).
@@ -14,6 +17,8 @@
 //! Layering (docs/03_ARCHITEKTUR.md): uses all crates below it.
 
 pub mod admin;
+mod apps;
+mod blobs;
 mod error;
 pub mod keyfile;
 mod lan;
@@ -29,7 +34,7 @@ use bridge_core::encoding::{b64, b64_fixed};
 use bridge_core::json::parse_strict;
 use bridge_core::{Draft, Envelope, Id, Identity, KeyCard, Puzzle, Role, SignedRequest, Statement};
 use bridge_guard::{Guard, GuardError, Limits};
-use bridge_store::{Delivered, Delivery, Store};
+use bridge_store::{BlobFiles, Delivered, Delivery, Store};
 use bridge_transport::{Handler, LanAnnouncer, Method, Request, Response, RunningServer, ServerConfig, TlsIdentity};
 use rand_core::{OsRng, RngCore};
 use serde_json::{Value, json};
@@ -52,6 +57,9 @@ pub const MAX_BATCH: usize = 100;
 pub const POLL_MAX_BYTES: usize = 1024 * 1024;
 /// File name of the database inside the data folder.
 pub const DB_FILE: &str = "node.db";
+/// Folder of the blob files inside the data folder.
+pub const BLOB_DIR: &str = "blobs";
+pub use apps::APP_CSP;
 
 /// Where time comes from (tests can pass their own).
 pub trait Clock: Send + Sync + 'static {
@@ -133,6 +141,10 @@ struct Inner {
     network: Option<network::SharedNet>,
     /// Where other nodes were seen in the LAN (only with LAN on).
     lan: Option<lan::Directory>,
+    /// The bytes of blobs (`blobs/` in the data folder).
+    blobs: BlobFiles,
+    /// The apps this node hosts.
+    apps: apps::Apps,
 }
 
 /// A node (cheap to clone; all clones are the same node).
@@ -221,6 +233,10 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
         Some(network_config) => Some(Arc::new(network::NetRuntime::open(&store, identity.id(), network_config, now)?)),
         None => None,
     };
+    let apps = match &network_config {
+        Some(network_config) => apps::Apps::load(&store, &network_config.net, config.limits.max_hosted_apps, now)?,
+        None => apps::Apps::empty(),
+    };
     let net = match &network_config {
         Some(network_config) => network_config.net.clone(),
         None => config.net.clone().unwrap_or_else(|| identity.id().clone()),
@@ -248,6 +264,8 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
             net,
             network,
             lan: config.lan.as_ref().map(lan::Directory::new),
+            blobs: BlobFiles::new(config.data_dir.join(BLOB_DIR)),
+            apps,
         }),
     };
     let lan_server = match (lan_listener, &tls) {
@@ -272,6 +290,9 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
     };
     let mut tasks = vec![tokio::spawn(janitor(node.clone()))];
     tasks.extend(network::spawn(&node));
+    if node.network().is_some() {
+        tasks.push(tokio::spawn(apps::run(node.clone())));
+    }
     if node.network().is_some() && node.inner.lan.as_ref().is_some_and(lan::Directory::is_on) {
         tasks.push(tokio::spawn(lan::discover(node.clone())));
     }
@@ -341,21 +362,65 @@ async fn janitor(node: Node) {
             Ok(Err(error)) => tracing::error!(%error, "purge"),
             _ => {}
         }
+        node.blob_gc(now).await;
     }
 }
 
 impl Handler for Node {
-    fn admit(&self, peer: std::net::IpAddr, _path: &str) -> Option<Response> {
+    fn admit(&self, peer: std::net::IpAddr, path: &str) -> Option<Response> {
         // Step 1 for every request, before its body is read: the per-address bucket.
-        self.inner.guard.admit_address(peer, self.now()).err().map(|error| NodeError::from(error).to_response())
+        let refused = self.inner.guard.admit_address(peer, self.now()).err()?;
+        Some(self.decorate(path, NodeError::from(refused).to_response()))
+    }
+
+    fn decorate(&self, path: &str, response: Response) -> Response {
+        // Also for answers the transport makes itself (405, 413, timeouts, too many streams): a browser must see the
+        // error, not a CORS failure, and an app answer never goes out without its sandbox (docs/07 §5).
+        if path.starts_with("/app/") { apps_headers(response) } else { cors(path, response) }
     }
 
     async fn handle(&self, request: Request) -> Response {
-        match self.route(request).await {
+        if request.path.starts_with("/app/") {
+            return self.serve_app(&request).await;
+        }
+        let path = request.path.clone();
+        if request.method == Method::Options {
+            return preflight(&path);
+        }
+        let response = match self.route(request).await {
             Ok(body) => Response::ok(body),
             Err(error) => error.to_response(),
-        }
+        };
+        cors(&path, response)
     }
+}
+
+/// The Bridge API may be called from apps in browsers (docs/07 §5): any origin, only with a bearer token (no cookies,
+/// so no credentials are allowed), only what the API uses.
+fn cors(path: &str, response: Response) -> Response {
+    if !path.starts_with("/v4/") {
+        return response;
+    }
+    response.with_header("access-control-allow-origin", "*").with_header("access-control-expose-headers", "Retry-After")
+}
+
+/// Answer to a CORS preflight (`OPTIONS`) for the Bridge API; other paths know no `OPTIONS`.
+fn preflight(path: &str) -> Response {
+    if !path.starts_with("/v4/") {
+        return NodeError::not_found().to_response();
+    }
+    cors(path, Response { status: 204, ..Response::ok(Vec::new()) })
+        .with_header("access-control-allow-methods", "GET, POST")
+        .with_header("access-control-allow-headers", "Authorization, Content-Type")
+        .with_header("access-control-max-age", "600")
+}
+
+/// The sandbox headers of app answers (also for refusals before the request is read).
+fn apps_headers(response: Response) -> Response {
+    response
+        .with_header("content-security-policy", APP_CSP)
+        .with_header("access-control-allow-origin", "*")
+        .with_header("referrer-policy", "no-referrer")
 }
 
 fn body_object(bytes: &[u8], max: usize) -> NodeResult<serde_json::Map<String, Value>> {
@@ -433,6 +498,8 @@ impl Node {
             (_, path) if path.starts_with("/v4/net/") || path.starts_with("/v4/node/") => {
                 self.route_network(&request, now).await
             }
+            (_, path) if path.starts_with("/v4/blob/") => self.route_blob(&request, now).await,
+            (_, path) if path.starts_with("/v4/app/") => self.route_app(&request, now).await,
             _ => Err(NodeError::not_found()),
         }
     }
@@ -524,6 +591,9 @@ impl Node {
         }
         if card.role() == Role::Net {
             return Err(NodeError::forbidden("a network master key never logs in"));
+        }
+        if card.role() == Role::App {
+            return Err(NodeError::forbidden("an app key only signs app versions, it never logs in"));
         }
         request.verify(&card)?;
         if self.network().is_some() {

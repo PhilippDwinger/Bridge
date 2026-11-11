@@ -110,6 +110,41 @@ freigegeben).
     gefälschtem Versuch, Merk-Tabellen nur im Speicher, gleichnamige mDNS-Fälscher); `net rescue` unter Windows ist
     nur gelesen geprüft (kein Windows-Ziel in dieser Umgebung – die CI baut es).
 
+## Phase 4a – Dateien und Apps (docs/07, ADR 0015; Paddy 11.11.2026)
+- Datei-Übertragung nach Inhalt (Blobs, Teile à 64 KiB, mehrere Quellen, Kontingente).
+- Bridge-Apps (Stufe 1, ohne Server-Code): eigener App-Schlüssel, signierte Versionen (App + Owner), Host-Liste vom
+  Owner, Hosts holen neue Versionen selbst, Ausliefern unter `/app/<id>/` in abgeschotteter Herkunft.
+- **Abnahme**: Owner veröffentlicht eine App auf zwei Hosts; fällt einer aus, liefert der andere weiter; ein Host, den
+  der Owner entfernt, hört auf; ein Mit-Host, der Dateien verändert, wird erkannt; eine gesperrte App wird nirgends
+  mehr ausgeliefert; ein Download holt Teile von mehreren Hosts und erkennt jeden falschen Teil.
+- **Stand (11.11.2026): gebaut, Abnahme-Tests grün** (Freigabe durch Paddy steht aus). Entscheidungen beim Bau:
+  docs/07 („Beim Bau festgelegt“, §8, Grenzen §9).
+  - `bridge-core`: Blob-ID und Hash-Liste (`blob`), Verschlüsselung privater Dateien (`file`: Stücke zu 65.520 Byte =
+    ein Teil, Schlüssel nur intern, N1), App-Manifest (`app`: strenger Body, beide Karten im Body, genau zwei
+    Unterzeichner, max. 960 KiB, max. 1 Jahr), Rolle `app`.
+  - `bridge-net`: Art `app` (nicht im Log), Prüfung gegen den Netz-Zustand (Owner Mitglied mit `apps.min_level`, App
+    und Owner nicht gesperrt, Hosts nur mit `web`-Siegel), optionales Manifest-Feld `apps`.
+  - `bridge-store` (Schema 5): Blobs (Hash-Listen, vorhandene Teile, Festhalter mit Owner und Ablauf, wartende
+    Hash-Listen je Hochlader), Apps (aktuelle, vorige, wartende Version, gemerkte höchste Version), Dateien in
+    `blobs/` (Hex-Namen, `.part` bis vollständig).
+  - `bridge-transport`: `OPTIONS`, eigene Antwort-Köpfe, Antworten als Strom (`BodyStream`, bricht bei Fehlern ab).
+  - `bridge-node`: Blob- und App-Endpunkte (07 §7), Kontingente je Stufe, enge Lese-Grenze je Adresse, Hosting mit
+    Takt (andere Hosts fragen, Version anbieten, parallel holen und prüfen, atomar umstellen, aufhören), Ausliefern
+    unter `/app/<id>/` mit Sandbox-Köpfen, CORS für `/v4/…`, Aufräumen im Hausmeister, jeder gelesene Teil geprüft.
+  - `sdk/rust`: Hochladen, paralleles Herunterladen mit Prüfung und Fortsetzen, App aus einem Ordner veröffentlichen,
+    Version holen und prüfen, Host wählen (LAN zuerst). Kommandozeile `bridge-node app create|publish|hosts`.
+  - Tests: `tests/e2e/tests/phase4_apps.rs` (Abnahme: zwei Hosts, der zweite holt selbst, Ausfall, Entfernen,
+    manipulierte Teile über einen fälschenden Host und beim Download, Sperre von App und Owner, paralleles Laden,
+    Fortsetzen, beschädigte Datei auf der Platte wird nie ausgeliefert und repariert sich), `phase4_attacks.rs`
+    (Pfade/Traversal, Typen, zu große Manifeste/Blobs/Teile, Kontingent, nicht gelisteter Host, eine Signatur bzw.
+    falscher Unterzeichner, Rollback, gefälschte Hash-Listen und Teile, Müll ohne 5xx, Köpfe auf jeder App-Antwort,
+    CORS, Lese-Grenze, Grenze gehosteter Apps, Knoten ohne Netz), Einheits-Tests in allen Abteilen,
+    `bin/bridge-node` (`app create|publish|hosts` gegen ein laufendes Netz).
+  - Offen: docs/07 §9 (u. a. `Range`/`If-None-Match`, Lese-Grenze auch zwischen Hosts, CLI braucht den Ordner des
+    Owner-Knotens, kein automatisches Neu-Signieren vor Ablauf, verwaiste Dateien nach Absturz).
+- Stufe 2 später (Phase 5): Daten-Werkzeuge (Ereignis-Log pro App, Kanal, Speicher mit Konflikt-Meldung, Sperren),
+  Server-Code in der WebAssembly-Sandbox.
+
 ## Phase 4 – Namen, Web, Browser
 - Dienst `names` (DNS + Suche), Dienst `web` (Websites von Knoten, auch hinter dem Router), Bridge-Browser.
 - **Abnahme**: `shop.meinnetz` im Browser öffnet die Website eines anderen PCs; Suche nach „shop“ liefert eine Liste;

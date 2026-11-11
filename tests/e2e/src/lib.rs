@@ -1,6 +1,7 @@
 //! Helpers for the cross-compartment tests: start nodes in temporary folders, make clients, send raw requests.
-//! Module [`net`]: networks of several nodes (phase 3).
+//! Module [`net`]: networks of several nodes (phase 3). Module [`apps`]: web hosts, app folders, proxies (phase 4a).
 
+pub mod apps;
 pub mod net;
 
 use std::path::Path;

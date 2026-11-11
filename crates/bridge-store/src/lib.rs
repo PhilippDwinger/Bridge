@@ -9,7 +9,14 @@
 //! envelopes waiting to be relayed to another gateway; since schema 4 the transition heads of changes of the log
 //! rules. All of it is public or encrypted - still nothing to decrypt.
 //!
-//! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core`.
+//! Since schema 5 files and apps (docs/07): blobs (verified hash lists, which parts are present, pins with owner and
+//! expiry for quotas), their bytes as files in the `blobs/` folder of the data folder ([`BlobFiles`]: content
+//! addressed by the hex blob ID, written under a temporary name and renamed when complete), and the apps a node
+//! hosts. Since schema 6 a pin carries the bytes it reserves (an accepted app version reserves its whole size, also
+//! for blobs that are not here yet) and an app its rank (version + statement hash; a stopped app keeps only that).
+//!
+//! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core`. It never checks hashes or signatures itself -
+//! the node verifies every part before it is stored and after it is read.
 //! Quotas are passed in by the caller (`bridge-guard` decides them) and checked atomically with the insert, so two
 //! parallel deliveries can never exceed them together.
 
@@ -19,8 +26,15 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
+mod apps;
+mod blobs;
 mod net;
 
+pub use apps::{AppLimits, AppRow, AppState, AppStored, Reservation};
+pub use blobs::{
+    APP_PIN_PREFIX, BlobFiles, BlobLimits, BlobState, CHARGED_MIN_BYTES, HASHES_PER_ROW, NewBlob, PartStored, Pin,
+    Pinned, Registered, StagePage, Staged,
+};
 pub use net::{
     HeadRow, HomeRow, HomeStored, MAX_EVIDENCE_PER_NET, MAX_HEAD_ROWS_PER_NET, Outgoing, RelayItem, RelayLimits,
     TransitionRow,
@@ -73,6 +87,33 @@ const MIGRATIONS: &[&str] = &[
     // change of the log rules, kept for good (bounded per network) and served to followers that catch up
     "CREATE TABLE net_transitions (net TEXT NOT NULL, size INTEGER NOT NULL, head BLOB NOT NULL,
                                    cosigns BLOB NOT NULL, PRIMARY KEY (net, size)) WITHOUT ROWID;",
+    // 5: files and apps (docs/07): blobs with their verified hash lists (rows of 1024 hashes) and which parts are
+    // present (bitmap), pins (holder + owner for quotas + expiry), hash lists still being uploaded (per uploader),
+    // hosted apps (newest manifest, the one before, one being fetched, state). The bytes are files in `blobs/`.
+    "CREATE TABLE blobs (id TEXT PRIMARY KEY, size INTEGER NOT NULL, parts INTEGER NOT NULL, have BLOB NOT NULL,
+                         present INTEGER NOT NULL, complete INTEGER NOT NULL, created INTEGER NOT NULL) WITHOUT ROWID;
+     CREATE TABLE blob_hashes (blob TEXT NOT NULL, row INTEGER NOT NULL, hashes BLOB NOT NULL,
+                               PRIMARY KEY (blob, row)) WITHOUT ROWID;
+     CREATE TABLE blob_pins (blob TEXT NOT NULL, holder TEXT NOT NULL, owner TEXT NOT NULL, expires INTEGER NOT NULL,
+                             PRIMARY KEY (blob, holder)) WITHOUT ROWID;
+     CREATE INDEX blob_pins_by_owner ON blob_pins (owner, blob);
+     CREATE INDEX blob_pins_by_holder ON blob_pins (holder);
+     CREATE INDEX blob_pins_by_expiry ON blob_pins (expires);
+     CREATE TABLE blob_staging (blob TEXT NOT NULL, owner TEXT NOT NULL, page INTEGER NOT NULL, size INTEGER NOT NULL,
+                                hashes BLOB NOT NULL, created INTEGER NOT NULL,
+                                PRIMARY KEY (blob, owner, page)) WITHOUT ROWID;
+     CREATE INDEX blob_staging_by_owner ON blob_staging (owner);
+     CREATE TABLE apps (app TEXT PRIMARY KEY, owner TEXT NOT NULL, version INTEGER NOT NULL, state TEXT NOT NULL,
+                        current BLOB, previous BLOB, pending BLOB, updated INTEGER NOT NULL) WITHOUT ROWID;
+     CREATE INDEX apps_by_state ON apps (state, updated);
+     INSERT INTO counters (name, value) VALUES ('blob_bytes', 0), ('blob_count', 0);",
+    // 6: review 7 of phase 4a (docs/07 §3, §5): a pin carries the bytes it reserves (an app version reserves its whole
+    // size when it is accepted, also for blobs that are not here yet); an app carries its rank (version + statement
+    // hash), so a stopped app keeps only ID, owner and rank; apps are counted per owner.
+    "ALTER TABLE blob_pins ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
+     UPDATE blob_pins SET size = COALESCE((SELECT size FROM blobs WHERE blobs.id = blob_pins.blob), 0);
+     ALTER TABLE apps ADD COLUMN hash BLOB;
+     CREATE INDEX apps_by_owner ON apps (owner, state, updated);",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.
@@ -538,6 +579,37 @@ mod tests {
         drop(store);
         Connection::open(&path)?.pragma_update(None, "user_version", SCHEMA_VERSION + 1)?;
         assert!(matches!(Store::open(&path), Err(StoreError::NewerSchema { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn schema_5_pins_get_their_sizes() -> StoreResult<()> {
+        let dir = tempfile::tempdir().map_err(|e| StoreError::Database(e.to_string()))?;
+        let path = dir.path().join("node.db");
+        {
+            let connection = Connection::open(&path)?;
+            for sql in &MIGRATIONS[..5] {
+                connection.execute_batch(sql)?;
+            }
+            connection.pragma_update(None, "user_version", 5)?;
+            connection.execute(
+                "INSERT INTO blobs (id, size, parts, have, present, complete, created) VALUES ('b', 70000, 2, x'00', 0, 0, 0)",
+                [],
+            )?;
+            connection
+                .execute("INSERT INTO blob_pins (blob, holder, owner, expires) VALUES ('b', 'up:a', 'a', 9)", [])?;
+            connection.execute(
+                "INSERT INTO apps (app, owner, version, state, current, previous, pending, updated)
+                 VALUES ('x', 'a', 3, 'stopped', NULL, NULL, NULL, 0)",
+                [],
+            )?;
+        }
+        let store = Store::open(&path)?;
+        assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+        assert_eq!(store.blob_owner_bytes("a")?, 70_000);
+        let size: i64 = store.lock()?.query_row("SELECT size FROM blob_pins WHERE blob = 'b'", [], |row| row.get(0))?;
+        assert_eq!(size, 70_000);
+        assert_eq!(store.app_get("x")?.map(|app| (app.version, app.hash)), Some((3, None)));
         Ok(())
     }
 }

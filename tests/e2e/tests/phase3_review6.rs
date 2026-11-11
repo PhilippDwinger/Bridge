@@ -122,6 +122,7 @@ impl bridge_transport::Handler for Proxy {
         let answer = match request.method {
             Method::Get => self.target.get(path).await,
             Method::Post => self.target.post(path, None, request.body.to_vec()).await,
+            Method::Options => return Response::error(404, "NOT_FOUND", "not found", None),
         };
         match answer {
             Ok(answer) => {

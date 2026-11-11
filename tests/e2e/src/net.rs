@@ -62,6 +62,7 @@ pub fn test_config(dir: &Path, network: Option<NetConfig>, url: &str) -> NodeCon
         per_address: fast,
         challenges_per_address: fast,
         proofs_per_address: fast,
+        reads_per_address: fast,
         sends_per_identity: fast,
         ..Limits::default()
     };
