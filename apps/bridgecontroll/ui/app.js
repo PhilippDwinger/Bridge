@@ -1036,10 +1036,14 @@
       h('div', { class: 'srv__body' }, h('span', { class: 'srv__name', text: a.name || short(a.id) }),
         h('div', { class: 'srv__meta' }, a.banned ? pill('err', 'Gesperrt') : (a.state === 'serving' ? pill('ok', 'Version ' + a.version) : pill('info', 'Holt Version ' + a.version, 'spin')),
           chip(plural(a.hosts, 'Host', 'Hosts')), chip('App ' + short(a.id)), chip('Owner ' + short(a.owner)))),
-      h('div', { class: 'srv__actions' }, a.banned ? null : h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Sperren',
-        onclick: () => banDialog(id, a.id, a.name || 'diese App', true) })))) : [h('p', { class: 'bc-empty-line', text: data.app_keys.length
+      h('div', { class: 'srv__actions' },
+        !a.banned && a.view && a.state === 'serving' ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.view, target: '_blank', rel: 'noopener noreferrer' }, icon('external'), 'Ansehen') : null,
+        !a.banned && data.app_keys.some((k) => k.id === a.id) ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Neue Version',
+          onclick: () => siteDialog(id, data, data.app_keys.find((k) => k.id === a.id)) }) : null,
+        a.banned ? null : h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Sperren',
+          onclick: () => banDialog(id, a.id, a.name || 'diese App', true) })))) : [h('p', { class: 'bc-empty-line', text: data.app_keys.length
       ? 'Keine App auf dem Owner-Knoten. Deine Apps (' + data.app_keys.map((a) => a.name).join(', ') + ') liegen auf anderen Hosts – im Bridge-Browser findest du sie über ihre Namen.'
-      : 'Noch keine App auf dem Owner-Knoten. Apps veröffentlichst du mit „bridge-node app publish“ (docs/07).' })];
+      : 'Noch keine Website. Mit „Website hochladen“ wird ein Ordner auf diesem PC zu einer Website in deinem Netz.' })];
 
     const searchInput = h('input', { class: 'b-input', id: 'member-search', placeholder: 'Name oder ID', value: search, autocomplete: 'off', spellcheck: 'false' });
     let searchTimer = null;
@@ -1089,7 +1093,9 @@
         h('section', { class: 'bc-cols__main', 'aria-label': 'Knoten' },
           h('h2', { class: 'bc-h2 bc-list-title', text: 'Knoten' }), h('div', { class: 'bc-list' }, nodeRows),
           h('div', { class: 'bc-row bc-list-after' }, h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', onclick: () => sealDialog(id, null) }, icon('plus'), 'Knoten von einem anderen PC siegeln (Ausweis)')),
-          h('h2', { class: 'bc-h2 bc-list-title bc-section-gap', text: 'Apps' }), h('div', { class: 'bc-list' }, appRows),
+          h('div', { class: 'bc-row bc-row--between bc-section-gap' }, h('h2', { class: 'bc-h2 bc-list-title', text: 'Apps' }),
+            h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', onclick: () => siteDialog(id, data, null) }, icon('plus'), 'Website hochladen')),
+          h('div', { class: 'bc-list' }, appRows),
           reportsSection(data, id),
           namesSection(data, id)),
         h('aside', { class: 'bc-cols__side', 'aria-label': 'Mitglieder und Einladungen' },
@@ -1238,6 +1244,94 @@
       h('div', { class: 'bc-list' }, rows));
   }
 
+  // ---------- Website hochladen (docs/07 §8a) ----------
+
+  function bytesText(bytes) {
+    if (bytes < 1024) return bytes + ' Bytes';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1).replace('.', ',') + ' KB';
+    return (bytes / 1024 / 1024).toFixed(1).replace('.', ',') + ' MB';
+  }
+
+  function siteDialog(ownerId, data, appKey) {
+    const net = data.net;
+    const folder = h('input', { class: 'b-input b-input--mono', autocomplete: 'off', spellcheck: 'false', placeholder: 'C:\\Users\\name\\Documents\\MeineSeite' });
+    const checkBtn = h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Ordner prüfen' });
+    const checkOut = h('div', { class: 'bc-stack--tight', 'aria-live': 'polite' });
+    const name = h('input', { class: 'b-input', maxlength: '64', autocomplete: 'off', placeholder: 'z. B. Meine Testseite', value: appKey ? appKey.name : '' });
+    const entry = h('input', { class: 'b-input b-input--mono', maxlength: '200', autocomplete: 'off', spellcheck: 'false', value: 'index.html' });
+    const description = h('input', { class: 'b-input', maxlength: '500', autocomplete: 'off', placeholder: 'optional, öffentlich' });
+    const address = h('input', { class: 'mono', id: 'site-address', maxlength: '40', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: 'meineseite' });
+    const addressField = h('div', { class: 'b-field' }, h('label', { for: 'site-address', text: 'Adresse (optional)' }),
+      h('div', { class: 'b-wrap' }, address, net.short ? h('span', { class: 'b-affix', text: '.' + net.short }) : null),
+      h('span', { class: 'b-hint', id: 'site-address-hint', text: 'Unter dieser Adresse findet man die Website im Bridge-Browser. 2–40 Zeichen a–z, 0–9 und -.' }));
+    let suggested = '';
+    name.addEventListener('input', () => {
+      const next = name.value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss')
+        .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+      if (address.value === suggested) address.value = next;
+      suggested = next;
+    });
+    const request = () => ({ folder: folder.value, entry: entry.value.trim() || 'index.html' });
+    const showCheck = (result) => {
+      const lines = [h('p', { class: 'bc-p0' }, pill(result.ok ? 'ok' : 'err', result.ok ? 'Passt' : 'Geht so nicht'), ' ',
+        plural(result.files, 'Datei', 'Dateien') + ', ' + bytesText(result.bytes))];
+      result.problems.forEach((problem) => lines.push(h('p', { class: 'b-hint b-hint--err bc-p0' }, icon('err'), problem)));
+      checkOut.replaceChildren(...lines);
+    };
+    checkBtn.addEventListener('click', async () => {
+      setFieldError('site-folder', null);
+      const result = await act(checkBtn, () => api('POST', '/api/nodes/' + ownerId + '/site-check', request()));
+      if (result) showCheck(result);
+    });
+    const body = [
+      field('site-folder', 'Ordner auf diesem PC', folder, 'Im Explorer: Rechtsklick auf den Ordner → „Als Pfad kopieren“, hier einfügen.'),
+      h('div', { class: 'bc-row' }, checkBtn), checkOut,
+      appKey ? h('p', { class: 'bc-muted bc-p0', text: 'Neue Version von „' + appKey.name + '“ – dieselben Hosts, die Adresse bleibt.' }) : field('site-name', 'Name der Website', name),
+      field('site-entry', 'Startdatei', entry, 'Die Seite, die beim Öffnen kommt.'),
+      field('site-description', 'Beschreibung', description),
+      appKey ? null : addressField,
+      h('p', { class: 'bc-muted bc-p0', text: 'Die Website liegt dann auf deinem Owner-Knoten und ist für alle im Netz sichtbar. Hat er noch keinen Dienst „Websites“, siegelt BridgeControll ihn dafür neu (ein Eintrag im Transparenz-Log). Dateien mit Schlüsseln werden nie hochgeladen.' }),
+    ];
+    formDialog(appKey ? 'Neue Version hochladen' : 'Website hochladen', null, body, 'Hochladen', async () => {
+      setFieldError('site-folder', null);
+      setFieldError('site-name', null);
+      setFieldError('site-address', null);
+      const payload = Object.assign(request(), { description: description.value.trim() });
+      if (appKey) payload.app = appKey.id;
+      else Object.assign(payload, { name: name.value.trim(), address: address.value.trim().toLowerCase() });
+      let result;
+      try {
+        result = await api('POST', '/api/nodes/' + ownerId + '/site-publish', payload);
+      } catch (error) {
+        const message = error.message || '';
+        if (/^Adresse/.test(message)) setFieldError('site-address', message);
+        else if (/^Name der Website/.test(message)) setFieldError('site-name', message);
+        else setFieldError('site-folder', message);
+        return false;
+      }
+      refresh();
+      siteDone(ownerId, result);
+      return true;
+    }, { wide: true });
+  }
+
+  function siteDone(ownerId, result) {
+    const lines = [h('p', { text: 'Version ' + result.version + ' mit ' + plural(result.files, 'Datei', 'Dateien') + ' (' + bytesText(result.bytes) + ')' +
+      (result.active ? ' – sie ist sofort da.' : ' – dein Knoten holt die Dateien noch, gleich ist sie da.') })];
+    if (result.resealed) lines.push(h('p', { class: 'bc-muted', text: 'Dein Owner-Knoten hat dafür den Dienst „Websites“ bekommen (neues Siegel im Log).' }));
+    let close = () => {};
+    if (result.address) lines.push(h('p', {}, 'Adresse im Bridge-Browser: ', h('a', { href: '#/browser/' + ownerId + '/' + result.address, text: result.address, onclick: () => close() })));
+    if (result.address_error) lines.push(h('p', { class: 'b-hint b-hint--err' }, icon('err'), 'Adresse nicht angemeldet: ' + result.address_error + ' – die Website ist trotzdem online; einen Namen kannst du bei „Namen“ anmelden.'));
+    if (result.view) lines.push(h('div', { class: 'bc-stack--tight' }, h('p', { class: 'bc-p0', text: 'Auf diesem PC in jedem Browser (auch Brave):' }), copyField(result.view, 'Adresse der Website')));
+    const ok = h('button', { class: 'b-btn b-btn--primary', type: 'button', text: 'Fertig' });
+    const view = result.view ? h('a', { class: 'b-btn b-btn--secondary', href: result.view, target: '_blank', rel: 'noopener noreferrer' }, icon('external'), 'Ansehen') : null;
+    const dialog = h('div', { class: 'b-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'site-done-title' },
+      h('h3', { id: 'site-done-title', text: result.new ? 'Website ist online' : 'Neue Version ist online' }), ...lines,
+      h('div', { class: 'b-dialog__btns' }, view, ok));
+    close = openDialog(dialog);
+    ok.addEventListener('click', () => close());
+  }
+
   function nameDialog(ownerId, data) {
     const net = data.net;
     const name = h('input', { class: 'mono', id: 'name-name', maxlength: '40', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: 'shop' });
@@ -1249,7 +1343,7 @@
       data.app_keys.map((a) => h('option', { value: a.id, text: a.name + ' (' + short(a.id) + ')' })));
     const appField = h('div', { class: 'b-field' }, h('label', { for: 'name-app', text: 'App' }),
       data.app_keys.length ? h('div', { class: 'b-selectwrap' }, select, icon('chevron'))
-        : h('p', { class: 'bc-muted bc-p0', text: 'Im Ordner des Owner-Knotens liegt noch kein App-Schlüssel. Apps legst du mit „bridge-node app create“ und „app publish“ an (docs/07).' }));
+        : h('p', { class: 'bc-muted bc-p0', text: 'Noch keine eigene App. Lade erst eine Website hoch („Website hochladen“ bei Apps) – dort kannst du ihr auch gleich eine Adresse geben.' }));
     const targetHint = h('span', { class: 'b-hint' });
     const targetTexts = {
       app: 'Der Name zeigt auf eine App – App-Schlüssel und dein Betreiber-Schlüssel unterschreiben ihn.',

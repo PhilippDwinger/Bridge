@@ -166,6 +166,25 @@
   4. **Melden**: Der Text geht an den ersten Log-Führer versiegelt hinaus; ohne dessen Karte im Log keine Meldung mit
      Text. Ein an einen anderen Log-Führer versiegelter Text erscheint als solcher.
   5. **Leser „Tailnet“** in den Einstellungen; Warnung „Karte nicht geprüft“ (`card_unverified`) im Schloss.
+- **Nachtrag 4 (Website hochladen, 12.11.2026)** – Paddy beim ersten Test: Websites per Klick statt `bridge-node app
+  publish` (docs/07 §8a). Im Owner-Dashboard bei „Apps“: **„Website hochladen“** (Ordner, Name, Startdatei, optional
+  Adresse `<name>.<kurzname>`) und je eigener App **„Neue Version“**. BridgeControll ruft dieselben Bibliotheks-
+  Funktionen wie die Kommandozeile (`bridge_node_cli::apps::create|publish`), im Ordner des Owner-Knotens.
+  1. **Ordner prüfen vor dem Hochladen** (`POST /api/nodes/<id>/site-check`): Pfad aus dem Feld (Anführungszeichen von
+     „Als Pfad kopieren“ werden entfernt), absolut, höchstens 1.024 Zeichen; nur Ordner. Gezählt wie beim Hochladen
+     (keine symbolischen Links, höchstens 16 Ebenen, 10.000 Dateien, 4 GiB); Dateinamen nach docs/07 §3 – die ersten
+     fünf unerlaubten werden genannt; die Startdatei muss da sein. Es wird nichts gelesen außer Namen und Größen.
+  2. **Nie Schlüssel veröffentlichen**: abgelehnt wird ein Ordner, der im App-Ordner von BridgeControll liegt oder ihn
+     enthält (beide Pfade aufgelöst), und jeder Ordner mit einer Datei `admin-key.json`, `owner-key.json`,
+     `node-key.json` oder einem Unterordner `apps` mit App-Schlüsseln (`"t":"app-key"`) – egal wo darunter.
+  3. **Owner-Knoten als Host**: Hat er kein `web`-Siegel, siegelt ihn BridgeControll neu (Stufe 3, bisherige Dienste +
+     `web`, Karte vom Knoten selbst – wie „Neu siegeln“) und sagt es. Der Mitglieds-Schlüssel dieses PCs wird vorher
+     Mitglied mit Stufe 2 (wie bei Namen, damit die Seite in der sicheren Suche erscheint). Hosts einer neuen Version:
+     die der letzten Version (wie `app publish` ohne `--host`).
+  4. **Adresse**: ein Name für die App (wie „Name anmelden“, Ziel App), geprüft vor allem anderen; ist er vergeben,
+     bleibt die Website veröffentlicht und die Antwort sagt es.
+  5. **Ansehen**: Link auf den Leser dieses PCs (`http://127.0.0.1:<leser-port>/app/<id>/`, neuer Tab) – damit geht
+     jeder Browser dieses PCs, auch Brave; mit Leser „Heimnetz“ auch andere Geräte im LAN über die IP des PCs.
 - **Folgen**:
   - Phase 3 hat ihr „per Klick“: Assistent, Beitritt per Link, Siegeln/Entziehen, Sperren, Einladungen mit QR-Code.
   - Getestet: Steuer-API mit echten Knoten-Prozessen (erstellen → beitreten → siegeln → Stufe sichtbar → Mitglied
@@ -180,7 +199,8 @@
   - Die Wörter liegen kurz im Speicher von Browser und Programm (wie bei `net create` im Terminal); ein Browser kann
     Seiten im Speicher behalten, bis der Tab geschlossen ist.
   - Admin-Verlängerung, `cascade` und Not-Wiederherstellung (24 Wörter) gibt es weiter nur über die Kommandozeile.
-  - Phase 4 in der App: kein Hochladen von Apps (weiter `bridge-node app publish`), Melden von Mitglieds-Knoten in
-    Einladungs-Netzen nur über den Meldeweg (docs/08 §11). (Leser hinter Tailscale Funnel: gelöst, Nachtrag 3.)
+  - Phase 4 in der App: Hosts einer App nur über die Kommandozeile ändern (`app hosts`; hochladen geht seit
+    Nachtrag 4), Melden von Mitglieds-Knoten in Einladungs-Netzen nur über den Meldeweg (docs/08 §11). (Leser hinter
+    Tailscale Funnel: gelöst, Nachtrag 3.)
   - Windows-Teile (Autostart-Datei, kein Konsolenfenster, `CREATE_NO_WINDOW`) baut die CI; ausgeführt wurden sie hier
     nicht.

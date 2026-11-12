@@ -130,7 +130,7 @@ async fn state_of(app: &App, id: &str) -> Result<NetState, String> {
 
 /// Makes sure the operator's member key is a member with at least [`OPERATOR_LEVEL`]: admitted by the admin key if
 /// needed, then sealed (level 2, no services) if its level is lower. Returns its ID.
-async fn operator_ready(app: &App, entry: &NodeEntry, admin: &AdminClient) -> Result<Id, String> {
+pub(crate) async fn operator_ready(app: &App, entry: &NodeEntry, admin: &AdminClient) -> Result<Id, String> {
     let dir = app.node_dir(entry);
     let url = entry.local_url();
     let member = patient(|| bridge_node_cli::apps::admit_owner(&dir, Some(&url))).await?;

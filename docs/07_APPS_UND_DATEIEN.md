@@ -291,6 +291,17 @@ kennt `/v4/app/…`, `/v4/node/app` und `/app/…` nicht (`404`).
   (`/v4/app/update`) – so erfährt ein alter Host beim Host-Wechsel davon. Eine Quelle, die Unsinn antwortet (keine
   Größe, kaputte Hash-Seite), wird beim Herunterladen übersprungen; die nächste wird gefragt.
 
+## 8a. BridgeControll: Website hochladen (12.11.2026, ADR 0017 Nachtrag 4)
+Im Owner-Dashboard bei „Apps“: **„Website hochladen“** – Ordner auf diesem PC, Name (1–64 Zeichen), Startdatei
+(Standard `index.html`), Beschreibung und Adresse (`<name>.<kurzname>`) optional – und je App mit Schlüssel im Ordner des
+Owner-Knotens **„Neue Version“** (Version + 1, dieselben Hosts). Dahinter dieselben Schritte wie §8: App-Schlüssel
+`apps/<id>.json` anlegen, Owner-Schlüssel aufnehmen, hochladen, abgeben. Dazu:
+- Vorher wird der Ordner geprüft (Anzahl, Größe, Dateinamen nach §3, Startdatei) und **abgelehnt, wenn er Schlüssel
+  enthalten könnte**: im App-Ordner von BridgeControll oder ihn enthaltend, oder mit `admin-key.json`, `owner-key.json`,
+  `node-key.json` oder App-Schlüsseln darunter.
+- Der Owner-Knoten wird Host; ohne `web`-Siegel siegelt BridgeControll ihn neu (Stufe 3, bisherige Dienste + `web`).
+- „Ansehen“ öffnet die Website über den Leser dieses PCs in einem neuen Tab (jeder Browser dieses PCs).
+
 ## 9. Grenzen und offene Punkte von Phase 4a
 - Kein `Range` und kein `If-None-Match` beim Ausliefern (der `ETag` ist da; Videos spielen, Springen geht noch nicht).
 - Die Lese-Grenze je Adresse gilt auch, wenn Hosts voneinander holen (Standard 10 Teile/s ≈ 640 KiB/s je Paar);

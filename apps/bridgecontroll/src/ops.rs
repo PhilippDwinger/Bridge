@@ -1127,7 +1127,8 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
         .map(|ban| json!({"id": ban.subject.as_str(), "exp": ban.exp}))
         .collect();
 
-    // Apps hosted by the owner node, the watcher's status.
+    // Apps hosted by the owner node (with where this PC's browsers see them), the watcher's status.
+    let reader = crate::browser::reader_origin(&entry);
     let apps_dir = dir.clone();
     let apps = tokio::task::spawn_blocking(move || admin::hosted_apps(&apps_dir, 100))
         .await
@@ -1144,6 +1145,7 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
                 "owner": hosted.owner.as_str(),
                 "state": hosted.state,
                 "banned": state.is_banned(&hosted.app, now),
+                "view": reader.as_ref().map(|origin| format!("{origin}/app/{}/", hosted.app)),
             })
         })
         .collect();

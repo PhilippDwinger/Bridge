@@ -338,6 +338,37 @@ def main():
             page.wait_for_selector("iframe.bc-frame", timeout=30000)
             page.frame_locator("iframe.bc-frame").locator("h1").wait_for(timeout=30000)
             shot("22-browser-schmal")
+            page.set_viewport_size(VIEWPORT)
+
+            # "Website hochladen" (docs/07 §8a): a folder of this PC becomes a site on the owner node, with an address.
+            site2 = tempfile.mkdtemp(prefix="bc-ui-site-")
+            with open(os.path.join(site2, "index.html"), "w", encoding="utf-8") as page_file:
+                page_file.write("<!doctype html><title>Testseite</title><h1>Hallo von der Testseite</h1>")
+            page.goto(base + "/" + owner_hash)
+            page.wait_for_selector("button:has-text('Website hochladen')")
+            page.click("button:has-text('Website hochladen')")
+            page.wait_for_selector("#site-folder")
+            page.fill("#site-folder", '"' + site2 + '"')
+            page.click("button:has-text('Ordner prüfen')")
+            page.wait_for_selector(".b-form :text('Passt')", timeout=15000)
+            page.fill("#site-name", "Meine Testseite")
+            assert page.input_value("#site-address") == "meine-testseite", page.input_value("#site-address")
+            shot("23-website-hochladen", dialog=True)
+            page.click(".b-form button[type=submit]")
+            page.wait_for_selector("text=Website ist online", timeout=90000)
+            view = page.get_attribute(".b-dialog a:has-text('Ansehen')", "href")
+            assert view.startswith(f"http://127.0.0.1:{owner_row['listen_port']}/app/"), view
+            assert page.query_selector(".b-dialog a:has-text('meine-testseite.testnetz')") is not None, "Adresse fehlt"
+            shot("24-website-online", dialog=True)
+            page.click(".b-dialog button:has-text('Fertig')")
+            page.wait_for_selector(".srv:has-text('Meine Testseite') a:has-text('Ansehen')", timeout=30000)
+            page.wait_for_selector(".srv:has-text('Meine Testseite') button:has-text('Neue Version')")
+            shot("25-dashboard-website")
+            # Any browser of this PC sees it (here: a second tab, as Brave would).
+            other = browser.new_page()
+            other.goto(view)
+            other.wait_for_selector("h1:has-text('Hallo von der Testseite')", timeout=30000)
+            other.close()
 
             page.evaluate("fetch('/api/quit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})")
             browser.close()

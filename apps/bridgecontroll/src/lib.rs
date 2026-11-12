@@ -25,6 +25,7 @@ pub mod logfile;
 pub mod moderation;
 pub mod ops;
 pub mod qr;
+pub mod sites;
 pub mod status;
 pub mod supervisor;
 pub mod wizard;
