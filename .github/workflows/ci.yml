@@ -41,11 +41,7 @@ jobs:
               exit 1
             fi
           done
-      - run: cargo test --workspace
-      # Tests with real mDNS multicast are #[ignore = "needs multicast"]; Windows runners may block multicast.
-      - name: Multicast tests (mDNS)
-        if: runner.os == 'Linux'
-        run: cargo test --workspace -- --ignored
+      # Programs first, so the artifacts exist even when a test fails (Paddy can test meanwhile).
       - name: Build node program (release)
         run: cargo build --release -p bridge-node-bin
       - uses: actions/upload-artifact@v4
@@ -65,3 +61,18 @@ jobs:
             target/release/bridgecontroll
             target/release/bridgecontroll.exe
           if-no-files-found: error
+      # All tests run (no fail-fast); failures are written as annotations so they can be read without signing in.
+      - name: Tests
+        shell: bash
+        run: |
+          set -o pipefail
+          if cargo test --workspace --no-fail-fast 2>&1 | tee test.log; then exit 0; fi
+          grep -aE "^---- |panicked at|^test .* FAILED|error\[|assertion" test.log | head -60 | while IFS= read -r line; do
+            echo "::error title=Test::${line}"
+          done
+          exit 1
+
+      # Tests with real mDNS multicast are #[ignore = "needs multicast"]; Windows runners may block multicast.
+      - name: Multicast tests (mDNS)
+        if: runner.os == 'Linux'
+        run: cargo test --workspace -- --ignored
