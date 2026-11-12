@@ -201,6 +201,8 @@ antwortet `503 UNAVAILABLE`.
 | `POST /v4/names/search` | `{"q":"shop","safe":true,"max":20}` | `{"results":[<wie resolve, ohne app>],"more":bool}` |
 | `POST /v4/names/list` | `{"owner":"<id>"}` | `{"names":[<wie resolve, ohne app>]}` (gültige Namen dieses Inhabers) |
 | `POST /v4/names/submit` | eine `name`-Aussage (Inhaber = Sitzung) oder ein `revoke` eines eigenen Namens (`iss` = Sitzung) | `{"ok":true,"hash","index"}` |
+| `POST /v4/names/blocklist` | `{"publisher":"<id>"}` | `{"statement":<blocklist>}` (die Liste, die der Knoten hält; sonst `404`) |
+| `POST /v4/names/blocklist/update` | eine `blocklist`-Aussage (ohne Sitzung: die Signatur des Herausgebers ist der Beweis) | `{"taken":bool,"version"}` |
 
 - **Auflösen** liefert nur, was gerade gilt: Name aktiv, Inhaber nicht gesperrt und mit Stufe ≥ `names.min_level`,
   Ziel nicht gesperrt, reservierter Name nur bei Inhaber-Stufe ≥ 3, wirksam `adult` nur bei `adult: "allowed"`. Alles
@@ -281,12 +283,27 @@ seines Besitzers:
 5. Jede Anfrage prüft die Version erneut gegen den aktuellen Zustand (Sperre, Kennzeichnung, Ablauf) – ein Not-Aus
    wirkt beim Leser so schnell wie beim Host.
 
-## 9. Sperrlisten (`blocklists`, nur das Manifest-Feld gebaut)
-- Gebaut: das Manifest-Feld (0–8 Herausgeber-IDs, §2), geprüft und in `GET /v4/names/info` gezeigt.
-- **Später** (Spezifikation): Aussage `blocklist` (nicht im Log, wie `app`) `{"entries":["<skelett|app-id|id>",…]}`,
-  höchstens 10.000 Einträge, signiert vom Herausgeber (Karte im Body), mit Version; Knoten holen sie bei Empfängern
-  (`POST /v4/names/blocklist`) und behandeln gelistete Ziele wie gesperrt beim Auflösen, Suchen und Ausliefern. Bis dahin
-  hat das Feld keine Wirkung.
+## 9. Sperrlisten (`blocklists`, gebaut 12.11.2026)
+- Das Manifest-Feld `blocklists` (0–8 Herausgeber-IDs, §2) sagt, wessen Listen das Netz folgt; der Betreiber setzt es
+  (`bridge-node net blocklists --set <id,…>|none`, Recht `rules`). Wer Herausgeber ist, entscheidet der Betreiber – was
+  auf der Liste steht, der Herausgeber (z. B. eine Stelle, die Phishing-Seiten sammelt).
+- **Aussage `blocklist`** (nicht im Log, wie `app`): Body `{"publisher","card","version","entries":[…]}`, signiert nur
+  vom Herausgeber, dessen Karte im Body steckt (er braucht kein Siegel und keine Mitgliedschaft), an ein Netz gebunden
+  (`net`), höchstens 1 Jahr gültig, höchstens 512 KiB. Einträge: `id:<id>` (App, Knoten, Mitglied – auch Inhaber eines
+  Namens) oder `name:<skelett>` (das Verwechslungs-Skelett nach §4: `name:paypal` trifft auch `paypa1`); streng
+  sortiert, ohne Doppelte, höchstens 10.000. Eine höhere `version` ersetzt die niedrigere; gleich oder niedriger wird
+  ignoriert (kein Zurückrollen).
+- **Wirkung**: Ein Knoten behandelt einen gelisteten Namen, ein gelistetes Ziel oder einen gelisteten Inhaber wie
+  gesperrt – Auflösen `404`, Suche und `names/list` ohne ihn, Hosts liefern eine gelistete App (oder eine App eines
+  gelisteten Inhabers) nicht mehr aus und hören auf, der Leser auch. Abgelaufene Listen und Listen von Herausgebern, die
+  das Manifest nicht mehr nennt, zählen sofort nicht mehr.
+- **Verteilen**: Der Herausgeber gibt die Liste an einen Knoten (`POST /v4/names/blocklist/update`,
+  `bridge-node blocklist publish`); jeder Knoten fragt je Runde (`NetTiming::blocklists`, Standard 5 Minuten) bis zu 3
+  andere Knoten nach jeder genannten Liste (`POST /v4/names/blocklist`) und nimmt nur eine geprüfte, neuere. Gespeichert
+  im Speicher des Knotens (Schema 11, höchstens 8 je Netz), nach einem Neustart wieder geprüft geladen.
+- *Beim Bau festgelegt*: Die Prüfung (bis 10.000 Einträge) läuft außerhalb jeder Sperre; ersetzt wird die ganze
+  Sammlung als `Arc` (Lesen ohne Warten). Schlüssel des Herausgebers: `bridge-node blocklist key --key <datei>`.
+  Eintragsdatei: je Zeile ein Name (sein Skelett wird gelistet) oder eine ID, `#` = Kommentar.
 
 ## 10. Kommandozeile (Deutsch)
 - `bridge-node net create … --contact <meldeweg> [--short <kurzname>] [--adult allowed|forbidden]`.
@@ -320,7 +337,8 @@ seines Besitzers:
   (von einem vertrauten Proxy oder mit einer Weiterleitungs-Kopfzeile) – damit entscheidet der Knoten über den Leser.
 
 ## 11. Grenzen und offene Punkte von Phase 4
-- **Sperrlisten** nur als Manifest-Feld (§9).
+- **Sperrlisten** (§9): Ein Netz folgt höchstens 8 Herausgebern; eine Liste mit mehr als 10.000 Einträgen muss geteilt
+  werden (mehrere Herausgeber-Schlüssel). BridgeControll zeigt die Listen noch nicht (Kommandozeile).
 - **Leser in großen Netzen**: Er fragt höchstens 16 `web`-Knoten plus Hinweise – hostet keiner davon die App und gibt
   es keinen Namen mit `hosts`-Hinweis, findet er sie nicht. Abhilfe später: Dienst `names` als Verzeichnis.
 - **Suche** (Prüfung 9): ein Durchgang billiger Vergleiche über alle Namen (höchstens 100.000) und höchstens 2.000

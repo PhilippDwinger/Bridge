@@ -798,7 +798,7 @@ impl NetState {
             Kind::Ban => self.check_ban(statement, &signers, at)?,
             Kind::Name => self.check_name(statement, &signers, at)?,
             Kind::Label => self.check_label(statement, &signers, at)?,
-            Kind::Head | Kind::Cosign | Kind::Home | Kind::App => {
+            Kind::Head | Kind::Cosign | Kind::Home | Kind::App | Kind::Blocklist => {
                 return Err(NetError::format("entry: not a log kind"));
             }
         };

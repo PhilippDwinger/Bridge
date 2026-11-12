@@ -258,6 +258,9 @@ impl Node {
     /// one valid host. Returns those hosts.
     fn reader_valid(&self, version: &Version, now: i64) -> NodeResult<Hosts> {
         version.statement.check_time(now)?;
+        if self.app_blocked(&version.manifest.app, &version.manifest.owner, now) {
+            return Err(NodeError::not_found());
+        }
         let hosts = self.with_core(|core| -> NodeResult<Hosts> {
             check_standing(&core.state, &version.manifest, now)?;
             Ok(valid_hosts(&core.state, &version.manifest, now))

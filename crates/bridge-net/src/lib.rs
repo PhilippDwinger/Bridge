@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use bridge_core::{Id, KeyCard};
 
 pub mod apps;
+pub mod blocklist;
 pub mod error;
 pub mod log;
 pub mod merkle;
@@ -35,6 +36,7 @@ pub mod state;
 pub mod statements;
 
 pub use apps::{CheckedApp, check_app, check_standing, is_web_host, valid_hosts};
+pub use blocklist::{BlockEntry, Blocklist, Blocklists};
 pub use error::{NetError, NetResult};
 pub use log::{
     Evidence, Head, Log, WitnessedHead, check_new_entries, issue_cosign, issue_head, parse_entry, verify_cosign,

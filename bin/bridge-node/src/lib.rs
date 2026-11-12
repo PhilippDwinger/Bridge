@@ -59,6 +59,7 @@ use bridge_node::{Clock as _, LanConfig, NetConfig, NodeConfig, PeerAddresses, R
 use tokio::net::TcpListener;
 
 pub mod apps;
+pub mod blocklist;
 pub mod names;
 mod secret;
 
@@ -105,7 +106,12 @@ pub const USAGE: &str = "Aufruf:
                           [--description <text>] [--node <adresse>]   (neue Version; Hosts brauchen ein Siegel mit
                           Dienst web, ohne --host: die der letzten Version, sonst der Owner-Knoten)
   bridge-node app hosts   --data <ordner> --app <id> [--add <knoten-id>]... [--remove <knoten-id>]... [--node <adresse>]
-                          (neue Version mit denselben Dateien und geänderten Hosts)";
+                          (neue Version mit denselben Dateien und geänderten Hosts)
+  bridge-node net blocklists --data <ordner> --set <id,…>|none [--node <adresse>]
+                          (Herausgeber von Sperrlisten, denen das Netz folgt; höchstens 8, docs/08 §9)
+  bridge-node blocklist key     --key <datei>   (Herausgeber-Schlüssel anlegen/zeigen)
+  bridge-node blocklist publish --key <datei> --net <netz-id> --file <einträge.txt> --version <n> --node <adresse>
+                          [--days 365]   (je Zeile ein Name oder eine ID; # = Kommentar)";
 
 /// Flags as `(name, value)` pairs; every flag takes a value.
 fn flags(args: impl Iterator<Item = String>) -> Result<Vec<(String, String)>, String> {
@@ -478,6 +484,19 @@ async fn admin_command(command: &str, flags: &Flags) -> Result<(), String> {
             println!("Gekennzeichnet als {} (Log-Eintrag {}).", category.as_str(), submitted.index);
             println!("Zum Aufheben: bridge-node net revoke --data {} --statement {}", data.display(), statement.hash());
         }
+        "blocklists" => {
+            flags.only(&["--data", "--node", "--set"])?;
+            let set = flags.need("--set")?;
+            let ids = if set.trim() == "none" { Vec::new() } else { bridge_node::admin::parse_ids(set)? };
+            let count = ids.len();
+            let (version, index) = client.set_blocklists(ids).await?;
+            println!("Manifest Version {version} (Log-Eintrag {index}): {count} Herausgeber von Sperrlisten.");
+            if count > 0 {
+                println!(
+                    "Die Knoten holen die Listen selbst; ein Herausgeber gibt sie mit `bridge-node blocklist publish` ab."
+                );
+            }
+        }
         "reports" => {
             flags.only(&["--data", "--node", "--status", "--done", "--open"])?;
             if let Some(id) = flags.one("--done") {
@@ -517,6 +536,42 @@ async fn admin_command(command: &str, flags: &Flags) -> Result<(), String> {
             println!("Eine Meldung löst nichts von selbst aus. Werkzeuge: net label, net revoke, net ban.");
         }
         other => return Err(format!("unbekannter Befehl net {other}\n{USAGE}")),
+    }
+    Ok(())
+}
+
+/// `bridge-node blocklist …` (docs/08 §9).
+async fn blocklist_command(command: &str, flags: &Flags) -> Result<(), String> {
+    match command {
+        "key" => {
+            flags.only(&["--key"])?;
+            let key = blocklist::key(Path::new(flags.need("--key")?))?;
+            println!("Herausgeber-ID: {}", key.id());
+            println!("Ein Netz folgt der Liste, wenn sein Betreiber sie aufnimmt:");
+            println!("  bridge-node net blocklists --data <ordner> --set {}", key.id());
+        }
+        "publish" => {
+            flags.only(&["--key", "--net", "--file", "--version", "--days", "--node"])?;
+            let key = blocklist::key(Path::new(flags.need("--key")?))?;
+            let net = bridge_core::Id::parse(flags.need("--net")?).map_err(|_| "--net: eine Netz-ID".to_owned())?;
+            let entries = blocklist::entries_of_file(Path::new(flags.need("--file")?))?;
+            let version: u64 = flags.number("--version", 0)?;
+            if version == 0 {
+                return Err("--version: 1 oder mehr (höher als die letzte Liste)".into());
+            }
+            let count = entries.len();
+            let taken =
+                blocklist::publish(&key, &net, version, entries, flags.number("--days", 365)?, flags.need("--node")?)
+                    .await?;
+            if taken {
+                println!(
+                    "Liste Version {version} mit {count} Einträgen angenommen - die Knoten des Netzes holen sie sich."
+                );
+            } else {
+                println!("Der Knoten hat schon diese oder eine neuere Version - nichts geändert.");
+            }
+        }
+        other => return Err(format!("unbekannter Befehl blocklist {other}\n{USAGE}")),
     }
     Ok(())
 }
@@ -808,6 +863,13 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
         let command = args.next().unwrap_or_default();
         match flags(args) {
             Ok(flags) => name_command(&command, &Flags(flags)).await,
+            Err(message) => Err(message),
+        }
+    } else if args.peek().map(String::as_str) == Some("blocklist") {
+        args.next();
+        let command = args.next().unwrap_or_default();
+        match flags(args) {
+            Ok(flags) => blocklist_command(&command, &Flags(flags)).await,
             Err(message) => Err(message),
         }
     } else if args.peek().map(String::as_str) == Some("net") {

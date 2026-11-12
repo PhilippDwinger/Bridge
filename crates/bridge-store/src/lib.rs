@@ -34,6 +34,7 @@ use thiserror::Error;
 
 mod apps;
 mod blobs;
+mod blocklists;
 mod net;
 mod reports;
 mod watch;
@@ -43,6 +44,7 @@ pub use blobs::{
     APP_PIN_PREFIX, BlobFiles, BlobLimits, BlobState, CHARGED_MIN_BYTES, HASHES_PER_ROW, NewBlob, PartStored, Pin,
     Pinned, Registered, StagePage, Staged,
 };
+pub use blocklists::MAX_BLOCKLISTS_PER_NET;
 pub use net::{
     HeadRow, HomeRow, HomeStored, MAX_EVIDENCE_PER_NET, MAX_HEAD_ROWS_PER_NET, Outgoing, RelayItem, RelayLimits,
     TransitionRow,
@@ -150,6 +152,10 @@ const MIGRATIONS: &[&str] = &[
     // oldest open report of a lower level, and open reports of level 0 age out.
     "ALTER TABLE reports ADD COLUMN level INTEGER NOT NULL DEFAULT 0;
      CREATE INDEX reports_by_level ON reports (net, status, level, received);",
+    // 11: blocklists (docs/08 §9): the newest list statement per network and publisher (not in the log).
+    "CREATE TABLE blocklists (net TEXT NOT NULL, publisher TEXT NOT NULL, version INTEGER NOT NULL,
+                              statement BLOB NOT NULL, received INTEGER NOT NULL,
+                              PRIMARY KEY (net, publisher)) WITHOUT ROWID;",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

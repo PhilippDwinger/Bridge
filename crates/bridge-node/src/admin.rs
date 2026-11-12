@@ -328,6 +328,24 @@ impl AdminClient {
         self.submit_as(&self.identity, statement).await
     }
 
+    /// Sets the publishers of blocklists the network applies (manifest field `blocklists`, docs/08 §9; 0-8 IDs, an
+    /// empty list removes the field): a new manifest version, checked like the log operator does, then submitted.
+    /// Returns (manifest version, log index).
+    pub async fn set_blocklists(&self, publishers: Vec<Id>) -> Result<(u64, u64), String> {
+        if publishers.len() > bridge_net::blocklist::MAX_PUBLISHERS {
+            return Err("höchstens 8 Herausgeber von Sperrlisten".into());
+        }
+        let (_, state) = self.load_state().await?;
+        let mut manifest = state.manifest().next_version();
+        manifest.blocklists = (!publishers.is_empty()).then_some(publishers);
+        let statement = self.sign(&manifest, YEAR_MS)?;
+        state
+            .validate_candidate(&statement, Self::now())
+            .map_err(|e| format!("Der Log-Führer würde das neue Manifest ablehnen: {e}"))?;
+        let submitted = self.submit(&statement).await?;
+        Ok((manifest.version, submitted.index))
+    }
+
     /// Hands a signed statement to the owner node in a request signed by `signer` (the admin key, or the net key
     /// for the rescue).
     async fn submit_as(&self, signer: &Identity, statement: &Statement) -> Result<Submitted, String> {

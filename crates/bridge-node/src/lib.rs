@@ -19,6 +19,7 @@
 pub mod admin;
 mod apps;
 mod blobs;
+mod blocklists;
 mod error;
 pub mod keyfile;
 mod lan;

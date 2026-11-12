@@ -105,6 +105,9 @@ bridge-node name register --data netz1 --name shop --app <app-id> --tags laden,k
 bridge-node name list   --data netz1
 bridge-node net label   --data netz1 --target <name|app-id> --category adult     # Kennzeichnung (Recht seals)
 bridge-node net reports --data netz1                                             # Meldungen der Mitglieder
+bridge-node blocklist key --key herausgeber.json                                 # Sperrlisten (docs/08 §9)
+bridge-node net blocklists --data netz1 --set <herausgeber-id>
+bridge-node blocklist publish --key herausgeber.json --net <netz-id> --file liste.txt --version 1 --node <adresse>
 ```
 Namen stehen im Transparenz-Log: wer zuerst kommt, ab Stufe 1, begrenzt je Stufe, Schutz vor verwechselbaren Namen
 (`sh0p` neben `shop`) und reservierten Wörtern (Bank, Login, PayPal …, erst ab Stufe 3). Jeder Knoten löst Namen aus

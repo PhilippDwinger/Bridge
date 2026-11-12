@@ -82,6 +82,8 @@ pub enum Kind {
     Name,
     /// An admin's label of a name or target (docs/08 §5; log).
     Label,
+    /// A publisher's blocklist (docs/08 §9; not in the log - nodes keep the newest version).
+    Blocklist,
 }
 
 impl Kind {
@@ -115,6 +117,7 @@ impl Kind {
             Self::App => "app",
             Self::Name => "name",
             Self::Label => "label",
+            Self::Blocklist => "blocklist",
         }
     }
 
@@ -135,6 +138,7 @@ impl Kind {
             "app" => Self::App,
             "name" => Self::Name,
             "label" => Self::Label,
+            "blocklist" => Self::Blocklist,
             _ => return None,
         })
     }

@@ -108,6 +108,9 @@ impl Node {
         if request.path != "/v4/names/submit" {
             self.inner.guard.admit_names(request.peer, now)?;
         }
+        if request.path.starts_with("/v4/names/blocklist") {
+            return self.route_blocklists(request, now).await;
+        }
         match (request.method, request.path.as_str()) {
             (Method::Get, "/v4/names/info") => self.names_info(),
             (Method::Post, "/v4/names/resolve") => self.names_resolve(request, now).await,
@@ -144,8 +147,13 @@ impl Node {
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty() && name.len() <= MAX_NAME_INPUT)
             .ok_or_else(|| NodeError::bad_format("name: a name or name.short"))?;
+        let blocklists = self.blocklists();
         let (mut value, app, owner) = self.with_core(|core| -> NodeResult<_> {
             let resolved = core.state.resolve_name(&name.to_ascii_lowercase(), now).map_err(|_| not_found())?;
+            // A blocklisted name, target or owner is like a banned one (docs/08 §9): not found.
+            if blocklists.blocks_resolved(&resolved, now) {
+                return Err(not_found());
+            }
             let value = name_value(&core.state, core.state.manifest(), &resolved);
             let body = &resolved.info.name;
             let app = (body.kind == NameKind::App).then(|| body.target.clone());
@@ -210,10 +218,16 @@ impl Node {
             ..NodeError::new(429, "RATE_LIMITED", "too many searches at once")
         })?;
         let query = query.to_owned();
+        let blocklists = self.blocklists();
         self.on_snapshot(move |state| {
             let search = state.search(&query, safe, max, now);
             let manifest = state.manifest();
-            let list: Vec<Value> = search.results.iter().map(|result| name_value(state, manifest, result)).collect();
+            let list: Vec<Value> = search
+                .results
+                .iter()
+                .filter(|result| !blocklists.blocks_resolved(result, now))
+                .map(|result| name_value(state, manifest, result))
+                .collect();
             drop(slot);
             json!({"results": list, "more": search.more}).to_string().into_bytes()
         })
@@ -224,10 +238,16 @@ impl Node {
     fn names_list(&self, body: &[u8], now: i64) -> NodeResult<Vec<u8>> {
         let body = body_object(body, MAX_QUERY_BYTES)?;
         let owner = Id::parse(body.get("owner").and_then(Value::as_str).unwrap_or_default())?;
+        let blocklists = self.blocklists();
         let value = self.with_core(|core| {
             let manifest = core.state.manifest();
-            let list: Vec<Value> =
-                core.state.names_of(&owner, now).iter().map(|name| name_value(&core.state, manifest, name)).collect();
+            let list: Vec<Value> = core
+                .state
+                .names_of(&owner, now)
+                .iter()
+                .filter(|name| !blocklists.blocks_resolved(name, now))
+                .map(|name| name_value(&core.state, manifest, name))
+                .collect();
             json!({"names": list})
         })?;
         Ok(value.to_string().into_bytes())

@@ -105,6 +105,8 @@ pub struct NetTiming {
     pub apps: Duration,
     /// Watcher: one round (probes due, decisions) this often (docs/06 §11.4).
     pub watch: Duration,
+    /// Blocklists: ask peers for newer lists of the publishers the manifest names this often (docs/08 §9).
+    pub blocklists: Duration,
     /// A node with `probe`: join / register at the watchers this often; a watcher keeps a registration 24 times this
     /// long (docs/06 §11.5).
     pub register: Duration,
@@ -125,6 +127,7 @@ impl Default for NetTiming {
             join_wait: Duration::from_secs(20),
             apps: Duration::from_secs(30),
             watch: Duration::from_secs(10),
+            blocklists: Duration::from_secs(5 * 60),
             register: Duration::from_secs(10 * 60),
         }
     }
@@ -147,6 +150,7 @@ impl NetTiming {
             join_wait: Duration::from_secs(10),
             apps: Duration::from_millis(200),
             watch: Duration::from_millis(200),
+            blocklists: Duration::from_millis(300),
             register: Duration::from_millis(500),
         }
     }
@@ -647,6 +651,8 @@ pub(crate) struct NetRuntime {
     pub(crate) invite: Option<String>,
     /// Which addresses other nodes chose are called ([`crate::NodeConfig::peer_addresses`]).
     pub(crate) peer_addresses: bridge_transport::PeerAddresses,
+    /// The blocklists that apply (docs/08 §9): replaced as a whole, read as a cheap snapshot.
+    pub(crate) blocklists: Mutex<Arc<bridge_net::Blocklists>>,
 }
 
 /// The first pause before a damaged transition head is fetched again (it doubles up to 64 times this).
@@ -693,6 +699,18 @@ impl NetRuntime {
         };
         let size = core.as_ref().map_or(0, |core| core.log.size());
         let watch = WatchMemory::load(store, &net)?;
+        // The kept blocklists, checked again against the replayed state (a list that no longer holds is dropped).
+        let mut blocklists = bridge_net::Blocklists::default();
+        if let Some(core) = &core {
+            for (_, bytes) in store.blocklists(&key).map_err(|e| format!("blocklists: {e}"))? {
+                let offered = bridge_net::Blocklist::parse_statement(&bytes)
+                    .map_err(|e| e.to_string())
+                    .and_then(|statement| blocklists.offer(&statement, &core.state, now).map_err(|e| e.to_string()));
+                if let Err(error) = offered {
+                    tracing::warn!(%error, "a kept blocklist no longer holds");
+                }
+            }
+        }
         Ok(Self {
             net,
             bootstrap: config.bootstrap.iter().take(MAX_BOOTSTRAP).cloned().collect(),
@@ -713,6 +731,7 @@ impl NetRuntime {
             probe,
             invite: config.invite.clone(),
             peer_addresses,
+            blocklists: Mutex::new(Arc::new(blocklists)),
         })
     }
 }
@@ -836,6 +855,7 @@ pub(crate) fn spawn(node: &Node) -> Vec<JoinHandle<()>> {
         tokio::spawn(duty(node.clone(), timing.homes, Duty::Homes)),
         tokio::spawn(duty(node.clone(), timing.watch, Duty::Watch)),
         tokio::spawn(duty(node.clone(), timing.relay_retry, Duty::Reports)),
+        tokio::spawn(duty(node.clone(), timing.blocklists, Duty::Blocklists)),
     ];
     if network.probe.is_some() {
         tasks.push(tokio::spawn(duty(node.clone(), timing.register, Duty::Register)));
@@ -854,6 +874,7 @@ enum Duty {
     Watch,
     Register,
     Reports,
+    Blocklists,
 }
 
 /// One duty: run, then wait for the interval (or a wake-up), forever. A round never panics the task: errors are
@@ -871,6 +892,7 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Watch => node.watch_round().await,
             Duty::Register => node.register_round().await,
             Duty::Reports => node.reports_round().await,
+            Duty::Blocklists => node.blocklists_round().await,
         }
         let Some(network) = node.network() else { return };
         let wake = match duty {
@@ -878,7 +900,7 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Head => Some(&network.wake_head),
             Duty::Witness => Some(&network.wake_witness),
             Duty::Relay => Some(&network.wake_relay),
-            Duty::Gossip | Duty::Homes | Duty::Watch | Duty::Register | Duty::Reports => None,
+            Duty::Gossip | Duty::Homes | Duty::Watch | Duty::Register | Duty::Reports | Duty::Blocklists => None,
         };
         match wake {
             Some(wake) => {

@@ -432,6 +432,9 @@ impl Node {
     /// the hosts that count.
     fn check_version(&self, statement: Statement, now: i64) -> NodeResult<(Version, Hosts)> {
         let manifest = AppManifest::verify(&statement, &self.inner.net, now)?;
+        if self.app_blocked(&manifest.app, &manifest.owner, now) {
+            return Err(NetError::Banned.into());
+        }
         let hosts = self.with_core(|core| -> NodeResult<_> {
             check_standing(&core.state, &manifest, now)?;
             Ok(valid_hosts(&core.state, &manifest, now))
@@ -871,6 +874,9 @@ impl Node {
     fn still_valid(&self, version: &Version, now: i64) -> Result<Hosts, Invalid> {
         if version.statement.check_time(now).is_err() {
             return Err(Invalid::Stop("the version expired".into()));
+        }
+        if self.app_blocked(&version.manifest.app, &version.manifest.owner, now) {
+            return Err(Invalid::Stop("the app or its owner is on a blocklist".into()));
         }
         let checked = self.with_core(|core| {
             check_standing(&core.state, &version.manifest, now)
