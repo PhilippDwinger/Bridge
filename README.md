@@ -5,7 +5,8 @@
 überall – auch im Heimnetz ohne Internet. Sicher nach dem Zero-Trust-Prinzip: Inhalte sind Ende-zu-Ende
 verschlüsselt, alles Wichtige ist signiert, niemand muss einem einzelnen Knoten vertrauen.
 
-> Status: **Phase 3 – BridgeNet in Arbeit, Phase 4a (Dateien und Apps) gebaut.** Ein Knoten nimmt Ende-zu-Ende
+> Status: **Phase 3 – BridgeNet in Arbeit, Phase 4a (Dateien und Apps) und der Kern von Phase 4 (Namen, Suche,
+> Browser über den eigenen Knoten, Missbrauchsschutz) gebaut.** Ein Knoten nimmt Ende-zu-Ende
 > verschlüsselte Nachrichten an, hält sie bis zur Abholung (auch über Neustarts) und kann sie nicht lesen. Mehrere
 > Knoten bilden ein Netz mit Transparenz-Log, Mitgliedern, Siegeln und Weiterleitung zwischen Empfängern – auch im LAN
 > ohne Internet, per Klick mit BridgeControll v2 oder per Kommandozeile. Dateien werden nach Inhalt übertragen (geprüft, von mehreren Hosts
@@ -21,12 +22,24 @@ bridgecontroll --data <ordner>     # anderer App-Ordner; --port 7380, --no-brows
 Der Standard-Browser öffnet sich mit einem Einmal-Anmelde-Link (er steht auch in der Ausgabe); die Oberfläche läuft
 nur auf `127.0.0.1`. Ein zweiter Start öffnet nur den Browser der laufenden App. Beenden: „Beenden“ unten links (die
 Knoten werden sauber gestoppt). Darin:
-- **Neues BridgeNet**: Name und Art → die 24 Wörter (genau einmal, kurzer Test) → Erreichbarkeit (Port, LAN,
-  optional Tailscale-Adresse) → Einladungslink mit QR-Code. Der Owner-Knoten läuft dann.
+- **Neues BridgeNet**: Name und Art, dazu als Betreiber dein **Meldeweg** (Pflicht, z. B. eine E-Mail-Adresse), der
+  **Kurzname** für Adressen (`shop.<kurzname>`, aus dem Namen vorgeschlagen) und ob Inhalte ab 18 erlaubt sind
+  (Standard: nicht erlaubt) → die 24 Wörter (genau einmal, kurzer Test) → Erreichbarkeit (Port, LAN, optional
+  Tailscale-Adresse) → Einladungslink mit QR-Code. Der Owner-Knoten läuft dann.
 - **Netz beitreten (Link)**: Link einfügen, Name, Erreichbarkeit – dieser PC bekommt einen eigenen Knoten.
 - **Dashboard** eines Netzes: Knoten siegeln (Knoten dieses PCs direkt; andere PCs schicken ihren **Knoten-Ausweis**
   und du vergleichst die ersten 12 Zeichen der ID mit ihrem Bildschirm), Siegel entziehen, Mitglieder sperren,
-  Einladungen, Apps, Transparenz-Log.
+  Einladungen, Apps, Transparenz-Log. Dazu **Namen** (anmelden für eine App, den Owner-Knoten oder dich, widerrufen),
+  **Meldungen** der Mitglieder (lesen, erledigen, Schnell-Aktionen: als 18+ kennzeichnen, App sperren, Namen
+  widerrufen – jeweils mit Bestätigung) und der Hinweis „Meldeweg fehlt“ bei älteren Netzen (mit „Meldeweg eintragen“).
+- **Bridge-Browser** (Startseite und Dashboard, docs/08 §12): Adresse `shop.meinnetz` eingeben oder suchen
+  (**Sicherer Modus** an: keine 18+-Inhalte, keine Namen neuer Inhaber). Vor dem Öffnen zeigt ein „Schloss“, was dein
+  Knoten geprüft hat (Netz-Name und ID-Fingerabdruck, Stufe des Inhabers, Meldeweg, Kennzeichnung, Warnungen auf
+  Deutsch). Die App läuft in einem abgeschotteten `iframe` (Sandbox ohne `allow-same-origin`), geladen vom **Leser
+  deines eigenen Knotens** (`http://127.0.0.1:<port>`), der jede Datei selbst prüft; „In neuem Tab öffnen“ geht auch.
+  **Melden** schickt eine Meldung an die Admins des Netzes (signiert mit dem Mitglieds-Schlüssel dieses PCs). Der
+  Leser je Knoten in den Einstellungen: „Aus“, „Nur dieser PC“ (Standard), „Heimnetz (LAN)“; ein Knoten mit
+  öffentlicher Adresse öffnet keine Apps (er vertraut dem Tailscale-Proxy auf diesem PC).
 - Jeder Knoten läuft als eigener Prozess (`bridgecontroll node …`) mit Neustart nach Abstürzen; Einstellungen,
   Protokoll und Löschen über „⋯“. „Mit Windows starten“ unten links (aus, bis du es einschaltest).
 - **Adressen anderer Knoten** (Einstellungen je Knoten): welche Adressen der Knoten anruft, die ein anderer Knoten
@@ -84,9 +97,27 @@ angelegt und als Mitglied aufgenommen). Hosts brauchen ein Siegel mit Dienst `we
 Host, der auch Empfänger ist, die anderen holen sich die Version selbst. Die App läuft dann unter
 `https://<host>/app/<app-id>/` in einer abgeschotteten Herkunft. Details: `docs/07_APPS_UND_DATEIEN.md`.
 
+## Namen, Suche, Melden (Phase 4, Kommandozeile)
+```
+bridge-node net create --data netz1 --name "Mein Netz" --url https://<pc>.ts.net:8443/k1 --contact abuse@example.org \
+                       --short meinnetz                                          # Meldeweg ist Pflicht
+bridge-node name register --data netz1 --name shop --app <app-id> --tags laden,kleidung   # → shop.meinnetz
+bridge-node name list   --data netz1
+bridge-node net label   --data netz1 --target <name|app-id> --category adult     # Kennzeichnung (Recht seals)
+bridge-node net reports --data netz1                                             # Meldungen der Mitglieder
+```
+Namen stehen im Transparenz-Log: wer zuerst kommt, ab Stufe 1, begrenzt je Stufe, Schutz vor verwechselbaren Namen
+(`sh0p` neben `shop`) und reservierten Wörtern (Bank, Login, PayPal …, erst ab Stufe 3). Jeder Knoten löst Namen aus
+seinem eigenen Log auf (`/v4/names/resolve`, `/v4/names/search`) und lädt Apps anderer Hosts als **Leser** für den
+Browser seines Besitzers – nur lokal, jeder Teil geprüft (`--reader off|local|lan`). Details: `docs/08_NAMEN_WEB_BROWSER.md`.
+
+**Nutzungsregeln** (Entwurf): [NUTZUNGSREGELN.md](NUTZUNGSREGELN.md) – wer ein Netz erstellt, ist dessen Betreiber und
+verantwortlich; Nachrichten bleiben Ende-zu-Ende verschlüsselt und werden nie durchsucht.
+
 - Doku: [docs/](docs/README.md)
 - Aufbau: Rust-Workspace, ein Crate pro Abteil (`crates/`), Dienste (`services/`), Programm (`bin/bridge-node`),
   SDKs (`sdk/`), Apps (`apps/`, darin `bridgecontroll`).
 - Bauen und testen: `cargo test --workspace`
 - Lizenz: [PolyForm Shield 1.0.0](LICENSE) – Nutzung in eigenen Projekten erlaubt (auch kommerziell), aber kein
   Produkt, das mit Bridge konkurriert. Die Client-Bibliotheken (`sdk/`) dürfen in eigene Projekte eingebaut werden.
+  Zusätzlich gelten die [Nutzungsregeln](NUTZUNGSREGELN.md) (ändern die Lizenz nicht).

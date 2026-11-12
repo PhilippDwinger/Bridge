@@ -22,7 +22,10 @@ mod blobs;
 mod error;
 pub mod keyfile;
 mod lan;
+mod names;
 mod network;
+mod reader;
+mod reports;
 mod sessions;
 
 use std::collections::{BTreeSet, HashMap};
@@ -48,6 +51,7 @@ pub use lan::LanConfig;
 pub use network::{
     LanPin, MAX_BOOTSTRAP, MEMBER_LIFETIME_MS, NetConfig, NetStatus, NetTiming, WatchStatus, WatchedNode,
 };
+pub use reader::{ReaderAccess, ReaderConfig};
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
 pub const COMPARTMENT: &str = "bridge-node";
@@ -112,6 +116,13 @@ pub struct NodeConfig {
     /// with its pinned certificate; `Tailnet`: also Tailscale's ranges (networks over Tailscale, BridgeControll's
     /// default); `Any`: no check (LAN-only networks, tests on 127.0.0.1). `bridge-node --peer-addresses …`.
     pub peer_addresses: PeerAddresses,
+    /// The reader (docs/08 §8): who may load apps this node does not host through it (default: only this computer).
+    pub reader: ReaderConfig,
+    /// A second listener only for this computer (review 9, docs/08 §8): bound to a loopback address, never behind a
+    /// proxy, it serves the reader (`/app/…`) and the name lookups only - so the own browser can use the reader of a
+    /// node whose main listener trusts a local proxy (Tailscale Funnel). `None`: none. A non-loopback address is
+    /// refused at the start.
+    pub reader_listen: Option<std::net::SocketAddr>,
     /// Session lifetime (ms).
     pub session_lifetime_ms: i64,
     /// Sessions per identity.
@@ -135,6 +146,8 @@ impl NodeConfig {
             lan: None,
             probe: None,
             peer_addresses: PeerAddresses::Public,
+            reader: ReaderConfig::default(),
+            reader_listen: None,
             session_lifetime_ms: 60 * 60 * 1000,
             sessions_per_identity: 8,
             clock: Arc::new(SystemClock),
@@ -158,6 +171,10 @@ struct Inner {
     blobs: BlobFiles,
     /// The apps this node hosts.
     apps: apps::Apps,
+    /// Apps it loads for the own browser (docs/08 §8).
+    reader: reader::Reader,
+    /// Name searches running now, all callers together (review 9: at most [`names::MAX_SEARCHES_AT_ONCE`]).
+    searches: Arc<tokio::sync::Semaphore>,
 }
 
 /// A node (cheap to clone; all clones are the same node).
@@ -171,6 +188,8 @@ pub struct RunningNode {
     node: Node,
     server: RunningServer,
     lan: Option<RunningServer>,
+    /// The loopback listener for the own browser ([`NodeConfig::reader_listen`]).
+    local_reader: Option<RunningServer>,
     announcer: Option<LanAnnouncer>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -185,6 +204,11 @@ impl RunningNode {
     #[must_use]
     pub fn lan_addr(&self) -> Option<std::net::SocketAddr> {
         self.lan.as_ref().map(RunningServer::local_addr)
+    }
+    /// Address of the loopback listener for the own browser ([`NodeConfig::reader_listen`]), if on.
+    #[must_use]
+    pub fn reader_addr(&self) -> Option<std::net::SocketAddr> {
+        self.local_reader.as_ref().map(RunningServer::local_addr)
     }
     /// Whether the node is announced in the LAN (mDNS). `false` with LAN on means the announcement failed (e.g.
     /// no multicast): the LAN listener works, but others only find it with the address.
@@ -202,6 +226,11 @@ impl RunningNode {
     pub fn net_status(&self) -> Option<NetStatus> {
         self.node.net_status()
     }
+    /// Bytes the reader keeps in memory (docs/08 §8; bounded by `ReaderConfig::cache_bytes`).
+    #[must_use]
+    pub fn reader_bytes(&self) -> u64 {
+        self.node.inner.reader.kept_bytes()
+    }
     /// The watcher's view (docs/06 §11): whether it is one, its seals, the nodes registered with their probes
     /// (`None` without a network or log).
     pub async fn watch_status(&self) -> Option<WatchStatus> {
@@ -210,17 +239,20 @@ impl RunningNode {
     /// Stops the node: background duties, the mDNS announcement (with a goodbye), then both listeners (running
     /// requests may finish).
     pub async fn shutdown(self) {
-        let Self { server, lan, announcer, tasks, .. } = self;
+        let Self { server, lan, local_reader, announcer, tasks, .. } = self;
         for task in &tasks {
             task.abort();
         }
         drop(announcer);
-        match lan {
-            Some(lan) => {
-                tokio::join!(server.shutdown(), lan.shutdown());
+        let others = async move {
+            if let Some(lan) = lan {
+                lan.shutdown().await;
             }
-            None => server.shutdown().await,
-        }
+            if let Some(local_reader) = local_reader {
+                local_reader.shutdown().await;
+            }
+        };
+        tokio::join!(server.shutdown(), others);
     }
 }
 
@@ -273,6 +305,13 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
         ),
         None => None,
     };
+    let reader_listener = match config.reader_listen {
+        Some(addr) if !addr.ip().is_loopback() => {
+            return Err(format!("reader: {addr} is no loopback address (only this computer may use the reader)"));
+        }
+        Some(addr) => Some(TcpListener::bind(addr).await.map_err(|e| format!("reader: cannot listen on {addr}: {e}"))?),
+        None => None,
+    };
     let node = Node {
         inner: Arc::new(Inner {
             sessions: Mutex::new(sessions::Sessions::new(
@@ -291,6 +330,8 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
             lan: config.lan.as_ref().map(lan::Directory::new),
             blobs: BlobFiles::new(config.data_dir.join(BLOB_DIR)),
             apps,
+            reader: reader::Reader::new(config.reader),
+            searches: Arc::new(tokio::sync::Semaphore::new(names::MAX_SEARCHES_AT_ONCE)),
         }),
     };
     let lan_server = match (lan_listener, &tls) {
@@ -300,11 +341,30 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
         ),
         _ => None,
     };
+    // The loopback listener never trusts a proxy: every request there comes straight from this computer.
+    let local_config = ServerConfig { trusted_proxies: Vec::new(), ..config.server.clone() };
+    let local_reader = match reader_listener {
+        Some(listener) => {
+            match bridge_transport::serve(listener, local_config, Arc::new(reader::LocalReader(node.clone()))) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    if let Some(lan_server) = lan_server {
+                        lan_server.shutdown().await;
+                    }
+                    return Err(format!("reader: {error}"));
+                }
+            }
+        }
+        None => None,
+    };
     let server = match bridge_transport::serve(listener, config.server, Arc::new(node.clone())) {
         Ok(server) => server,
         Err(error) => {
             if let Some(lan_server) = lan_server {
                 lan_server.shutdown().await;
+            }
+            if let Some(local_reader) = local_reader {
+                local_reader.shutdown().await;
             }
             return Err(error.to_string());
         }
@@ -327,9 +387,10 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
         net = %node.inner.net,
         addr = %server.local_addr(),
         lan = ?lan_server.as_ref().map(RunningServer::local_addr),
+        reader = ?local_reader.as_ref().map(RunningServer::local_addr),
         "node started"
     );
-    Ok(RunningNode { node, server, lan: lan_server, announcer, tasks })
+    Ok(RunningNode { node, server, lan: lan_server, local_reader, announcer, tasks })
 }
 
 /// Which network the node belongs to (configured, or stored in the data folder) and its addresses. A configured
@@ -379,6 +440,8 @@ async fn janitor(node: Node) {
             let (homes, outbox) = if network { store.purge_net(now)? } else { (0, 0) };
             if network {
                 store.purge_watch(now)?;
+                store.purge_reports(now.saturating_sub(reports::KEEP_DONE_MS))?;
+                store.purge_open_reports(1, now.saturating_sub(reports::KEEP_OPEN_LEVEL0_MS))?;
             }
             Ok::<_, bridge_store::StoreError>((envelopes, seen, homes, outbox))
         })
@@ -528,6 +591,9 @@ impl Node {
             }
             (_, path) if path.starts_with("/v4/blob/") => self.route_blob(&request, now).await,
             (_, path) if path.starts_with("/v4/app/") => self.route_app(&request, now).await,
+            (_, path) if path.starts_with("/v4/names/") => self.route_names(&request, now).await,
+            (Method::Post, "/v4/report") => self.report_in(&request, now).await,
+            (_, path) if path.starts_with("/v4/admin/") => self.route_admin(&request, now).await,
             _ => Err(NodeError::not_found()),
         }
     }

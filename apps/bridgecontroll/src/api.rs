@@ -7,9 +7,13 @@
 //! | `GET /api/overview` | all nodes of this PC with live status (start page) |
 //! | `GET /api/nodes/<id>/dashboard[?q=…]` | owner dashboard (or a member node's own view) |
 //! | `GET /api/nodes/<id>/log[?lines=n]` | the end of a node's log |
+//! | `GET /api/nodes/<id>/reports[?status=open\|done\|all]` | reports at an owner node |
 //! | `POST /api/nodes/<id>/start` · `stop` · `settings` · `delete` | run and change nodes |
 //! | `POST /api/nodes/<id>/invite` · `seal` · `unseal` · `ban` · `unban` | admin actions of an owner node |
-//! | `POST /api/wizard/start` · `confirm` · `check` · `create` · `cancel` | assistant "Neues BridgeNet" |
+//! | `POST /api/nodes/<id>/name-register` · `name-revoke` · `report-status` · `report-action` · `contact` | names, reports, Meldeweg (owner) |
+//! | `POST /api/nodes/<id>/report` | report a name or ID of the node's network (member key of this PC) |
+//! | `GET /api/browser` · `POST /api/browser/resolve` · `/api/browser/search` | the Bridge-Browser |
+//! | `POST /api/wizard/start` · `short` · `confirm` · `check` · `create` · `cancel` | assistant "Neues BridgeNet" |
 //! | `POST /api/join/check` · `/api/join` | "Netz beitreten" |
 //! | `POST /api/qr` · `/api/settings` · `/api/quit` | QR code, start with the system, end the app |
 
@@ -21,7 +25,7 @@ use zeroize::Zeroizing;
 
 use crate::http::{Answer, Call, MAX_BODY_BYTES};
 use crate::ops::{self, JoinRequest, Reach, SealRequest};
-use crate::{App, config, logfile, now_ms, qr};
+use crate::{App, browser, config, logfile, moderation, now_ms, qr};
 
 /// Routes one API call.
 pub async fn route(app: &App, call: &Call<'_>) -> Answer {
@@ -33,8 +37,12 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
     if call.method == Method::GET {
         return match parts.as_slice() {
             ["overview"] => Answer::json(200, &ops::overview(app).await),
+            ["browser"] => Answer::json(200, &browser::nodes(app).await),
             ["nodes", id, "dashboard"] => result(ops::dashboard(app, id, call.query).await),
             ["nodes", id, "log"] => log(app, id, call.query),
+            ["nodes", id, "reports"] if config::check_id(id).is_ok() => {
+                result(moderation::reports(app, id, call.query).await)
+            }
             _ => Answer::error(404, "Nicht gefunden"),
         };
     }
@@ -45,6 +53,8 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
     match parts.as_slice() {
         ["nodes", id, action] => node_action(app, id, action, &body).await,
         ["wizard", step] => wizard(app, step, &body).await,
+        ["browser", "resolve"] => result(browser::resolve(app, &body).await),
+        ["browser", "search"] => result(browser::search(app, &body).await),
         ["join", "check"] => Answer::json(200, &ops::join_check(text(&body, "link")).await),
         ["join"] => result(join(app, &body).await),
         ["qr"] => match qr::svg(text(&body, "text")) {
@@ -133,6 +143,12 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
             Err(error) => Answer::error(400, &error),
         },
         "unban" => result(ops::unban(app, id, text(body, "subject")).await),
+        "report" => result(browser::report(app, id, body).await),
+        "name-register" => result(moderation::register_name(app, id, body).await),
+        "name-revoke" => result(moderation::revoke_name(app, id, body).await),
+        "report-status" => result(moderation::report_status(app, id, body).await),
+        "report-action" => result(moderation::report_action(app, id, body).await),
+        "contact" => result(moderation::set_contact(app, id, body).await),
         _ => Answer::error(404, "Nicht gefunden"),
     }
 }
@@ -169,10 +185,15 @@ async fn wizard(app: &App, step: &str, body: &Map<String, Value>) -> Answer {
     let now = now_ms();
     let id = text(body, "wizard");
     match step {
+        "short" => {
+            let name = text(body, "name");
+            let name: String = name.chars().take(config::MAX_NAME_CHARS).collect();
+            Answer::json(200, &json!({"short": bridge_node::admin::derive_short(&name)}))
+        }
         "start" => {
             let name = text(body, "name").trim().to_owned();
             if let Err(error) = config::check_name(&name, "Name des Netzes") {
-                return Answer::error(400, &error);
+                return Answer::field_error(400, "name", &error);
             }
             let mode = match text(body, "template") {
                 "open" => JoinMode::Open,
@@ -180,7 +201,17 @@ async fn wizard(app: &App, step: &str, body: &Map<String, Value>) -> Answer {
                 "closed" => JoinMode::Closed,
                 _ => return Answer::error(400, "Art: open, invite oder closed"),
             };
-            let (id, words, quiz) = app.wizards.begin(name, mode, now);
+            // The operator's rules first (docs/08 §2) - no words are made for a network that could not be created.
+            let options = match crate::wizard::net_options(
+                &name,
+                text(body, "contact"),
+                text(body, "short"),
+                text(body, "adult"),
+            ) {
+                Ok(options) => options,
+                Err((field, error)) => return Answer::field_error(400, field, &error),
+            };
+            let (id, words, quiz) = app.wizards.begin(name, mode, options, now);
             match words_answer(&id, &words, quiz) {
                 Ok(bytes) => Answer::secret_json(200, bytes),
                 Err(error) => {

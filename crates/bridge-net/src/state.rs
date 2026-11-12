@@ -56,6 +56,12 @@
 //!   against the one of admins and gateways. A membership's age counts from the replay time it was accepted at (the
 //!   log clock), not from its `iat` - a back-dated membership is not older.
 //!
+//! - Names and labels (docs/08 §3-§5, review 9): names count in their own pool of `log_entries_per_day` (with the
+//!   revocations of names by their own signers), at most quota + [`NAME_ENTRIES_EXTRA_PER_DAY`] name entries per owner
+//!   and day, a change of the same name at most once a day outside the last 30 days before its expiry. Replaced or
+//!   revoked name statements are not remembered in the revocation table but as one floor per name (bounded, fail
+//!   closed). A label of a name holds only for the owner it was accepted under; 18+ from any side wins.
+//!
 //! Only the log operator additionally refuses manifest changes whose log rules can not be met (first operator and
 //! `witness_threshold` witnesses sealed with a card and the service - [`NetState::validate_candidate`]); replay does
 //! not check that.
@@ -71,6 +77,10 @@ use crate::Cards;
 use crate::error::{NetError, NetResult};
 use crate::log::{Head, MAX_ENTRY_BYTES, WitnessedHead, parse_entry, verify_head};
 use crate::merkle::{Hash, MAX_TREE_SIZE, Tree};
+use crate::names::{
+    AdultPolicy, Category, Label, LabelTarget, MAX_NAME_LIFETIME_MS, Name, NameKind, NameRules,
+    description_is_reserved, name_is_reserved, reserved_skeletons, search_words, skeleton, split_address,
+};
 use crate::statements::{
     Ban, Body, DAY_MS, Delegation, Invite, JoinMode, Kind, LogRules, Manifest, Member, Revoke, RevokeTarget, Right,
     Rights, Seal, Service, Services, WATCH_SERVICES, WatchRules,
@@ -109,6 +119,28 @@ pub const MAX_BAN_HISTORY: usize = 100_000;
 /// How long the end of a ban is remembered: the longest `member_age_s` plus the longest watcher seal (a seal's `iat`
 /// can lie that far before the log clock) plus a day.
 pub const BAN_MEMORY_MS: i64 = (365 + 90 + 1) * DAY_MS;
+/// Most names in a network (docs/08 §3).
+pub const MAX_NAMES: usize = 100_000;
+/// Most labels in a network (docs/08 §5).
+pub const MAX_LABELS: usize = 100_000;
+/// Most results of one name search.
+pub const MAX_SEARCH_RESULTS: usize = 50;
+/// Longest search query (characters).
+pub const MAX_QUERY_CHARS: usize = 64;
+/// Most names whose standing one search checks (review 9): the work of a search is bounded whatever the query - one
+/// pass of cheap string comparisons over the names, then at most this many standing checks, best rank first.
+pub const MAX_SEARCH_CHECKS: usize = 2_000;
+/// Name entries one owner may make per day (replay time) on top of the quota of its level (review 9): new names,
+/// renewals and changes together.
+pub const NAME_ENTRIES_EXTRA_PER_DAY: u64 = 2;
+/// The same owner changes or renews a name in effect at most once per this time - except within
+/// [`NAME_RENEWAL_WINDOW_MS`] before it expires (review 9).
+pub const NAME_CHANGE_INTERVAL_MS: i64 = DAY_MS;
+/// A name in effect may be renewed at any time this close to its expiry.
+pub const NAME_RENEWAL_WINDOW_MS: i64 = 30 * DAY_MS;
+/// Most remembered "floors" of names no longer in effect (review 9): the newest statement of a name that was removed,
+/// so no older one can come back. Beyond: name statements up to the newest dropped floor are refused (fail closed).
+pub const MAX_NAME_FLOORS: usize = 200_000;
 /// Most key cards taken from entries ahead.
 const MAX_AHEAD_CARDS: usize = 4_096;
 /// Most manifests (in the version window) and most `rules` delegations kept from entries ahead.
@@ -135,6 +167,8 @@ enum Key {
     Seal(Id, u8),
     Ban(Id, Hash),
     Invite(Hash),
+    Name(String),
+    Label(LabelTarget),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +192,45 @@ enum Data {
         uses: u32,
         used: u32,
     },
+    Name(Box<NameData>),
+    /// `owner`: for a label of a name, the owner of that name when the label was accepted (`None`: nobody held it) -
+    /// the label holds only while the name has this owner (review 9).
+    Label {
+        category: Category,
+        owner: Option<Id>,
+    },
+}
+
+/// A name in effect: its body, its confusable skeleton (docs/08 §3, §4) and what the search and the checks need
+/// precomputed (review 9 - nothing is cloned or computed per search hit).
+#[derive(Debug, Clone, PartialEq)]
+struct NameData {
+    body: Name,
+    skeleton: String,
+    /// The name or one of its tags contains a reserved word of the current manifest.
+    reserved: bool,
+    /// A word of the description contains a reserved word of the current manifest.
+    description_reserved: bool,
+    /// The description's words for the search ([`search_words`]).
+    words: String,
+    /// The replay time it was accepted at (the interval between changes counts from there).
+    accepted: i64,
+}
+
+impl NameData {
+    fn new(body: Name, reserved: &[String], accepted: i64) -> Self {
+        let skeleton = skeleton(&body.name);
+        let words = search_words(&body.description);
+        let mut data = Self { body, skeleton, reserved: false, description_reserved: false, words, accepted };
+        data.mark_reserved(reserved);
+        data
+    }
+
+    /// Computes the reserved flags (again after the manifest changed its reserved words).
+    fn mark_reserved(&mut self, reserved: &[String]) {
+        self.reserved = name_is_reserved(&self.skeleton, &self.body.tags, reserved);
+        self.description_reserved = description_is_reserved(&self.body.description, reserved);
+    }
 }
 
 /// A statement that is currently in effect.
@@ -188,10 +261,24 @@ struct Grants {
     seals: BTreeMap<(Id, u8), Grant>,
     bans: BTreeMap<(Id, Hash), Grant>,
     invites: BTreeMap<Hash, Grant>,
+    names: BTreeMap<String, Grant>,
+    /// Labels of names and of IDs (two maps, so a lookup needs no allocation).
+    name_labels: BTreeMap<String, Grant>,
+    id_labels: BTreeMap<Id, Grant>,
+    /// Skeleton → the name that holds it (one per skeleton: confusables can not both hold).
+    name_skeletons: BTreeMap<String, String>,
+    names_by_owner: BTreeMap<Id, BTreeSet<String>>,
+    names_by_target: BTreeMap<Id, BTreeSet<String>>,
     by_hash: BTreeMap<Hash, Key>,
     by_exp: BTreeSet<(i64, Key)>,
     /// How many of `seals` were signed by a watcher alone (their own table, review 8).
     watch_seals: usize,
+    /// Names no longer in effect → `(iat, hash)` of their newest statement (review 9): no statement of that name that
+    /// is not newer can come back. Replaced and revoked name statements are not kept in `revoked` (renewals would
+    /// fill it), this one entry per name is enough. Forgotten when every older statement has expired.
+    name_floors: Expiring<String, (i64, Hash)>,
+    /// The floors were full: name statements issued up to this time are refused (fail closed).
+    name_floor_closed: Option<i64>,
 }
 
 /// Whether a grant is a seal signed by a watcher alone.
@@ -207,16 +294,28 @@ impl Grants {
             Key::Seal(id, level) => self.seals.get(&(id.clone(), *level)),
             Key::Ban(id, hash) => self.bans.get(&(id.clone(), *hash)),
             Key::Invite(code) => self.invites.get(code),
+            Key::Name(name) => self.names.get(name),
+            Key::Label(LabelTarget::Name(name)) => self.name_labels.get(name),
+            Key::Label(LabelTarget::Id(id)) => self.id_labels.get(id),
         }
     }
 
-    /// Inserts or replaces; returns the replaced grant.
+    fn label_count(&self) -> usize {
+        self.name_labels.len().saturating_add(self.id_labels.len())
+    }
+
+    /// Inserts or replaces; returns the replaced grant (a replaced name leaves no floor: the new one is newer).
     fn insert(&mut self, key: Key, grant: Grant) -> Option<Grant> {
-        let old = self.remove(&key);
+        let old = self.remove_inner(&key, false);
         self.by_hash.insert(grant.hash, key.clone());
         self.by_exp.insert((grant.exp, key.clone()));
         if by_watcher(&grant) {
             self.watch_seals = self.watch_seals.saturating_add(1);
+        }
+        if let (Key::Name(name), Data::Name(data)) = (&key, &grant.data) {
+            self.name_skeletons.insert(data.skeleton.clone(), name.clone());
+            self.names_by_owner.entry(data.body.owner.clone()).or_default().insert(name.clone());
+            self.names_by_target.entry(data.body.target.clone()).or_default().insert(name.clone());
         }
         match key {
             Key::Delegation(id) => self.delegations.insert(id, grant),
@@ -224,18 +323,39 @@ impl Grants {
             Key::Seal(id, level) => self.seals.insert((id, level), grant),
             Key::Ban(id, hash) => self.bans.insert((id, hash), grant),
             Key::Invite(code) => self.invites.insert(code, grant),
+            Key::Name(name) => self.names.insert(name, grant),
+            Key::Label(LabelTarget::Name(name)) => self.name_labels.insert(name, grant),
+            Key::Label(LabelTarget::Id(id)) => self.id_labels.insert(id, grant),
         };
         old
     }
 
+    /// Removes a grant; a removed name leaves its floor.
     fn remove(&mut self, key: &Key) -> Option<Grant> {
+        self.remove_inner(key, true)
+    }
+
+    fn remove_inner(&mut self, key: &Key, floor: bool) -> Option<Grant> {
         let grant = match key {
             Key::Delegation(id) => self.delegations.remove(id),
             Key::Member(id) => self.members.remove(id),
             Key::Seal(id, level) => self.seals.remove(&(id.clone(), *level)),
             Key::Ban(id, hash) => self.bans.remove(&(id.clone(), *hash)),
             Key::Invite(code) => self.invites.remove(code),
+            Key::Name(name) => self.names.remove(name),
+            Key::Label(LabelTarget::Name(name)) => self.name_labels.remove(name),
+            Key::Label(LabelTarget::Id(id)) => self.id_labels.remove(id),
         }?;
+        if let (Key::Name(name), Data::Name(data)) = (key, &grant.data) {
+            if self.name_skeletons.get(&data.skeleton) == Some(name) {
+                self.name_skeletons.remove(&data.skeleton);
+            }
+            unindex(&mut self.names_by_owner, &data.body.owner, name);
+            unindex(&mut self.names_by_target, &data.body.target, name);
+            if floor {
+                self.note_floor(name, &grant);
+            }
+        }
         self.by_hash.remove(&grant.hash);
         self.by_exp.remove(&(grant.exp, key.clone()));
         if by_watcher(&grant) {
@@ -253,6 +373,29 @@ impl Grants {
             let key = key.clone();
             self.remove(&key);
         }
+        self.name_floors.prune(before);
+    }
+
+    /// Remembers that no statement of `name` up to `grant` may come back: until every such statement has expired
+    /// (their `iat` is not later, their lifetime at most a year). A full table closes all of them (fail closed).
+    fn note_floor(&mut self, name: &str, grant: &Grant) {
+        let floor = (grant.iat, grant.hash);
+        if self.name_floors.get(name).is_some_and(|known| *known >= floor) {
+            return;
+        }
+        if !self.name_floors.contains(name) && self.name_floors.len() >= MAX_NAME_FLOORS {
+            self.name_floor_closed = Some(self.name_floor_closed.map_or(grant.iat, |closed| closed.max(grant.iat)));
+            return;
+        }
+        let forget = grant.iat.saturating_add(MAX_NAME_LIFETIME_MS).saturating_add(CLOCK_SKEW_MS);
+        self.name_floors.insert(name.to_owned(), forget, floor);
+    }
+
+    /// Whether a statement of `name` with `(iat, hash)` is not newer than one that was removed (or the floors were full
+    /// up to its `iat`).
+    fn below_floor(&self, name: &str, iat: i64, hash: &Hash) -> bool {
+        self.name_floor_closed.is_some_and(|closed| iat <= closed)
+            || self.name_floors.get(name).is_some_and(|floor| (iat, *hash) <= *floor)
     }
 
     fn seals_of<'a>(&'a self, id: &Id) -> impl DoubleEndedIterator<Item = (u8, &'a Grant)> + 'a {
@@ -271,7 +414,34 @@ impl Grants {
         keys.extend(self.seals.iter().filter(|(_, g)| issued(g)).map(|((id, l), _)| Key::Seal(id.clone(), *l)));
         keys.extend(self.invites.iter().filter(|(_, g)| issued(g)).map(|(code, _)| Key::Invite(*code)));
         keys.extend(self.bans.iter().filter(|(_, g)| issued(g)).map(|((id, hash), _)| Key::Ban(id.clone(), *hash)));
+        keys.extend(self.names.iter().filter(|(_, g)| issued(g)).map(|(name, _)| Key::Name(name.clone())));
+        keys.extend(
+            self.name_labels
+                .iter()
+                .filter(|(_, g)| issued(g))
+                .map(|(name, _)| Key::Label(LabelTarget::Name(name.clone()))),
+        );
+        keys.extend(
+            self.id_labels.iter().filter(|(_, g)| issued(g)).map(|(id, _)| Key::Label(LabelTarget::Id(id.clone()))),
+        );
         keys
+    }
+
+    /// The names of `id` as owner or target (for an identity revocation).
+    fn names_of_identity(&self, id: &Id) -> BTreeSet<String> {
+        let mut names = self.names_by_owner.get(id).cloned().unwrap_or_default();
+        names.extend(self.names_by_target.get(id).iter().flat_map(|set| set.iter().cloned()));
+        names
+    }
+}
+
+/// Removes `name` from the set of `id` (and the set when it is empty).
+fn unindex(index: &mut BTreeMap<Id, BTreeSet<String>>, id: &Id, name: &str) {
+    if let Some(set) = index.get_mut(id) {
+        set.remove(name);
+        if set.is_empty() {
+            index.remove(id);
+        }
     }
 }
 
@@ -282,16 +452,28 @@ struct Expiring<K: Ord + Clone, V> {
     by_exp: BTreeSet<(i64, K)>,
 }
 
+impl<K: Ord + Clone, V> Default for Expiring<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Ord + Clone, V> Expiring<K, V> {
     fn new() -> Self {
         Self { items: BTreeMap::new(), by_exp: BTreeSet::new() }
     }
 
-    fn get(&self, key: &K) -> Option<&V> {
+    fn get<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+    {
         self.items.get(key).map(|(_, value)| value)
     }
 
-    fn contains(&self, key: &K) -> bool {
+    fn contains<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+    {
         self.items.contains_key(key)
     }
 
@@ -362,6 +544,9 @@ enum Pool {
     General,
     /// A watcher's seal or its revocation of one (docs/06 §11.2, review 8).
     Watch,
+    /// A name, or the revocation of a name by its owner or app key (review 9): names can not use up the entries of
+    /// admins, gateways and watchers.
+    Names,
 }
 
 /// A seal in effect, as the watchers see it (docs/06 §11).
@@ -424,6 +609,14 @@ pub struct NetState {
     day_count: u64,
     /// Entries of watchers on `day` (their own pool, review 8).
     watch_day_count: u64,
+    /// Name entries on `day` (their own pool, review 9).
+    names_day_count: u64,
+    /// Name entries per owner on `name_day` (cleared when the day changes; review 9).
+    name_day: i64,
+    names_today: BTreeMap<Id, u64>,
+    /// The name rules of the current manifest, and the skeletons of its reserved words.
+    name_rules: NameRules,
+    reserved: Vec<String>,
     gateway_sealed: bool,
     grants: Grants,
     revoked: Expiring<Hash, ()>,
@@ -454,6 +647,8 @@ impl NetState {
         let manifest = Manifest::genesis(&statement, net)?;
         let clock = statement.times().0;
         let rules = VecDeque::from([RulesChange { index: 0, rules: manifest.log_rules(), master_alone: true }]);
+        let name_rules = manifest.name_rules();
+        let reserved = reserved_skeletons(&name_rules.reserved);
         Ok(Self {
             net: net.clone(),
             manifest,
@@ -463,6 +658,11 @@ impl NetState {
             day: clock.div_euclid(DAY_MS),
             day_count: 0,
             watch_day_count: 0,
+            names_day_count: 0,
+            name_day: i64::MIN,
+            names_today: BTreeMap::new(),
+            name_rules,
+            reserved,
             gateway_sealed: false,
             grants: Grants::default(),
             revoked: Expiring::new(),
@@ -596,15 +796,20 @@ impl NetState {
             Kind::Seal => self.check_seal(statement, &signers, by_master, at)?,
             Kind::Revoke => self.check_revoke(statement, &signers, at)?,
             Kind::Ban => self.check_ban(statement, &signers, at)?,
+            Kind::Name => self.check_name(statement, &signers, at)?,
+            Kind::Label => self.check_label(statement, &signers, at)?,
             Kind::Head | Kind::Cosign | Kind::Home | Kind::App => {
                 return Err(NetError::format("entry: not a log kind"));
             }
         };
         // Effects that remember a revoked or replaced statement need room for it (soft cap; a cascade may add a
-        // bounded number more).
+        // bounded number more). Names leave a floor instead (review 9), they never fill this table.
         let remembers = match &effect {
-            Effect::RevokeStatement(_) | Effect::RevokeIdentity { .. } => true,
-            Effect::Grant(key, _) | Effect::Member(key, ..) | Effect::Seal(key, ..) => self.grants.get(key).is_some(),
+            Effect::RevokeStatement(key) => !matches!(key, Key::Name(_)),
+            Effect::RevokeIdentity { .. } => true,
+            Effect::Grant(key, _) | Effect::Member(key, ..) | Effect::Seal(key, ..) => {
+                !matches!(key, Key::Name(_)) && self.grants.get(key).is_some()
+            }
             Effect::Manifest(..) | Effect::Ban(..) => false,
         };
         if remembers && self.revoked.len() >= MAX_REVOKED {
@@ -614,12 +819,20 @@ impl NetState {
             Pool::Master
         } else if self.is_watch_entry(&effect, &signers, at) {
             Pool::Watch
+        } else if self.is_names_entry(&effect, &signers, at) {
+            Pool::Names
         } else {
             Pool::General
         };
         self.check_quota(kind, pool, at)?;
-        // Most expensive last: standing and signatures of every signer.
-        self.verify_signers(statement, &signers, at)?;
+        // Most expensive last: standing and signatures of every signer. A name carries the cards of its signers
+        // (members of level 0/1 have none in the log).
+        match &effect {
+            Effect::Grant(_, Grant { data: Data::Name(data), .. }) => {
+                self.verify_carried(statement, &signers, at, &data.body.cards())?;
+            }
+            _ => self.verify_signers(statement, &signers, at)?,
+        }
         Ok((effect, pool))
     }
 
@@ -633,6 +846,21 @@ impl NetState {
                     by_watcher(grant)
                         && grant.issuers.as_slice() == signers
                         && self.admin_rights_at(signer, at).is_empty()
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// A name entry (its own pool, review 9): a name, or the revocation of a name by one of its signers (owner or app
+    /// key) that is no admin. Admins revoke names from the general pool (with its reserve).
+    fn is_names_entry(&self, effect: &Effect, signers: &[Id], at: i64) -> bool {
+        match effect {
+            Effect::Grant(Key::Name(_), _) => true,
+            Effect::RevokeStatement(key @ Key::Name(_)) => match (signers, self.grants.get(key)) {
+                ([signer], Some(grant)) => {
+                    grant.issuers.contains(signer) && self.admin_rights_at(signer, at).is_empty()
                 }
                 _ => false,
             },
@@ -808,6 +1036,104 @@ impl NetState {
         Ok(Effect::Ban(key, grant, Some(issuer.clone())))
     }
 
+    /// A name (docs/08 §3): strict body, lifetime, signers, owner (and target) in good standing with the level of
+    /// `names.min_level`, no 18+ in a `forbidden` network, reserved words in the name or a tag only from level 3,
+    /// first come (renewal by the same owner), newer than every statement of the name before (review 9: also those no
+    /// longer in effect), changes at most once a day except shortly before the expiry, no confusable of a name in
+    /// effect, quota of the owner's level, the owner's name entries of the day, room in the table.
+    fn check_name(&self, statement: &Statement, signers: &[Id], at: i64) -> NetResult<Effect> {
+        let body = Name::from_body(statement.body())?;
+        let (iat, exp) = statement.times();
+        if exp.saturating_sub(iat) > MAX_NAME_LIFETIME_MS {
+            return Err(NetError::forbidden("name: lifetime over one year"));
+        }
+        if signers != body.signers().as_slice() {
+            return Err(NetError::forbidden("name: signed by its owner (an app name by the app key and its owner)"));
+        }
+        self.check_subject(&body.owner, iat, at, false)?;
+        if body.target != body.owner {
+            self.check_subject(&body.target, iat, at, false)?;
+        }
+        let rules = &self.name_rules;
+        let level = self.level(&body.owner, at).ok_or(NetError::NotMember)?;
+        if level < rules.min_level {
+            return Err(NetError::forbidden(format!("name: the owner needs level {}", rules.min_level)));
+        }
+        if body.category == Category::Adult && self.manifest.adult_policy() == AdultPolicy::Forbidden {
+            return Err(NetError::forbidden("name: no 18+ content in this network"));
+        }
+        let data = NameData::new(body, &self.reserved, at);
+        let body = &data.body;
+        if level < 3 && data.reserved {
+            return Err(NetError::forbidden("name: the name or a tag contains a reserved word (needs level 3)"));
+        }
+        let hash = statement.hash_bytes();
+        let current = self.grants.names.get(&body.name);
+        let in_effect = current.filter(|current| at < current.exp);
+        let known = match in_effect.map(|current| &current.data) {
+            Some(Data::Name(known)) if known.body.owner == body.owner => Some(known),
+            Some(_) => return Err(NetError::forbidden("name: taken by another owner")),
+            None => None,
+        };
+        if current.is_some_and(|current| (iat, hash) <= (current.iat, current.hash)) {
+            return Err(NetError::forbidden("not newer than the statement in effect"));
+        }
+        if self.grants.below_floor(&body.name, iat, &hash) {
+            return Err(NetError::forbidden("name: not newer than an earlier statement of this name"));
+        }
+        if let (Some(current), Some(known)) = (in_effect, known) {
+            let recent = at.saturating_sub(known.accepted) < NAME_CHANGE_INTERVAL_MS;
+            if recent && current.exp.saturating_sub(at) > NAME_RENEWAL_WINDOW_MS {
+                return Err(NetError::forbidden(
+                    "name: changed less than a day ago (renew at any time only in the last 30 days before it expires)",
+                ));
+            }
+        }
+        if let Some(other) = self.grants.name_skeletons.get(&data.skeleton) {
+            if other != &body.name && self.grants.names.get(other).is_some_and(|grant| at < grant.exp) {
+                return Err(NetError::forbidden(format!("name: confusable with the name {other}")));
+            }
+        }
+        let owned = self.grants.names_by_owner.get(&body.owner).map_or(0, |names| {
+            names
+                .iter()
+                .filter(|name| **name != body.name && self.grants.names.get(*name).is_some_and(|grant| at < grant.exp))
+                .count()
+        });
+        if owned as u64 >= rules.quota_for(level) {
+            return Err(NetError::quota("names of this owner (quota of its level)"));
+        }
+        let today =
+            if at.div_euclid(DAY_MS) == self.name_day { self.names_today.get(&body.owner).copied() } else { None };
+        if today.unwrap_or(0) >= rules.quota_for(level).saturating_add(NAME_ENTRIES_EXTRA_PER_DAY) {
+            return Err(NetError::quota("name entries of this owner today"));
+        }
+        if current.is_none() && self.grants.names.len() >= MAX_NAMES {
+            return Err(NetError::quota("names"));
+        }
+        let key = Key::Name(body.name.clone());
+        Ok(Effect::Grant(key, self.new_grant(statement, signers, Data::Name(Box::new(data)))))
+    }
+
+    /// A label (docs/08 §5): one admin with `seals` (or the net key); a newer label of the same target replaces the
+    /// older one. A label of a name is bound to the name's owner at this time (review 9).
+    fn check_label(&self, statement: &Statement, signers: &[Id], at: i64) -> NetResult<Effect> {
+        let issuer = one_signer(signers)?;
+        self.require_right(issuer, Right::Seals, at)?;
+        let label = Label::from_body(statement.body())?;
+        let owner = match &label.target {
+            LabelTarget::Name(name) => match self.grants.names.get(name) {
+                Some(grant @ Grant { data: Data::Name(data), .. }) if at < grant.exp => Some(data.body.owner.clone()),
+                _ => None,
+            },
+            LabelTarget::Id(_) => None,
+        };
+        let key = Key::Label(label.target);
+        let grant = self.new_grant(statement, signers, Data::Label { category: label.category, owner });
+        self.check_replace(&key, &grant, self.grants.label_count(), MAX_LABELS)?;
+        Ok(Effect::Grant(key, grant))
+    }
+
     fn check_revoke(&self, statement: &Statement, signers: &[Id], at: i64) -> NetResult<Effect> {
         let issuer = one_signer(signers)?;
         let by_master = issuer == &self.net;
@@ -824,7 +1150,7 @@ impl NetState {
                 let by_right = match key {
                     Key::Delegation(_) => false,
                     Key::Member(_) | Key::Invite(_) => rights.has(Right::Members),
-                    Key::Seal(..) => rights.has(Right::Seals),
+                    Key::Seal(..) | Key::Name(_) | Key::Label(_) => rights.has(Right::Seals),
                     Key::Ban(..) => rights.has(Right::Bans),
                 };
                 if !(by_master || original || by_right) {
@@ -921,6 +1247,7 @@ impl NetState {
             Pool::Master => return Ok(()),
             Pool::General => self.day_count,
             Pool::Watch => self.watch_day_count,
+            Pool::Names => self.names_day_count,
         };
         let used = if at.div_euclid(DAY_MS) == self.day { count } else { 0 };
         let mut limit = self.manifest.limits.log_entries_per_day;
@@ -928,10 +1255,10 @@ impl NetState {
             limit = limit.saturating_add(limit / 10);
         }
         if used >= limit {
-            return Err(NetError::quota(if pool == Pool::Watch {
-                "log entries of watchers per day"
-            } else {
-                "log entries per day"
+            return Err(NetError::quota(match pool {
+                Pool::Watch => "log entries of watchers per day",
+                Pool::Names => "name entries per day",
+                Pool::Master | Pool::General => "log entries per day",
             }));
         }
         Ok(())
@@ -953,8 +1280,24 @@ impl NetState {
         Ok(())
     }
 
+    /// Signers of a statement that carries their cards (names): not compromised, not banned, all signatures valid
+    /// with exactly these cards.
+    fn verify_carried(&self, statement: &Statement, signers: &[Id], at: i64, cards: &[&KeyCard]) -> NetResult<()> {
+        for signer in signers {
+            if self.compromised.contains(signer) {
+                return Err(NetError::forbidden("signer revoked (cascade)"));
+            }
+            if self.banned_at(signer, at) {
+                return Err(NetError::Banned);
+            }
+        }
+        statement.verify(cards, signers.len())?;
+        Ok(())
+    }
+
     /// The card of a signer that has some standing at `at`: the net key, an active admin, an actively sealed
-    /// identity, or a start gateway with a card.
+    /// identity, the owner of a name in effect or the app key of an app name in effect (its card from the name - so
+    /// both signers can revoke it, docs/08 §3), or a start gateway with a card.
     fn signer_card(&self, id: &Id, at: i64) -> Option<&KeyCard> {
         if id == &self.net {
             return Some(&self.manifest.card);
@@ -967,6 +1310,21 @@ impl NetState {
         for (_, grant) in self.grants.seals_of(id).rev() {
             if let Data::Seal { card: Some(card), .. } = &grant.data {
                 if grant.active(at) {
+                    return Some(card);
+                }
+            }
+        }
+        for name in self.grants.names_by_owner.get(id).into_iter().flatten() {
+            if let Some(grant @ Grant { data: Data::Name(data), .. }) = self.grants.names.get(name) {
+                if grant.active(at) {
+                    return Some(&data.body.owner_card);
+                }
+            }
+        }
+        // The app key signed its app names too (review 9: it may revoke them).
+        for name in self.grants.names_by_target.get(id).into_iter().flatten() {
+            if let Some(grant @ Grant { data: Data::Name(data), .. }) = self.grants.names.get(name) {
+                if let (true, NameKind::App, Some(card)) = (grant.active(at), data.body.kind, &data.body.card) {
                     return Some(card);
                 }
             }
@@ -1000,8 +1358,20 @@ impl NetState {
                 }
                 self.manifest = *manifest;
                 self.manifest_hash = hash;
+                self.set_name_rules();
             }
-            Effect::Grant(key, grant) => self.put(key, grant),
+            Effect::Grant(key, grant) => {
+                if let Data::Name(data) = &grant.data {
+                    let day = at.div_euclid(DAY_MS);
+                    if day != self.name_day {
+                        self.name_day = day;
+                        self.names_today.clear();
+                    }
+                    let count = self.names_today.entry(data.body.owner.clone()).or_insert(0);
+                    *count = count.saturating_add(1);
+                }
+                self.put(key, grant);
+            }
             Effect::Ban(key, grant, admin) => {
                 if let Key::Ban(subject, _) = &key {
                     self.remember_ban_end(subject, grant.exp);
@@ -1047,8 +1417,13 @@ impl NetState {
                 self.day = day;
                 self.day_count = 0;
                 self.watch_day_count = 0;
+                self.names_day_count = 0;
             }
-            let count = if pool == Pool::Watch { &mut self.watch_day_count } else { &mut self.day_count };
+            let count = match pool {
+                Pool::Watch => &mut self.watch_day_count,
+                Pool::Names => &mut self.names_day_count,
+                Pool::Master | Pool::General => &mut self.day_count,
+            };
             *count = count.saturating_add(1);
         }
         self.clock = self.clock.max(at);
@@ -1071,18 +1446,38 @@ impl NetState {
         self.ban_ends.insert(subject.clone(), forget, latest);
     }
 
-    /// Stores a grant; a replaced one counts as revoked from now on.
+    /// Stores a grant; a replaced one counts as revoked from now on (a replaced name: every statement of the name has
+    /// to be newer than the one in effect anyway, and once it is removed its floor holds - review 9).
     fn put(&mut self, key: Key, grant: Grant) {
+        let name = matches!(key, Key::Name(_));
         if let Some(old) = self.grants.insert(key, grant) {
-            self.revoked.insert(old.hash, old.exp, ());
+            if !name {
+                self.revoked.insert(old.hash, old.exp, ());
+            }
         }
     }
 
-    /// Removes a grant; it counts as revoked from now on.
+    /// Removes a grant; it counts as revoked from now on (a name through its floor).
     fn take(&mut self, key: &Key) {
         if let Some(old) = self.grants.remove(key) {
-            self.revoked.insert(old.hash, old.exp, ());
+            if !matches!(key, Key::Name(_)) {
+                self.revoked.insert(old.hash, old.exp, ());
+            }
         }
+    }
+
+    /// Takes the name rules of the current manifest; when its reserved words changed, every name is marked again.
+    fn set_name_rules(&mut self) {
+        let rules = self.manifest.name_rules();
+        if rules.reserved != self.name_rules.reserved {
+            self.reserved = reserved_skeletons(&rules.reserved);
+            for grant in self.grants.names.values_mut() {
+                if let Data::Name(data) = &mut grant.data {
+                    data.mark_reserved(&self.reserved);
+                }
+            }
+        }
+        self.name_rules = rules;
     }
 
     /// `id` is never a start gateway again (bounded; when full, the exception ends for everybody - fail closed).
@@ -1104,6 +1499,10 @@ impl NetState {
         self.take(&Key::Member(id.clone()));
         for level in 1..=3 {
             self.take(&Key::Seal(id.clone(), level));
+        }
+        // Names it owns or that point to it (docs/08 §3): the names are free again.
+        for name in self.grants.names_of_identity(id) {
+            self.take(&Key::Name(name));
         }
         let mut cutoff = self.cutoffs.get(id).copied().unwrap_or(Cutoff { grants: i64::MIN, delegation: i64::MIN });
         cutoff.grants = cutoff.grants.max(at);
@@ -1872,6 +2271,378 @@ impl NetState {
     pub fn member_count(&self) -> usize {
         self.grants.members.len()
     }
+
+    // --- names and labels (docs/08) ------------------------------------------------------------------------------
+
+    /// The name rules of the current manifest.
+    #[must_use]
+    pub fn name_rules(&self) -> NameRules {
+        self.manifest.name_rules()
+    }
+
+    /// Names in effect (also expired ones not forgotten yet).
+    #[must_use]
+    pub fn name_count(&self) -> usize {
+        self.grants.names.len()
+    }
+
+    /// The name statement in effect for `name` (whether it resolves or not; see [`NetState::resolve_name`]).
+    #[must_use]
+    pub fn name_info(&self, name: &str) -> Option<NameInfo> {
+        self.grants.names.get(name).and_then(NameInfo::of)
+    }
+
+    /// Up to `max` name statements in effect after `after` (by name; from the start without it) - also those that
+    /// do not resolve now.
+    #[must_use]
+    pub fn names_after(&self, after: Option<&str>, max: usize) -> Vec<NameInfo> {
+        let range = match after {
+            Some(after) => {
+                self.grants.names.range::<str, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            }
+            None => self.grants.names.range::<str, _>(..),
+        };
+        range.take(max).filter_map(|(_, grant)| NameInfo::of(grant)).collect()
+    }
+
+    /// The name statement in effect with this statement hash (e.g. the target of a `revoke`).
+    #[must_use]
+    pub fn name_by_hash(&self, hash: &Hash) -> Option<NameInfo> {
+        match self.grants.by_hash.get(hash)? {
+            Key::Name(name) => self.name_info(name),
+            _ => None,
+        }
+    }
+
+    /// Identities with an active seal (level ≥ 1) that carries `service` at `at`, not banned (by ID; at most `max`).
+    #[must_use]
+    pub fn sealed_with(&self, service: Service, at: i64, max: usize) -> Vec<Id> {
+        let mut ids: Vec<Id> = Vec::new();
+        for ((id, _), grant) in &self.grants.seals {
+            if ids.len() >= max {
+                break;
+            }
+            if ids.last() == Some(id) || !grant.active(at) || self.excluded(id, at) {
+                continue;
+            }
+            if matches!(grant.data, Data::Seal { services, .. } if services.has(service)) {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
+    /// The category a label in effect at `at` gives `target` (as it stands - for a name, see [`NetState::resolve_name`]
+    /// for whether it still applies to the name's current owner).
+    #[must_use]
+    pub fn label(&self, target: &LabelTarget, at: i64) -> Option<Category> {
+        match self.grants.get(&Key::Label(target.clone())) {
+            Some(grant @ Grant { data: Data::Label { category, .. }, .. }) if grant.active(at) => Some(*category),
+            _ => None,
+        }
+    }
+
+    /// The label of an ID in effect at `at`.
+    fn id_label(&self, id: &Id, at: i64) -> Option<Category> {
+        match self.grants.id_labels.get(id) {
+            Some(grant @ Grant { data: Data::Label { category, .. }, .. }) if grant.active(at) => Some(*category),
+            _ => None,
+        }
+    }
+
+    /// The label of a name in effect at `at` that applies to its current `owner` (review 9): one accepted while the
+    /// name had another owner does not.
+    fn name_label(&self, name: &str, owner: &Id, at: i64) -> Option<Category> {
+        match self.grants.name_labels.get(name) {
+            Some(grant @ Grant { data: Data::Label { category, owner: bound }, .. })
+                if grant.active(at) && bound.as_ref().is_none_or(|bound| bound == owner) =>
+            {
+                Some(*category)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether an app may not be served at `at` because it is labeled 18+ in a network that forbids it (docs/08 §5).
+    #[must_use]
+    pub fn app_labeled_adult(&self, app: &Id, at: i64) -> bool {
+        self.manifest.adult_policy() == AdultPolicy::Forbidden && self.id_label(app, at) == Some(Category::Adult)
+    }
+
+    /// Whether `id` is the target of an app name in effect (resolving or not) - an app ID this network knows.
+    #[must_use]
+    pub fn is_app_target(&self, id: &Id) -> bool {
+        self.grants.names_by_target.get(id).into_iter().flatten().any(|name| {
+            matches!(self.grants.names.get(name), Some(Grant { data: Data::Name(data), .. }) if data.body.kind == NameKind::App)
+        })
+    }
+
+    /// Resolves `name` (or `name.short` with this network's short name) at `at` - only what holds now (docs/08 §7):
+    /// the name active, owner and target not banned or compromised, the owner with level ≥ `names.min_level` (level
+    /// 3 for a reserved word in the name or a tag), not 18+ in a network that forbids it. `NotFound` otherwise (or
+    /// another reason - the caller answers all of them alike).
+    pub fn resolve_name(&self, name: &str, at: i64) -> NetResult<ResolvedName> {
+        let (name, short) = split_address(name);
+        if short.is_some_and(|short| self.manifest.short.as_deref() != Some(short)) {
+            return Err(NetError::NotFound("name of another network".into()));
+        }
+        let grant = self.grants.names.get(name).ok_or_else(|| NetError::NotFound("name".into()))?;
+        self.name_standing(grant, at)
+    }
+
+    fn name_standing(&self, grant: &Grant, at: i64) -> NetResult<ResolvedName> {
+        let Data::Name(data) = &grant.data else { return Err(NetError::NotFound("name".into())) };
+        let standing = self.standing(grant, data, at)?;
+        Ok(resolved(grant, data, standing))
+    }
+
+    /// What holds for a name at `at` (see [`NetState::resolve_name`]) - cheap: lookups only, nothing cloned or
+    /// computed per name (the reserved flags are kept with the name). The category: 18+ if the owner, a label of the
+    /// name (that applies to its owner) or a label of the target says so - the most restrictive wins (review 9).
+    fn standing(&self, grant: &Grant, data: &NameData, at: i64) -> NetResult<Standing> {
+        if !grant.active(at) {
+            return Err(NetError::NotFound("name not in effect".into()));
+        }
+        let body = &data.body;
+        if self.excluded(&body.owner, at) || self.excluded(&body.target, at) {
+            return Err(NetError::Banned);
+        }
+        let owner_level = self.level(&body.owner, at).ok_or(NetError::NotMember)?;
+        if owner_level < self.name_rules.min_level {
+            return Err(NetError::forbidden("owner below names.min_level"));
+        }
+        if data.reserved && owner_level < 3 {
+            return Err(NetError::forbidden("reserved word"));
+        }
+        let name_label = self.name_label(&body.name, &body.owner, at);
+        let target_label = self.id_label(&body.target, at);
+        let adult = [Some(body.category), name_label, target_label].contains(&Some(Category::Adult));
+        let category = if adult { Category::Adult } else { Category::General };
+        if adult && self.manifest.adult_policy() == AdultPolicy::Forbidden {
+            return Err(NetError::forbidden("18+ in a network that forbids it"));
+        }
+        Ok(Standing { owner_level, category, name_label, target_label, reserved: data.reserved })
+    }
+
+    /// Searches the names that resolve at `at` (docs/08 §7), see [`NetState::search`]; returns the results and whether
+    /// there were more.
+    #[must_use]
+    pub fn search_names(&self, query: &str, safe: bool, max: usize, at: i64) -> (Vec<ResolvedName>, bool) {
+        let search = self.search(query, safe, max, at);
+        (search.results, search.more)
+    }
+
+    /// Searches the names that resolve at `at` (docs/08 §7): rank 0 the name itself, 1 a prefix or the same skeleton,
+    /// 2 a tag, 3 part of the name or a tag prefix, 4 a word of the description that starts with the query (not for a
+    /// description with a reserved word of an owner below level 3); ties by the owner's level (higher first), then the
+    /// name. `safe` leaves out 18+ and owners below level 2. At most `max` (≤ 50) results.
+    ///
+    /// Bounded work (review 9): one pass of cheap comparisons over the names (no allocation per name), then the
+    /// standing of the candidates rank by rank, by name within a rank - at most [`MAX_SEARCH_CHECKS`] of them, and no
+    /// lower rank once a better one gave more than `max` results. A cut-off search says `more`.
+    #[must_use]
+    pub fn search(&self, query: &str, safe: bool, max: usize, at: i64) -> Search {
+        let mut search = Search { results: Vec::new(), more: false, scanned: 0, checked: 0 };
+        let mut query = query.trim().to_lowercase();
+        if let Some(short) = &self.manifest.short {
+            if let Some(stripped) = query.strip_suffix(&format!(".{short}")) {
+                query = stripped.to_owned();
+            }
+        }
+        if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
+            return search;
+        }
+        let query_skeleton = skeleton(&query);
+        // A word of a description consists of letters and digits only: other queries can not start one.
+        let needle = query.chars().all(char::is_alphanumeric).then(|| format!(" {query}"));
+        let mut ranks: [Vec<(&Grant, &NameData)>; 5] = Default::default();
+        for grant in self.grants.names.values() {
+            let Data::Name(data) = &grant.data else { continue };
+            search.scanned = search.scanned.saturating_add(1);
+            if safe && data.body.category == Category::Adult {
+                continue; // 18+ by its owner: never in the safe search (the most restrictive category wins)
+            }
+            if let Some(rank) = match_rank(data, &query, &query_skeleton, needle.as_deref()) {
+                if let Some(list) = ranks.get_mut(rank) {
+                    list.push((grant, data));
+                }
+            }
+        }
+        let max = max.clamp(1, MAX_SEARCH_RESULTS);
+        let mut hits: Vec<Hit<'_>> = Vec::new();
+        let mut cut = false;
+        'ranks: for (rank, list) in ranks.iter().enumerate() {
+            if hits.len() > max {
+                break; // the lower ranks can not come before these
+            }
+            for (grant, data) in list {
+                if search.checked >= MAX_SEARCH_CHECKS {
+                    cut = true;
+                    break 'ranks;
+                }
+                search.checked = search.checked.saturating_add(1);
+                let Ok(standing) = self.standing(grant, data, at) else { continue };
+                if safe && (standing.category == Category::Adult || standing.owner_level < 2) {
+                    continue;
+                }
+                if rank == 4 && data.description_reserved && standing.owner_level < 3 {
+                    continue;
+                }
+                hits.push(Hit { rank, grant, data, standing });
+            }
+        }
+        hits.sort_by(|a, b| a.order().cmp(&b.order()));
+        search.more = cut || hits.len() > max;
+        search.results = hits.into_iter().take(max).map(|hit| resolved(hit.grant, hit.data, hit.standing)).collect();
+        search
+    }
+
+    /// The names of `owner` that resolve at `at` (by name).
+    #[must_use]
+    pub fn names_of(&self, owner: &Id, at: i64) -> Vec<ResolvedName> {
+        self.names_by(&self.grants.names_by_owner, owner, at)
+    }
+
+    /// The names pointing to `target` that resolve at `at` (by name) - e.g. the host hints of an app.
+    #[must_use]
+    pub fn names_for(&self, target: &Id, at: i64) -> Vec<ResolvedName> {
+        self.names_by(&self.grants.names_by_target, target, at)
+    }
+
+    fn names_by(&self, index: &BTreeMap<Id, BTreeSet<String>>, id: &Id, at: i64) -> Vec<ResolvedName> {
+        index
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter_map(|name| self.grants.names.get(name))
+            .filter_map(|grant| self.name_standing(grant, at).ok())
+            .collect()
+    }
+}
+
+/// A candidate of a search that holds now.
+struct Hit<'a> {
+    rank: usize,
+    grant: &'a Grant,
+    data: &'a NameData,
+    standing: Standing,
+}
+
+impl Hit<'_> {
+    /// Rank, then the owner's level (higher first), then the name.
+    fn order(&self) -> (usize, std::cmp::Reverse<u8>, &str) {
+        (self.rank, std::cmp::Reverse(self.standing.owner_level), self.data.body.name.as_str())
+    }
+}
+
+/// What holds for a name now (see [`NetState::resolve_name`]), without its body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Standing {
+    owner_level: u8,
+    category: Category,
+    name_label: Option<Category>,
+    target_label: Option<Category>,
+    reserved: bool,
+}
+
+/// A resolved name from its grant and standing (the body is cloned here - only for names that are answered).
+fn resolved(grant: &Grant, data: &NameData, standing: Standing) -> ResolvedName {
+    ResolvedName {
+        info: NameInfo {
+            name: data.body.clone(),
+            hash: grant.hash,
+            iat: grant.iat,
+            exp: grant.exp,
+            skeleton: data.skeleton.clone(),
+        },
+        owner_level: standing.owner_level,
+        category: standing.category,
+        name_label: standing.name_label,
+        target_label: standing.target_label,
+        reserved: standing.reserved,
+    }
+}
+
+/// What a name search found, and how much it looked at ([`NetState::search`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Search {
+    /// The best results (at most `max`).
+    pub results: Vec<ResolvedName>,
+    /// There were more, or the search stopped at [`MAX_SEARCH_CHECKS`].
+    pub more: bool,
+    /// Names compared with the query.
+    pub scanned: usize,
+    /// Names whose standing was checked (at most [`MAX_SEARCH_CHECKS`]).
+    pub checked: usize,
+}
+
+/// How well a name matches a (lower-case) query, see [`NetState::search`]. `needle`: ` <query>` for the words of the
+/// description (`None`: the query can not start a word). No allocation.
+fn match_rank(data: &NameData, query: &str, query_skeleton: &str, needle: Option<&str>) -> Option<usize> {
+    let body = &data.body;
+    if body.name == query {
+        return Some(0);
+    }
+    if body.name.starts_with(query) || data.skeleton == query_skeleton {
+        return Some(1);
+    }
+    if body.tags.iter().any(|tag| tag == query) {
+        return Some(2);
+    }
+    if body.name.contains(query) || body.tags.iter().any(|tag| tag.starts_with(query)) {
+        return Some(3);
+    }
+    if needle.is_some_and(|needle| data.words.contains(needle)) {
+        return Some(4);
+    }
+    None
+}
+
+/// A name statement in effect (docs/08 §3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameInfo {
+    /// The body.
+    pub name: Name,
+    /// Hash of the statement (for `revoke`).
+    pub hash: Hash,
+    /// Issued at.
+    pub iat: i64,
+    /// Expires.
+    pub exp: i64,
+    /// Its confusable skeleton.
+    pub skeleton: String,
+}
+
+impl NameInfo {
+    fn of(grant: &Grant) -> Option<Self> {
+        match &grant.data {
+            Data::Name(data) => Some(Self {
+                name: data.body.clone(),
+                hash: grant.hash,
+                iat: grant.iat,
+                exp: grant.exp,
+                skeleton: data.skeleton.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A name that resolves, with what a user should know about it (docs/08 §7 "safety").
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedName {
+    /// The name statement.
+    pub info: NameInfo,
+    /// The owner's level now.
+    pub owner_level: u8,
+    /// The category that counts: label of the name, else label of the target, else the self-declared one.
+    pub category: Category,
+    /// A label of the name itself.
+    pub name_label: Option<Category>,
+    /// A label of the target.
+    pub target_label: Option<Category>,
+    /// The name contains a reserved word (its owner has level 3).
+    pub reserved: bool,
 }
 
 impl Cards for NetState {
@@ -2355,6 +3126,149 @@ mod tests {
         let known = Id::of_sign_key(&[0; 32]);
         state.remember_ban_end(&known, T0 - DAY_MS);
         assert_eq!(state.ban_ends.get(&known), Some(&T0));
+        Ok(())
+    }
+
+    /// A network state after its genesis (open, defaults), with the master identity.
+    fn genesis() -> NetResult<(Identity, NetState)> {
+        let master = Identity::from_secret_bytes(&[1; 32], &[2; 32]);
+        let node = Identity::from_secret_bytes(&[3; 32], &[4; 32]);
+        let manifest = Manifest::template(
+            JoinMode::Open,
+            "Netz",
+            master.key_card(Role::Net, None, T0)?,
+            node.id(),
+            "https://n.x",
+        )?;
+        let genesis = manifest.sign(master.id(), T0, T0 + 400 * DAY_MS, &master)?;
+        let state = NetState::genesis(master.id(), genesis.canonical_bytes())?;
+        Ok((master, state))
+    }
+
+    /// Review 9, finding 1: a search once checked the standing of every hit and cloned the name rules and the name for
+    /// it (380 ms at 100,000 names, on a worker thread under the core lock). Now: one cheap pass over the names, at
+    /// most `MAX_SEARCH_CHECKS` standing checks - whatever the query (counted, so the bound holds in every build).
+    #[test]
+    fn search_work_is_bounded_at_100k_names() -> NetResult<()> {
+        let (_, mut state) = genesis()?;
+        let card = Identity::from_secret_bytes(&[7; 32], &[8; 32]).key_card(Role::Client, None, T0)?;
+        let exp = T0 + 300 * DAY_MS;
+        let owners: Vec<Id> = (0..100u8).map(|seed| Id::of_sign_key(&[seed; 32])).collect();
+        for (index, owner) in owners.iter().enumerate() {
+            let mut hash = [0xaa; 32];
+            hash[0] = index as u8;
+            let member = Grant { hash, iat: T0, exp, issuers: vec![], data: Data::Member { accepted: T0 } };
+            state.grants.insert(Key::Member(owner.clone()), member);
+            hash[1] = 0xbb;
+            let data = Data::Seal { services: Services::NONE, card: None, by_watcher: false };
+            state.grants.insert(Key::Seal(owner.clone(), 2), Grant { hash, iat: T0, exp, issuers: vec![], data });
+        }
+        for index in 0..MAX_NAMES {
+            let owner = &owners[index % owners.len()];
+            let name = format!("laden-{index:06}");
+            let body = Name {
+                name: name.clone(),
+                kind: NameKind::Member,
+                target: owner.clone(),
+                owner: owner.clone(),
+                owner_card: card.clone(),
+                card: None,
+                description: "Ein kleiner Laden für alles, was man braucht".into(),
+                tags: vec!["laden".into(), "kiez".into()],
+                category: Category::General,
+                hosts: Vec::new(),
+            };
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            let data = Data::Name(Box::new(NameData::new(body, &state.reserved, T0)));
+            state.grants.insert(Key::Name(name), Grant { hash, iat: T0, exp, issuers: vec![owner.clone()], data });
+        }
+        assert_eq!(state.name_count(), MAX_NAMES);
+        let at = T0 + DAY_MS;
+        // Every name matches (prefix, part of the name, tag, description): the work stays bounded all the same.
+        for query in ["laden", "e", "kiez", "alles", "laden-0"] {
+            let started = std::time::Instant::now();
+            let search = state.search(query, true, 20, at);
+            let took = started.elapsed();
+            assert_eq!(search.scanned, MAX_NAMES, "{query}: one pass");
+            assert!(search.checked <= MAX_SEARCH_CHECKS, "{query}: {} standing checks", search.checked);
+            assert_eq!((search.results.len(), search.more), (20, true), "{query}");
+            // Loose (debug builds, a busy machine): the old search needed seconds here in a debug build.
+            assert!(took < std::time::Duration::from_secs(2), "{query}: {took:?}");
+        }
+        // Few hits: only those are checked; nothing found: nothing checked.
+        let search = state.search("laden-000042", false, 20, at);
+        assert_eq!((search.checked, search.results.len(), search.more), (1, 1, false));
+        assert_eq!(search.results[0].info.name.name, "laden-000042");
+        let search = state.search("zzz", false, 20, at);
+        assert_eq!((search.checked, search.results.len()), (0, 0));
+        // The best rank first, by name within a rank: the first 20 names with the prefix.
+        let search = state.search("laden", false, 20, at);
+        let names: Vec<String> = search.results.iter().map(|r| r.info.name.name.clone()).collect();
+        assert_eq!(names.first().map(String::as_str), Some("laden-000000"));
+        assert_eq!(names.last().map(String::as_str), Some("laden-000019"));
+        Ok(())
+    }
+
+    /// Review 9, finding 2: every renewal of a name once put the replaced statement into the table of revocations -
+    /// one member renewing again and again could fill it (1,000,000) and then nobody could revoke anything. Replaced and
+    /// revoked names leave one floor per name instead; old statements still never come back.
+    #[test]
+    fn name_statements_never_fill_the_revocation_table() -> NetResult<()> {
+        let (master, mut state) = genesis()?;
+        let net = master.id().clone();
+        let owner = Identity::from_secret_bytes(&[5; 32], &[6; 32]);
+        let member = Member { member: owner.id().clone(), invite: None }.sign(&net, T0, T0 + 300 * DAY_MS, &master)?;
+        assert_eq!(state.apply(member.canonical_bytes()), Applied::Accepted);
+        let seal = Seal { subject: owner.id().clone(), level: 1, services: Services::NONE, card: None };
+        let seal = seal.sign(&net, T0 + 1, T0 + 300 * DAY_MS, &master)?;
+        assert_eq!(state.apply(seal.canonical_bytes()), Applied::Accepted);
+        let body = |description: &str| -> NetResult<Name> {
+            Ok(Name {
+                name: "eins".into(),
+                kind: NameKind::Member,
+                target: owner.id().clone(),
+                owner: owner.id().clone(),
+                owner_card: owner.key_card(Role::Client, None, T0)?,
+                card: None,
+                description: description.into(),
+                tags: Vec::new(),
+                category: Category::General,
+                hosts: Vec::new(),
+            })
+        };
+        let revoked_before = state.revoked.len();
+        let mut statements = Vec::new();
+        for day in 0..4 {
+            let iat = T0 + 10 * 60_000 + day * DAY_MS;
+            let statement = body(&format!("Tag {day}"))?.sign(&net, iat, iat + 200 * DAY_MS, &owner)?;
+            assert_eq!(state.apply(statement.canonical_bytes()), Applied::Accepted, "day {day}");
+            statements.push(statement);
+        }
+        assert_eq!(state.revoked.len(), revoked_before, "renewals remember nothing in the revocation table");
+        // The owner revokes its name: no entry there either, but a floor - no older statement comes back.
+        let hash = state.resolve_name("eins", T0 + 4 * DAY_MS)?.info.hash;
+        let revoke = Revoke { target: RevokeTarget::Statement(hash), reason: String::new() };
+        let revoke = revoke.sign(&net, T0 + 4 * DAY_MS, T0 + 30 * DAY_MS, &owner)?;
+        assert_eq!(state.apply(revoke.canonical_bytes()), Applied::Accepted);
+        assert_eq!(state.revoked.len(), revoked_before);
+        assert_eq!(state.grants.name_floors.len(), 1, "one floor per name");
+        for statement in &statements {
+            assert!(matches!(state.apply(statement.canonical_bytes()), Applied::Skipped(NetError::Forbidden(_))));
+        }
+        assert!(state.resolve_name("eins", T0 + 4 * DAY_MS).is_err());
+        // A full floor table closes old statements of every name (fail closed), never newer ones.
+        let mut full = state.clone();
+        full.grants.name_floors = Expiring::new();
+        for index in 0..MAX_NAME_FLOORS {
+            full.grants.name_floors.insert(format!("n{index}"), T0 + 400 * DAY_MS, (T0, [0; 32]));
+        }
+        let gone =
+            Grant { hash: [9; 32], iat: T0 + 2 * DAY_MS, exp: T0 + 9 * DAY_MS, issuers: vec![], data: Data::Ban };
+        full.grants.note_floor("other", &gone);
+        assert_eq!(full.grants.name_floors.len(), MAX_NAME_FLOORS, "bounded");
+        assert!(full.grants.below_floor("anything", T0 + 2 * DAY_MS, &[0xff; 32]));
+        assert!(!full.grants.below_floor("anything", T0 + 2 * DAY_MS + 1, &[0; 32]));
         Ok(())
     }
 }

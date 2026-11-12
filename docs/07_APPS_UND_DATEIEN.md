@@ -102,6 +102,9 @@ Aussage der Art `app` (04 §3), `net` = Netz-ID, **zwei Signaturen** (`sigs`: Ap
   ETag.
 - Die Bridge-API (`/v4/…`) erlaubt Aufrufe aus Apps (CORS `*`, nur mit Bearer-Token, keine Cookies).
 - Clients wählen einen Host aus `hosts` (LAN vor Internet, dann der schnellste). Fällt er aus, nehmen sie den nächsten.
+- *Phase 4*: Der Browser eines Nutzers lädt Apps über den **Leser** seines eigenen Knotens, der Version und jeden Teil
+  selbst prüft (08 §8). Eine als `adult` gekennzeichnete App-ID gilt in Netzen mit `adult: "forbidden"` nicht mehr –
+  Hosts hören auf wie bei einer Sperre (08 §5).
 
 *Beim Bau festgelegt (§1, §4, §5):*
 - **Dateien auf der Platte**: `blobs/<2 hex>/<64 hex>` im Daten-Ordner, benannt nach der Blob-ID in Kleinbuchstaben-Hex

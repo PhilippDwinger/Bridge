@@ -17,7 +17,11 @@
 | **Aussage** | Jede signierte Erklärung (Manifest, Siegel, Delegation, Widerruf, Namens-Eintrag, Sperre). |
 | **Transparenz-Log** | Nur-anhängbare, verkettete Liste aller sicherheitsrelevanten Aussagen eines Netzes. |
 | **Umschlag** | Die verschlüsselte, signierte Einheit, in der alles reist (Nachricht, Anfrage, Antwort). |
-| **Name** | Kurzer Name im Netz (`shop.meinnetz`), zeigt auf eine lange Adresse. Signierter Eintrag. |
+| **Name** | Kurzer Name im Netz (`shop.meinnetz` = Name + Kurzname des Netzes), zeigt auf eine App, einen Knoten oder ein Mitglied. Signierter Eintrag im Transparenz-Log, wer zuerst kommt (08 §3). |
+| **Betreiber** | Wer ein Netz erstellt hat und es betreibt (Owner). Verantwortlich für sein Netz, nennt einen Meldeweg (`contact`, 08 §1, `NUTZUNGSREGELN.md`). |
+| **Kennzeichnung** | Aussage `label` eines Admins: ein Name oder Ziel ist `adult` (18+) oder `general` (08 §5). |
+| **Meldung** | Hinweis eines Mitglieds auf einen Namen oder eine App (illegal, Phishing, 18+ ohne Kennzeichnung …); geht an die Admins, löst nichts von selbst aus (08 §6). |
+| **Leser** | Der eigene Knoten, der für den Browser seines Besitzers Apps anderer Hosts lädt und jeden Teil prüft (08 §8). |
 | **Adresse** | `bridge://<netz-id>/<ziel>` – Ziel ist eine ID oder ein Name. |
 | **Kontingent** | Wie viel eine Identität erstellen/speichern/rechnen darf (pro Stufe im Manifest festgelegt). |
 | **Probe** | Prüfung eines Dienstes durch Wächter (z. B. Speicher-Probe: „beweise, dass du Stück X noch hast“). |

@@ -84,20 +84,57 @@ pub fn load(data: &Path, app: &Id) -> Result<(Identity, String), String> {
     Ok((identity, text("name")))
 }
 
-fn owner(data: &Path) -> Result<Identity, String> {
+/// The owner's client identity of the data folder (`owner-key.json`, made on first use): owner of the apps and
+/// names made there (BridgeControll: the member key of the PC in this network).
+pub fn owner(data: &Path) -> Result<Identity, String> {
     keyfile::load_or_create_at(&data.join(OWNER_KEY_FILE))
+}
+
+/// Makes sure the owner key of the folder is a member (the admin key of the same folder admits it if needed, like
+/// `app publish` does). Returns its ID.
+pub async fn admit_owner(data: &Path, node_url: Option<&str>) -> Result<Id, String> {
+    Owner::open(data, node_url).await?;
+    Ok(owner(data)?.id().clone())
+}
+
+/// The app keys of the folder (`apps/<id>.json`): (app ID, name), sorted by name, at most `max`. Files that are no
+/// valid app key are left out.
+pub fn list(data: &Path, max: usize) -> Result<Vec<(Id, String)>, String> {
+    let dir = data.join(APPS_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", dir.display())),
+    };
+    let mut apps = Vec::new();
+    // Bounded: at most 4 × max directory entries are looked at.
+    for entry in entries.flatten().take(max.saturating_mul(4)) {
+        let file = entry.file_name();
+        let Some(id) = file.to_str().and_then(|name| name.strip_suffix(".json")).and_then(|id| Id::parse(id).ok())
+        else {
+            continue;
+        };
+        if let Ok((_, name)) = load(data, &id) {
+            apps.push((id, name));
+        }
+        if apps.len() >= max {
+            break;
+        }
+    }
+    apps.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.as_str().cmp(b.0.as_str())));
+    Ok(apps)
 }
 
 /// The owner's admin side: the admin key of the folder, the network state from the owner node, the owner key (a
 /// member - admitted here if needed).
-struct Owner {
+pub(crate) struct Owner {
     data: PathBuf,
-    admin: AdminClient,
-    state: NetState,
+    pub(crate) admin: AdminClient,
+    pub(crate) state: NetState,
 }
 
 impl Owner {
-    async fn open(data: &Path, node_url: Option<&str>) -> Result<Self, String> {
+    pub(crate) async fn open(data: &Path, node_url: Option<&str>) -> Result<Self, String> {
         let admin = AdminClient::load(data, node_url)?;
         let (_, mut state) = admin.load_state().await?;
         let owner_id = owner(data)?.id().clone();
@@ -178,7 +215,7 @@ impl Owner {
     }
 
     /// The newest version of `app` any host knows (the owner node first, then web hosts of the log).
-    async fn current(&self, app: &Id) -> Option<AppVersion> {
+    pub(crate) async fn current(&self, app: &Id) -> Option<AppVersion> {
         let mut candidates: Vec<Id> = vec![self.admin.node_id().clone()];
         for (id, _) in self.state.gateways(now()) {
             if is_web_host(&self.state, &id, now()) && !candidates.contains(&id) {
@@ -375,6 +412,21 @@ mod tests {
                 std::fs::metadata(app_key_path(dir.path(), &other)).map_err(|e| e.to_string())?.permissions().mode();
             assert_eq!(mode & 0o077, 0, "only the owner may read the app key");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn app_keys_are_listed() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        assert!(list(dir.path(), 10)?.is_empty(), "no folder yet");
+        let b = create(dir.path(), "Zweite")?;
+        let a = create(dir.path(), "Erste")?;
+        std::fs::write(dir.path().join(APPS_DIR).join("kaputt.json"), b"{}").map_err(|e| e.to_string())?;
+        std::fs::write(dir.path().join(APPS_DIR).join(format!("{}.json", Id::of_sign_key(&[9; 32]))), b"{}")
+            .map_err(|e| e.to_string())?;
+        let listed = list(dir.path(), 10)?;
+        assert_eq!(listed, vec![(a, "Erste".to_owned()), (b, "Zweite".to_owned())]);
+        assert_eq!(list(dir.path(), 1)?.len(), 1, "bounded");
         Ok(())
     }
 }

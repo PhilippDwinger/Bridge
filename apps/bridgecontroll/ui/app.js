@@ -1,6 +1,8 @@
-// BridgeControll v2 – Oberfläche (ADR 0017). Kein Framework, kein innerHTML für Daten: alles, was von Knoten
-// kommt (Namen, IDs, Adressen), landet nur als Text im DOM. Die 24 Wörter gibt es nur in der Antwort eines POST und
-// nur, solange Schritt 2 des Assistenten offen ist; danach werden sie aus DOM und Speicher entfernt.
+// BridgeControll v2 – Oberfläche (ADR 0017). Kein Framework, kein HTML aus Daten: alles, was von Knoten
+// kommt (Namen, Beschreibungen, Meldungen, IDs, Adressen), landet nur als Text im DOM (textContent). Die 24 Wörter gibt
+// es nur in der Antwort eines POST und nur, solange Schritt 2 des Assistenten offen ist; danach werden sie aus DOM und
+// Speicher entfernt. Der Bridge-Browser zeigt Apps nur in einem iframe mit sandbox="allow-scripts allow-forms
+// allow-popups" (nie allow-same-origin), geladen vom Leser des eigenen Knotens (docs/08 §8, §12).
 'use strict';
 
 (() => {
@@ -11,6 +13,9 @@
   let lastRoute = '';
   let lastKey = '';
   let overviewData = null;
+  // The page's CSP lists the node readers it may frame as they were when it loaded (docs/08 §12): after this page
+  // made, joined or changed a node, the browser screen loads the page again first.
+  let framesStale = false;
 
   // ---------- Bausteine ----------
 
@@ -52,6 +57,13 @@
     x: { stroke: 2.4, paths: ['M6 6l12 12M18 6 6 18'] },
     err: { stroke: 2.6, paths: ['M12 7v6M12 16.5v.5'] },
     screen: { stroke: 2, paths: ['M8 21h8'], rect: [3, 5, 18, 12, 2] },
+    globe: { stroke: 2, paths: ['M3 12h18', 'M12 3a14 14 0 0 1 0 18', 'M12 3a14 14 0 0 0 0 18'], circle: true },
+    search: { stroke: 2, paths: ['M20 20l-3.5-3.5', 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z'] },
+    lock: { stroke: 2, paths: ['M8 11V8a4 4 0 0 1 8 0v3'], rect: [5, 11, 14, 10, 2] },
+    unlock: { stroke: 2, paths: ['M8 11V8a4 4 0 0 1 7.5-2'], rect: [5, 11, 14, 10, 2] },
+    flag: { stroke: 2, paths: ['M5 21V4', 'M5 4h11l-2 4 2 4H5'] },
+    external: { stroke: 2, paths: ['M14 4h6v6', 'M20 4l-9 9', 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'] },
+    chevron: { stroke: 2, paths: ['M6 9l6 6 6-6'] },
   };
 
   function icon(name) {
@@ -180,7 +192,11 @@
       showLoggedOut();
       throw new Error(data.error || 'Nicht angemeldet');
     }
-    if (!response.ok) throw new Error(data.error || 'Fehler ' + response.status);
+    if (!response.ok) {
+      const error = new Error(data.error || 'Fehler ' + response.status);
+      error.field = typeof data.field === 'string' ? data.field : null;
+      throw error;
+    }
     return data;
   }
 
@@ -322,6 +338,8 @@
     if (hash === '#/neu') return wizardStart(changed);
     const dash = hash.match(/^#\/netz\/([0-9a-f]{8})$/);
     if (dash) return dashboard(dash[1]);
+    const browse = hash.match(/^#\/browser(?:\/([0-9a-f]{8})(?:\/([a-z0-9.-]{1,80}))?)?$/);
+    if (browse) return browserScreen(browse[1] || null, browse[2] || null);
     startPage(hash === '#/beitreten');
   }
 
@@ -414,7 +432,8 @@
               h('div', { class: 'b-stat' }, h('span', { class: 'b-stat__val' + (waiting ? ' b-stat__val--warn' : ''), text: String(waiting) }), h('span', { class: 'b-stat__lbl', text: 'wartet' }))),
             h('div', { class: 'hs__actions' },
               h('a', { class: 'b-btn b-btn--sticker', href: '#/neu' }, icon('plus'), 'Neues BridgeNet'),
-              h('a', { class: 'b-btn b-btn--ghost', href: '#/beitreten' }, icon('link'), 'Netz beitreten (Link)'))),
+              h('a', { class: 'b-btn b-btn--ghost', href: '#/beitreten' }, icon('link'), 'Netz beitreten (Link)'),
+              data.nodes.some((n) => n.net) ? h('a', { class: 'b-btn b-btn--ghost', href: '#/browser' }, icon('globe'), 'Bridge-Browser') : null)),
           h('div', { class: 'bc-foot' },
             h('div', { class: 'start__foot' },
               h('img', { class: 'start__mark', src: '/design/logo/bridge-bildmarke.svg', alt: '' }),
@@ -532,11 +551,21 @@
         rules.map(([value, label]) => h('label', {}, h('input', { type: 'radio', name: 'set-peers', value, checked: value === rule,
           onchange: () => { rule = value; } }), h('span', { text: label })))),
       h('span', { class: 'b-hint', text: 'Welche Adressen der Knoten anruft, die ein anderer Knoten selbst gewählt hat. „Alle“ erlaubt auch Adressen in deinem Heimnetz und auf diesem PC.' }));
-    const body = [field('set-name', 'Name des Knotens', name), reach.nodes, peers, autostart,
+    // The reader serves the Bridge-Browser (docs/08 §8).
+    const readers = [['off', 'Aus'], ['local', 'Nur dieser PC'], ['lan', 'Heimnetz (LAN)'], ['tailnet', 'Tailnet']];
+    let reader = node.reader || 'local';
+    const readerField = h('div', { class: 'b-field' },
+      h('span', { class: 'b-flabel', id: 'set-reader-label', text: 'Leser für den Bridge-Browser' }),
+      h('div', { class: 'b-seg b-seg--full', role: 'radiogroup', 'aria-labelledby': 'set-reader-label' },
+        readers.map(([value, label]) => h('label', {}, h('input', { type: 'radio', name: 'set-reader', value, checked: value === reader,
+          onchange: () => { reader = value; } }), h('span', { text: label })))),
+      h('span', { class: 'b-hint', text: 'Der Leser lädt Apps anderer PCs für deinen Bridge-Browser und prüft jede Datei selbst. „Nur dieser PC“ ist der Standard; „Heimnetz“ lässt auch Geräte im LAN zu, „Tailnet“ deine Geräte im Tailscale-Netz. Mit öffentlicher Adresse bekommt der Knoten dafür einen eigenen Zugang nur für diesen PC.' }));
+    const body = [field('set-name', 'Name des Knotens', name), reach.nodes, peers, readerField, autostart,
       h('p', { class: 'bc-muted bc-p0', text: 'Ein laufender Knoten startet mit den neuen Werten neu. Neue Adresse oder LAN: Der Owner siegelt den Knoten danach neu (Dashboard zeigt „Karte veraltet“).' })];
     formDialog('Einstellungen von ' + node.name, null, body, 'Speichern', async () => {
-      const values = Object.assign({ name: name.value.trim(), autostart: autostart.querySelector('input').checked, peer_addresses: rule }, reach.value());
+      const values = Object.assign({ name: name.value.trim(), autostart: autostart.querySelector('input').checked, peer_addresses: rule, reader }, reach.value());
       const result = await api('POST', '/api/nodes/' + node.id + '/settings', values);
+      framesStale = true;
       toast('ok', 'Gespeichert', result.restarted ? 'Der Knoten startet neu.' : null);
       refresh();
       return true;
@@ -636,6 +665,7 @@
         autostart_login: auto ? auto.querySelector('input').checked : false,
       }, values);
       const result = await api('POST', '/api/join', request);
+      framesStale = true;
       toast('ok', 'Knoten angelegt', 'Er lädt jetzt das Log des Netzes.');
       joined = result.node;
       return true;
@@ -654,7 +684,8 @@
 
   // ---------- N02 Assistent ----------
 
-  const wizardState = { step: 1, name: '', template: 'invite', id: null, words: null, quiz: null, result: null, reach: null, uses: 5 };
+  const wizardState = { step: 1, name: '', template: 'invite', contact: '', short: '', shortTouched: false, adult: 'forbidden',
+    id: null, words: null, quiz: null, result: null, reach: null, uses: 5 };
 
   function wizardStart(changed) {
     if (changed && wizardState.step !== 4) {
@@ -717,17 +748,67 @@
     const seg = h('div', { class: 'b-seg b-seg--full', role: 'radiogroup', 'aria-label': 'Art des Netzes' },
       templates.map(([value, label, text]) => h('label', {}, h('input', { type: 'radio', name: 'template', value, checked: s.template === value,
         onchange: () => { s.template = value; hint.replaceChildren(text); } }), h('span', { text: label }))));
+    // Operator rules (docs/08 §2, ADR 0018): Meldeweg (required), short name for addresses, 18+ policy.
+    const contact = h('input', { class: 'b-input', value: s.contact, maxlength: '200', autocomplete: 'email', placeholder: 'z. B. meldungen@beispiel.de' });
+    const short = h('input', { class: 'mono', id: 'wiz-short', value: s.short, maxlength: '24', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', 'aria-describedby': 'wiz-short-hint' });
+    const shortHint = h('span', { class: 'b-hint', id: 'wiz-short-hint' }, 'So heißen Adressen in deinem Netz: shop.' + (s.short || 'kurzname') + ' – 2–24 Zeichen a–z, 0–9 und -.');
+    const shortField = h('div', { class: 'b-field' }, h('label', { for: 'wiz-short', text: 'Kurzname für Adressen' }),
+      h('div', { class: 'b-wrap' }, h('span', { class: 'b-affix', text: 'shop.' }), short), shortHint);
+    const syncShortHint = () => shortHint.replaceChildren('So heißen Adressen in deinem Netz: shop.' + (short.value.trim() || 'kurzname') + ' – 2–24 Zeichen a–z, 0–9 und -.');
+    let shortTimer = null;
+    const suggest = () => {
+      clearTimeout(shortTimer);
+      if (s.shortTouched) return;
+      shortTimer = setTimeout(async () => {
+        try {
+          const result = await api('POST', '/api/wizard/short', { name: name.value });
+          if (!s.shortTouched) { short.value = result.short; s.short = result.short; syncShortHint(); }
+        } catch (_) { /* the field stays as it is */ }
+      }, 250);
+    };
+    name.addEventListener('input', suggest);
+    contact.addEventListener('input', () => setFieldError('wiz-contact', null));
+    short.addEventListener('input', () => { s.shortTouched = true; s.short = short.value.trim(); syncShortHint(); });
+    const adultHint = h('span', { class: 'b-hint' });
+    const adultTexts = {
+      forbidden: 'Standard: Namen und Apps mit 18+-Inhalten werden abgelehnt; gekennzeichnete Apps liefert kein Knoten aus.',
+      allowed: 'Nur gekennzeichnet und nie in der sicheren Suche. Als Betreiber bist du für eine nötige Altersprüfung verantwortlich (in Deutschland z. B. JMStV).',
+    };
+    adultHint.replaceChildren(adultTexts[s.adult]);
+    const adultSeg = h('div', { class: 'b-seg b-seg--full', role: 'radiogroup', 'aria-label': 'Inhalte ab 18' },
+      [['forbidden', 'Nicht erlaubt'], ['allowed', 'Erlaubt (gekennzeichnet)']].map(([value, label]) => h('label', {},
+        h('input', { type: 'radio', name: 'adult', value, checked: s.adult === value, onchange: () => { s.adult = value; adultHint.replaceChildren(adultTexts[value]); } }),
+        h('span', { text: label }))));
     const next = h('button', { class: 'b-btn b-btn--primary', type: 'submit', text: 'Weiter zu den Wörtern' });
     const form = h('form', { class: 'bc-stack', novalidate: true },
       h('div', { class: 'bc-head' }, h('h1', { class: 'bc-h1', text: 'Neues BridgeNet' }),
         h('p', { class: 'bc-lead', text: 'Wie soll dein Netz heißen, und wer darf hinein? Dieser PC wird der erste Knoten: Log-Führer, Zeuge und Empfänger.' })),
       h('div', { class: 'bc-card' }, field('wiz-name', 'Name des Netzes', name), h('div', { class: 'b-field' }, h('span', { class: 'b-flabel', text: 'Art' }), seg, hint)),
+      h('div', { class: 'bc-card' },
+        h('strong', { class: 'bc-card__title', text: 'Du bist der Betreiber' }),
+        h('p', { class: 'bc-text', text: 'Wer ein Netz erstellt, ist für dieses Netz verantwortlich – auch dafür, auf Meldungen zu reagieren (NUTZUNGSREGELN.md). Bridge selbst hat keinen zentralen Betreiber.' }),
+        field('wiz-contact', 'Meldeweg (Pflicht)', contact, 'Wie man dich erreicht, wenn in deinem Netz etwas Verbotenes auftaucht – z. B. eine E-Mail-Adresse. Er steht öffentlich im Netz; jeder Bridge-Browser zeigt ihn.'),
+        shortField,
+        h('div', { class: 'b-field' }, h('span', { class: 'b-flabel', text: 'Inhalte ab 18' }), adultSeg, adultHint)),
       h('div', { class: 'bc-row bc-row--end' }, next));
+    if (!s.short && !s.shortTouched && s.name) suggest();
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       s.name = name.value.trim();
+      s.contact = contact.value.trim();
+      s.short = short.value.trim();
+      ['wiz-name', 'wiz-contact', 'wiz-short'].forEach((id) => setFieldError(id, null));
       if (!s.name) { setFieldError('wiz-name', 'Bitte einen Namen eingeben'); return; }
-      const result = await act(next, () => api('POST', '/api/wizard/start', { name: s.name, template: s.template }));
+      if (!s.contact) { setFieldError('wiz-contact', 'Bitte einen Meldeweg angeben – ohne ihn kann dich niemand auf Missbrauch hinweisen.'); return; }
+      busy(next, true);
+      let result = null;
+      try {
+        result = await api('POST', '/api/wizard/start', { name: s.name, template: s.template, contact: s.contact, short: s.short, adult: s.adult });
+      } catch (error) {
+        const fields = { name: 'wiz-name', contact: 'wiz-contact', short: 'wiz-short' };
+        if (error.field && fields[error.field]) setFieldError(fields[error.field], error.message);
+        else toast('err', 'Nicht geklappt', error.message);
+      } finally { busy(next, false); }
       if (!result) return;
       s.id = result.wizard;
       s.words = result.words;
@@ -802,6 +883,7 @@
         reach.showErrors(check.errors || {});
         if (!check.ok) return;
         const result = await api('POST', '/api/wizard/create', Object.assign({ wizard: s.id, uses: s.uses }, value));
+        framesStale = true;
         s.result = result;
         s.id = null;
         s.step = 4;
@@ -828,6 +910,7 @@
     if (r.link && r.link.includes('gw=http%3A%2F%2F127.0.0.1')) {
       text.push(h('p', { class: 'bc-muted bc-p0', text: 'Ohne öffentliche Adresse nennt der Link 127.0.0.1: Andere PCs finden den Knoten dann nur im selben LAN. Eine Tailscale-Adresse trägst du später in den Einstellungen des Knotens ein.' }));
     }
+    if (s.short) text.push(h('p', { class: 'bc-text', text: 'Adressen in deinem Netz: <name>.' + s.short + ' – Namen meldest du im Dashboard unter „Namen“ an. Meldeweg: ' + s.contact }));
     if (r.warning) text.push(h('div', { class: 'b-banner b-banner--warn', role: 'status' }, icon('warn'), h('span', { class: 'b-banner__text', text: r.warning })));
     return h('div', { class: 'bc-stack' },
       h('div', { class: 'bc-head' }, h('h1', { class: 'bc-h1', text: '„' + s.name + '“ ist bereit' }),
@@ -842,11 +925,29 @@
 
   // ---------- N03 Dashboard ----------
 
+  // Reports of an owner node: loaded every 15 s and after each action (a signed admin request each time).
+  const reportState = { node: null, status: 'open', data: null, at: 0 };
+
+  async function loadReports(id, force) {
+    if (reportState.node !== id) Object.assign(reportState, { node: id, status: 'open', data: null, at: 0 });
+    if (!force && reportState.data && Date.now() - reportState.at < 15000) return;
+    reportState.at = Date.now();
+    try {
+      reportState.data = await api('GET', '/api/nodes/' + id + '/reports?status=' + reportState.status);
+    } catch (error) {
+      reportState.data = { status: reportState.status, reports: [], error: error.message };
+    }
+  }
+
   function dashboard(id) {
     let search = '';
     const load = async () => {
       try {
         const data = await api('GET', '/api/nodes/' + id + '/dashboard' + (search ? '?q=' + encodeURIComponent(search) : ''));
+        if (data.node.role === 'owner' && data.net) {
+          await loadReports(id, false);
+          data.reports = reportState.data;
+        }
         const key = JSON.stringify(data, (k, v) => (k === 'age_ms' || k === 'retry_in_ms' ? undefined : v));
         if (key !== lastKey) {
           lastKey = key;
@@ -885,9 +986,10 @@
       pills.push(pill('neutral', net.mode_name));
     } else rolePills(node).forEach((p) => pills.push(p));
     if (net) pills.push(chip('Netz-ID ' + short(net.id)));
+    const browserLink = net ? h('a', { class: 'b-btn b-btn--secondary b-btn--sm', href: '#/browser/' + node.id }, icon('globe'), 'Bridge-Browser') : null;
     return h('div', { class: 'bc-dash__head' },
       h('div', { class: 'bc-dash__title' },
-        h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: '#/' }, icon('back'), 'Alle Netze'),
+        h('div', { class: 'bc-row' }, h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: '#/' }, icon('back'), 'Alle Netze'), browserLink),
         h('h1', { class: 'bc-hero', text: title }),
         h('div', { class: 'bc-row' }, pills)),
       stats ? h('div', { class: 'b-stats' }, stats.map(([value, label, kind]) =>
@@ -902,13 +1004,20 @@
           h('span', { class: 'b-banner__text', text: data.node.run.state === 'off' ? 'Der Owner-Knoten ist aus. Starte ihn auf der Startseite.' : 'Der Owner-Knoten startet …' })));
     }
     const sealedNodes = data.nodes.filter((n) => n.standing.level !== null && n.standing.level >= 1);
+    const openReports = data.reports && data.reports.status === 'open' && !data.reports.error ? data.reports.reports.length : null;
     const stats = [
       [sealedNodes.length, 'Knoten'],
       [net.members, 'Mitglieder'],
-      [data.apps.length, 'Apps'],
-      [data.candidates.length, 'wartet auf Siegel', data.candidates.length ? 'warn' : null],
+      [data.names.total, 'Namen'],
+      openReports === null ? [data.candidates.length, 'wartet auf Siegel', data.candidates.length ? 'warn' : null]
+        : [openReports, 'offene Meldungen', openReports ? 'warn' : null],
     ];
     const banners = [];
+    if (!net.contact) {
+      banners.push(h('div', { class: 'b-banner b-banner--warn', role: 'alert' }, icon('warn'),
+        h('span', { class: 'b-banner__text' }, h('b', { text: 'Meldeweg fehlt.' }), ' Als Betreiber musst du für Meldungen erreichbar sein (NUTZUNGSREGELN.md). Bis dahin zeigt jeder Bridge-Browser dein Netz als „ohne Meldeweg“.'),
+        h('button', { class: 'b-btn b-btn--primary b-btn--sm', type: 'button', text: 'Meldeweg eintragen', onclick: () => contactDialog(id) })));
+    }
     if (net.evidence > 0) {
       banners.push(h('div', { class: 'b-banner b-banner--warn', role: 'alert' }, icon('warn'),
         h('span', { class: 'b-banner__text' }, h('b', { text: 'Beweis gegen einen Log-Führer.' }), ' Ein Log-Führer hat zwei verschiedene Log-Versionen gezeigt und ist abgesetzt (docs/06 §5). Prüfe die Log-Regeln.')));
@@ -928,15 +1037,18 @@
         h('div', { class: 'srv__meta' }, a.banned ? pill('err', 'Gesperrt') : (a.state === 'serving' ? pill('ok', 'Version ' + a.version) : pill('info', 'Holt Version ' + a.version, 'spin')),
           chip(plural(a.hosts, 'Host', 'Hosts')), chip('App ' + short(a.id)), chip('Owner ' + short(a.owner)))),
       h('div', { class: 'srv__actions' }, a.banned ? null : h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Sperren',
-        onclick: () => banDialog(id, a.id, a.name || 'diese App', true) })))) : [h('p', { class: 'bc-empty-line', text: 'Noch keine App auf dem Owner-Knoten. Apps veröffentlichst du mit „bridge-node app publish“ (docs/07).' })];
+        onclick: () => banDialog(id, a.id, a.name || 'diese App', true) })))) : [h('p', { class: 'bc-empty-line', text: data.app_keys.length
+      ? 'Keine App auf dem Owner-Knoten. Deine Apps (' + data.app_keys.map((a) => a.name).join(', ') + ') liegen auf anderen Hosts – im Bridge-Browser findest du sie über ihre Namen.'
+      : 'Noch keine App auf dem Owner-Knoten. Apps veröffentlichst du mit „bridge-node app publish“ (docs/07).' })];
 
     const searchInput = h('input', { class: 'b-input', id: 'member-search', placeholder: 'Name oder ID', value: search, autocomplete: 'off', spellcheck: 'false' });
     let searchTimer = null;
     searchInput.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => onSearch(searchInput.value.trim()), 300); });
+    const operatorId = data.operator ? data.operator.id : null;
     const members = data.members.list.length ? data.members.list.map((m) => h('div', { class: 'bc-member' },
-      h('span', { class: 'bc-member__name', title: m.id }, m.name || (m.node ? 'Knoten' : 'Mitglied'), ' ', h('span', { class: 'bc-member__id', text: short(m.id) })),
+      h('span', { class: 'bc-member__name', title: m.id }, m.id === operatorId ? 'Du (Betreiber)' : (m.name || (m.node ? 'Knoten' : 'Mitglied')), ' ', h('span', { class: 'bc-member__id', text: short(m.id) })),
       m.standing.banned ? pill('err', 'Gesperrt') : pill(m.standing.level >= 1 ? 'info' : 'neutral', 'Stufe ' + (m.standing.level === null ? '–' : m.standing.level)),
-      m.standing.banned
+      m.id === operatorId ? null : m.standing.banned
         ? h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Entsperren', onclick: () => confirmDialog('Sperre aufheben?', 'Die Sperre von ' + (m.name || short(m.id)) + ' wird widerrufen (Eintrag im Transparenz-Log).', 'Aufheben', () => api('POST', '/api/nodes/' + id + '/unban', { subject: m.id }).then(refresh), false) })
         : h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Sperren', onclick: () => banDialog(id, m.id, m.name || short(m.id), false) })))
       : [h('p', { class: 'bc-empty-line', text: search ? 'Niemand gefunden.' : 'Noch keine Mitglieder.' })];
@@ -959,6 +1071,12 @@
         h('span', { id: 'head-age', text: net.head ? 'letzter Kopf vor ' + age(net.head.age_ms) : 'noch kein bezeugter Kopf' }),
         ' · ' + (net.evidence ? net.evidence + ' Beweise gegen Log-Führer' : 'keine Beweise gegen Log-Führer')),
       h('p', { class: 'bc-muted bc-p0', text: 'Manifest Version ' + net.manifest_version + ' · ' + net.witnesses + ' Zeugen, Schwelle ' + net.threshold + (net.truncated ? ' · Anzeige gekürzt' : '') }));
+    const rules = h('div', { class: 'bc-stack--tight' },
+      h('h2', { class: 'bc-h2', text: 'Regeln für Namen' }),
+      h('p', { class: 'bc-text', text: 'Adressen: <name>.' + (net.short || '–') + ' · Inhalte ab 18: ' + (net.adult === 'allowed' ? 'erlaubt (gekennzeichnet)' : 'nicht erlaubt') }),
+      h('p', { class: 'bc-muted bc-p0' }, 'Meldeweg: ', net.contact ? h('span', { class: 'bc-mono', text: net.contact }) : h('b', { text: 'fehlt' }),
+        net.contact ? ' · ' : null,
+        net.contact ? h('button', { class: 'bc-link-btn', type: 'button', text: 'ändern', onclick: () => contactDialog(id, net.contact) }) : null));
     const watch = h('div', { class: 'bc-stack--tight' },
       h('h2', { class: 'bc-h2', text: 'Wächter' }),
       h('p', { class: 'bc-text', text: data.watch
@@ -971,11 +1089,13 @@
         h('section', { class: 'bc-cols__main', 'aria-label': 'Knoten' },
           h('h2', { class: 'bc-h2 bc-list-title', text: 'Knoten' }), h('div', { class: 'bc-list' }, nodeRows),
           h('div', { class: 'bc-row bc-list-after' }, h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', onclick: () => sealDialog(id, null) }, icon('plus'), 'Knoten von einem anderen PC siegeln (Ausweis)')),
-          h('h2', { class: 'bc-h2 bc-list-title bc-section-gap', text: 'Apps' }), h('div', { class: 'bc-list' }, appRows)),
+          h('h2', { class: 'bc-h2 bc-list-title bc-section-gap', text: 'Apps' }), h('div', { class: 'bc-list' }, appRows),
+          reportsSection(data, id),
+          namesSection(data, id)),
         h('aside', { class: 'bc-cols__side', 'aria-label': 'Mitglieder und Einladungen' },
           invite,
           h('div', { class: 'bc-stack--tight' }, h('h2', { class: 'bc-h2', text: 'Mitglieder' }), field('member-search', 'Suchen', searchInput), members),
-          logBox, watch)));
+          rules, logBox, watch)));
   }
 
   function dashNodeRow(ownerId, n, index, net) {
@@ -1087,6 +1207,423 @@
       qrBox(link.qr), copyField(link.link, 'Einladungslink'),
       h('div', { class: 'b-dialog__btns' }, h('button', { class: 'b-btn b-btn--primary', type: 'button', text: 'Schließen', onclick: () => close() }))));
   }
+
+  // ---------- Namen, Meldungen, Meldeweg (Owner-Dashboard, docs/08 §12) ----------
+
+  const KIND_TEXT = { app: 'App', node: 'Knoten', member: 'Mitglied' };
+  const days = (ms) => Math.max(0, Math.round(ms / 86400000));
+
+  function namesSection(data, ownerId) {
+    const names = data.names;
+    const net = data.net;
+    const rows = names.list.length ? names.list.map((n, index) => {
+      const meta = [pill(n.resolves ? 'ok' : 'warn', n.resolves ? 'Gilt' : 'Löst nicht auf'), chip(KIND_TEXT[n.kind] || n.kind)];
+      if (n.category === 'adult') meta.push(pill('warn', '18+'));
+      if (n.owner_level !== null && n.owner_level !== undefined) meta.push(chip('Inhaber Stufe ' + n.owner_level));
+      meta.push(chip('noch ' + plural(days(n.expires - Date.now()), 'Tag', 'Tage')));
+      return h('div', { class: 'srv bc-name-row', 'data-name': n.name },
+        h('span', { class: 'srv__nr', text: nr(index) }),
+        h('div', { class: 'srv__body' },
+          h('span', { class: 'srv__name bc-name', text: n.address }),
+          h('div', { class: 'srv__meta' }, meta),
+          n.description ? h('p', { class: 'bc-text bc-p0', text: n.description }) : null,
+          n.why ? h('p', { class: 'bc-muted bc-p0', text: 'Warum nicht: ' + n.why }) : null),
+        h('div', { class: 'srv__actions' },
+          h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Widerrufen', onclick: () => revokeNameDialog(ownerId, n) })));
+    }) : [h('p', { class: 'bc-empty-line', text: 'Noch keine Namen. Mit einem Namen findet man deine App im Bridge-Browser als „shop.' + (net.short || 'kurzname') + '“.' })];
+    if (names.more) rows.push(h('p', { class: 'bc-muted bc-p0', text: 'Gezeigt: ' + names.list.length + ' von ' + names.total + '.' }));
+    return h('section', { class: 'bc-stack--tight bc-section-gap', 'aria-label': 'Namen' },
+      h('div', { class: 'bc-row bc-row--between' }, h('h2', { class: 'bc-h2', text: 'Namen' }),
+        h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', onclick: () => nameDialog(ownerId, data) }, icon('plus'), 'Name anmelden')),
+      h('div', { class: 'bc-list' }, rows));
+  }
+
+  function nameDialog(ownerId, data) {
+    const net = data.net;
+    const name = h('input', { class: 'mono', id: 'name-name', maxlength: '40', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: 'shop' });
+    const nameField = h('div', { class: 'b-field' }, h('label', { for: 'name-name', text: 'Name' }),
+      h('div', { class: 'b-wrap' }, name, net.short ? h('span', { class: 'b-affix', text: '.' + net.short }) : null),
+      h('span', { class: 'b-hint', id: 'name-name-hint', text: '2–40 Zeichen a–z, 0–9 und -. Wer zuerst kommt, bekommt ihn; verwechselbare und „offiziell“ klingende Namen (Bank, Login …) lehnt das Netz ab.' }));
+    let target = data.app_keys.length ? 'app' : 'node';
+    const select = h('select', { class: 'b-input', id: 'name-app', 'aria-label': 'App' },
+      data.app_keys.map((a) => h('option', { value: a.id, text: a.name + ' (' + short(a.id) + ')' })));
+    const appField = h('div', { class: 'b-field' }, h('label', { for: 'name-app', text: 'App' }),
+      data.app_keys.length ? h('div', { class: 'b-selectwrap' }, select, icon('chevron'))
+        : h('p', { class: 'bc-muted bc-p0', text: 'Im Ordner des Owner-Knotens liegt noch kein App-Schlüssel. Apps legst du mit „bridge-node app create“ und „app publish“ an (docs/07).' }));
+    const targetHint = h('span', { class: 'b-hint' });
+    const targetTexts = {
+      app: 'Der Name zeigt auf eine App – App-Schlüssel und dein Betreiber-Schlüssel unterschreiben ihn.',
+      node: 'Der Name zeigt auf den Owner-Knoten (z. B. als Empfänger).',
+      member: 'Der Name zeigt auf dich als Betreiber (z. B. zum Anschreiben).',
+    };
+    const syncTarget = () => { appField.hidden = target !== 'app'; targetHint.replaceChildren(targetTexts[target]); };
+    const seg = h('div', { class: 'b-seg b-seg--full', role: 'radiogroup', 'aria-label': 'Ziel' },
+      [['app', 'App'], ['node', 'Owner-Knoten'], ['member', 'Du (Betreiber)']].map(([value, label]) => h('label', {},
+        h('input', { type: 'radio', name: 'name-target', value, checked: value === target, onchange: () => { target = value; syncTarget(); } }),
+        h('span', { text: label }))));
+    const description = h('input', { class: 'b-input', maxlength: '200', autocomplete: 'off', placeholder: 'z. B. Mein Laden' });
+    const tags = h('input', { class: 'b-input', autocomplete: 'off', spellcheck: 'false', placeholder: 'laden, kleidung' });
+    const adult = net.adult === 'allowed' ? switchBox('Inhalte ab 18 (Kennzeichnung)', {}) : null;
+    const body = [nameField, h('div', { class: 'b-field' }, h('span', { class: 'b-flabel', text: 'Ziel' }), seg, targetHint), appField,
+      field('name-description', 'Beschreibung (öffentlich)', description), field('name-tags', 'Schlagworte (Komma, höchstens 8)', tags), adult,
+      h('p', { class: 'bc-muted bc-p0', text: 'Der Name steht ein Jahr im Transparenz-Log. Für Namen von Apps und von dir bekommt dein Betreiber-Schlüssel Stufe 2 (ein Siegel im Log) – sonst zeigt die sichere Suche sie nicht.' })];
+    syncTarget();
+    formDialog('Name anmelden', null, body, 'Anmelden', async () => {
+      setFieldError('name-name', null);
+      const request = {
+        name: name.value.trim().toLowerCase(), target, description: description.value.trim(),
+        tags: tags.value.split(',').map((t) => t.trim().toLowerCase()).filter((t) => t),
+        category: adult && adult.querySelector('input').checked ? 'adult' : 'general',
+      };
+      if (target === 'app') request.app = select.value;
+      try {
+        const result = await api('POST', '/api/nodes/' + ownerId + '/name-register', request);
+        toast('ok', 'Name angemeldet', result.address);
+      } catch (error) {
+        setFieldError('name-name', error.message);
+        return false;
+      }
+      refresh();
+      return true;
+    }, { wide: true });
+  }
+
+  function revokeNameDialog(ownerId, n) {
+    confirmDialog('„' + n.address + '“ widerrufen?', 'Der Name löst danach nirgends mehr auf und ist frei für andere. Der Widerruf steht im Transparenz-Log.',
+      'Widerrufen', async () => {
+        await api('POST', '/api/nodes/' + ownerId + '/name-revoke', { name: n.name });
+        toast('ok', 'Name widerrufen', n.address);
+        refresh();
+      });
+  }
+
+  function contactDialog(ownerId, current) {
+    const input = h('input', { class: 'b-input', maxlength: '200', autocomplete: 'email', value: current || '', placeholder: 'z. B. meldungen@beispiel.de' });
+    formDialog(current ? 'Meldeweg ändern' : 'Meldeweg eintragen', 'Wie man dich als Betreiber erreicht, wenn in deinem Netz etwas Verbotenes auftaucht. Er steht öffentlich im Manifest; jeder Bridge-Browser zeigt ihn.',
+      [field('contact-input', 'Meldeweg', input, 'Das Netz bekommt dafür eine neue Manifest-Version (signiert mit dem Admin-Schlüssel, Eintrag im Log).')],
+      'Speichern', async () => {
+        setFieldError('contact-input', null);
+        try {
+          await api('POST', '/api/nodes/' + ownerId + '/contact', { contact: input.value.trim() });
+        } catch (error) { setFieldError('contact-input', error.message); return false; }
+        toast('ok', 'Meldeweg gespeichert');
+        refresh();
+        return true;
+      });
+  }
+
+  function reportsSection(data, ownerId) {
+    const r = data.reports || { status: 'open', reports: [] };
+    const seg = h('div', { class: 'b-seg b-seg--sm', role: 'radiogroup', 'aria-label': 'Meldungen zeigen' },
+      [['open', 'Offen'], ['done', 'Erledigt'], ['all', 'Alle']].map(([value, label]) => h('label', {},
+        h('input', { type: 'radio', name: 'reports-status', value, checked: r.status === value, onchange: async () => {
+          reportState.status = value;
+          await loadReports(ownerId, true);
+          refresh();
+        } }), h('span', { text: label }))));
+    const rows = [];
+    if (r.error) rows.push(h('div', { class: 'b-banner b-banner--warn', role: 'status' }, icon('warn'), h('span', { class: 'b-banner__text', text: 'Meldungen nicht abrufbar: ' + r.error })));
+    const operatorId = data.operator ? data.operator.id : null;
+    for (const report of r.reports) rows.push(reportRow(ownerId, report, operatorId));
+    if (!r.error && !r.reports.length) {
+      rows.push(h('p', { class: 'bc-empty-line', text: r.status === 'open' ? 'Keine offenen Meldungen.' : 'Keine Meldungen.' }));
+    }
+    return h('section', { class: 'bc-stack--tight bc-section-gap', 'aria-label': 'Meldungen' },
+      h('div', { class: 'bc-row bc-row--between' }, h('h2', { class: 'bc-h2', text: 'Meldungen' }), seg),
+      h('p', { class: 'bc-muted bc-p0', text: 'Mitglieder melden Namen und Apps deines Netzes. Eine Meldung löst nichts von selbst aus – du entscheidest und handelst (Kennzeichnen, Sperren, Widerrufen; alles steht im Transparenz-Log).' }),
+      h('div', { class: 'bc-list' }, rows));
+  }
+
+  function reportRow(ownerId, report, operatorId) {
+    const severe = report.reason === 'illegal' || report.reason === 'phishing';
+    const when = 'vor ' + age(Date.now() - report.received);
+    const about = report.about || { actions: {} };
+    const done = report.status === 'done';
+    const quick = (label, action, title, text) => h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: label,
+      onclick: () => confirmDialog(title, text, label, async () => {
+        await api('POST', '/api/nodes/' + ownerId + '/report-action', { target: report.target, action, report: report.id, reason: 'Meldung: ' + report.reason_text });
+        toast('ok', label + ' – erledigt', report.target);
+        await loadReports(ownerId, true);
+        refresh();
+      }) });
+    const actions = [];
+    if (!done) {
+      if (about.actions.label) actions.push(quick('Als 18+ kennzeichnen', 'label_adult', report.target + ' als 18+ kennzeichnen?',
+        'Die Admins kennzeichnen ' + (about.app ? 'den Namen und seine App' : 'das Ziel') + ' als 18+ (ein Jahr, Eintrag im Log). In einem Netz ohne 18+ löst der Name nicht mehr auf und kein Knoten liefert die App aus.'));
+      if (about.actions.ban_app) actions.push(quick('App sperren', 'ban_app', 'App von ' + report.target + ' sperren?',
+        'Die ID ' + short(about.app || '') + ' ist ' + (about.id_kind_text || 'eine App') + '. Sie wird für 365 Tage gesperrt: Kein Host liefert sie mehr aus, ihre Namen lösen nicht mehr auf. Die Sperre steht im Transparenz-Log.'));
+      if (about.actions.revoke_name) actions.push(quick('Namen widerrufen', 'revoke_name', '„' + report.target + '“ widerrufen?',
+        'Der Name löst danach nirgends mehr auf und ist wieder frei. Der Widerruf steht im Transparenz-Log.'));
+    }
+    actions.push(h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: done ? 'Wieder öffnen' : 'Erledigt',
+      onclick: (event) => act(event.currentTarget, async () => {
+        await api('POST', '/api/nodes/' + ownerId + '/report-status', { id: report.id, status: done ? 'open' : 'done' });
+        await loadReports(ownerId, true);
+        refresh();
+      }, done ? 'Wieder offen' : 'Als erledigt markiert') }));
+    return h('div', { class: 'bc-report', 'data-report': report.id },
+      h('div', { class: 'bc-row' }, pill(severe ? 'err' : 'warn', report.reason_text),
+        h('span', { class: 'bc-mono bc-report__target', text: report.target }),
+        about.name_kind ? chip(KIND_TEXT[about.name_kind] || about.name_kind) : null,
+        done ? pill('ok', 'Erledigt', 'check') : pill('info', 'Offen'),
+        h('span', { class: 'bc-muted', text: when })),
+      report.text ? h('p', { class: 'bc-text bc-pre bc-p0', text: report.text })
+        : h('p', { class: 'bc-muted bc-p0', text: report.text === null ? '(Text verschlüsselt für den Log-Führer ' + short(report.sealed_to || '') + ' – nur dort lesbar)' : '(ohne Text)' }),
+      about.kind === 'id' && about.id_kind_text ? h('p', { class: 'bc-muted bc-p0', text: 'Die gemeldete ID ist ' + about.id_kind_text + '.' }) : null,
+      h('p', { class: 'bc-muted bc-p0', text: 'Von ' + (report.reporter === operatorId ? 'dir (Betreiber-Schlüssel)' : 'Mitglied ' + short(report.reporter)) + ' · abgegeben bei ' + short(report.via) }),
+      h('div', { class: 'bc-row' }, actions));
+  }
+
+  // ---------- Bridge-Browser (docs/08 §12) ----------
+
+  const browserState = { safe: true };
+
+  function browserScreen(nodeId, address) {
+    if (framesStale) {
+      framesStale = false;
+      location.reload();
+      return;
+    }
+    const main = h('main', { class: 'bc-dash b-page-in' });
+    app.replaceChildren(main);
+    const render = (info) => {
+      const nets = info.nets.filter((n) => n.net);
+      const chosen = nets.find((n) => n.node === nodeId) || nets.find((n) => n.node) || nets[0] || null;
+      const current = chosen ? (chosen.node || nodeId) : null;
+      const head = h('div', { class: 'bc-dash__head' },
+        h('div', { class: 'bc-dash__title' },
+          h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: '#/' }, icon('back'), 'Alle Netze'),
+          h('h1', { class: 'bc-hero', text: 'Bridge-Browser' }),
+          h('p', { class: 'bc-lead', text: 'Öffnet Apps und Websites deiner Netze – immer über deinen eigenen Knoten, der jede Datei selbst prüft.' })));
+      if (!nets.length) {
+        main.replaceChildren(head, h('div', { class: 'b-empty' }, h('h3', { text: 'Noch kein Netz' }),
+          h('p', { text: 'Der Bridge-Browser zeigt Adressen der Netze, in denen dieser PC einen Knoten hat. Tritt erst einem Netz bei.' }),
+          h('a', { class: 'b-btn b-btn--primary', href: '#/beitreten' }, icon('link'), 'Netz beitreten')));
+        return;
+      }
+      const picker = nets.length > 1
+        ? h('div', { class: 'b-seg', role: 'radiogroup', 'aria-label': 'Netz' }, nets.map((n) => h('label', { title: n.net.fingerprint },
+          h('input', { type: 'radio', name: 'browser-net', value: n.node || '', checked: n === chosen, disabled: !n.node,
+            onchange: () => { if (n.node) location.hash = '#/browser/' + n.node; } }), h('span', { text: n.net.name }))))
+        : chip('Netz „' + chosen.net.name + '“ · ' + chosen.net.fingerprint);
+      const input = h('input', { id: 'browser-address', 'aria-label': 'Adresse oder Suchwort', value: address || '', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off',
+        placeholder: chosen.net.short ? 'shop.' + chosen.net.short + ' oder ein Suchwort' : 'Name oder Suchwort' });
+      const go = h('button', { class: 'b-btn b-btn--primary', type: 'submit' }, 'Öffnen', icon('arrow'));
+      const safe = switchBox('Sicherer Modus', { checked: browserState.safe, onchange: (event) => {
+        browserState.safe = event.target.checked;
+        if (address) showAddress(address); else if (input.value.trim()) searchNow(input.value.trim());
+      } });
+      const results = h('section', { class: 'bc-stack--tight', id: 'browser-results', 'aria-live': 'polite' });
+      const page = h('section', { class: 'bc-browser__page', id: 'browser-page' });
+      const form = h('form', { class: 'bc-browser__bar', role: 'search', novalidate: true },
+        h('div', { class: 'b-wrap' }, h('span', { class: 'b-in-icon bc-in-icon--static', 'aria-hidden': 'true' }, icon('globe')), input), go, safe);
+      const notes = [];
+      if (!chosen.node && chosen.why) {
+        notes.push(h('div', { class: 'b-banner b-banner--warn', role: 'status' }, icon('warn'), h('span', { class: 'b-banner__text', text: chosen.why })));
+      }
+      notes.push(h('p', { class: 'bc-muted bc-p0', text: 'Sicherer Modus: keine Inhalte ab 18 und keine Namen von neuen Inhabern (unter Stufe 2) in der Suche.' }));
+      main.replaceChildren(head, h('div', { class: 'bc-row' }, picker), form, ...notes, results, page);
+      let timer2 = null;
+      const searchNow = async (query) => {
+        if (!current) return;
+        try {
+          const found = await api('POST', '/api/browser/search', { node: current, q: query, safe: browserState.safe });
+          renderResults(results, found, query);
+        } catch (error) {
+          results.replaceChildren(h('p', { class: 'bc-empty-line', text: error.message }));
+        }
+      };
+      input.addEventListener('input', () => {
+        clearTimeout(timer2);
+        const query = input.value.trim();
+        if (!query || query.includes('.')) { if (!query) results.replaceChildren(); return; }
+        timer2 = setTimeout(() => searchNow(query), 300);
+      });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const value = input.value.trim().toLowerCase();
+        if (!value) return;
+        if (/^[a-z0-9-]{2,40}(\.[a-z0-9-]{2,24})?$/.test(value) && current) {
+          location.hash = '#/browser/' + current + '/' + value;
+        } else {
+          searchNow(value);
+        }
+      });
+      const showAddress = async (target) => {
+        results.replaceChildren();
+        page.replaceChildren(h('p', { class: 'bc-muted bc-p0' }, h('span', { class: 'b-spin b-spin--blue' }), ' Prüfe „' + target + '“ …'));
+        try {
+          const found = await api('POST', '/api/browser/resolve', { address: target, node: current, safe: browserState.safe });
+          if (found.choose) return chooseNet(found);
+          if (found.node && found.node !== nodeId) history.replaceState(null, '', '#/browser/' + found.node + '/' + target);
+          lastRoute = location.hash;
+          renderPage(page, found);
+        } catch (error) {
+          page.replaceChildren(h('div', { class: 'b-banner b-banner--warn', role: 'alert' }, icon('warn'),
+            h('span', { class: 'b-banner__text' }, h('b', { text: '„' + target + '“: ' }), error.message)));
+        }
+      };
+      if (address) showAddress(address); else input.focus();
+    };
+    api('GET', '/api/browser').then(render).catch((error) => {
+      main.replaceChildren(h('div', { class: 'b-empty' }, h('h3', { text: 'Browser nicht verfügbar' }), h('p', { text: error.message })));
+    });
+  }
+
+  function renderResults(box, found, query) {
+    const rows = found.results.map((r) => {
+      const meta = [chip(r.address), pill(r.owner_level >= 2 ? 'info' : 'warn', 'Inhaber ' + r.owner_level_text)];
+      if (r.kind !== 'app') meta.push(chip(KIND_TEXT[r.kind] || r.kind));
+      if (r.category === 'adult') meta.push(pill('warn', '18+'));
+      r.tags.forEach((tag) => meta.push(chip('#' + tag)));
+      return h('div', { class: 'srv bc-result', 'data-name': r.name },
+        h('div', { class: 'srv__body' },
+          h('span', { class: 'srv__name bc-name', text: r.name }),
+          r.description ? h('p', { class: 'bc-text bc-p0', text: r.description }) : null,
+          h('div', { class: 'srv__meta' }, meta)),
+        h('div', { class: 'srv__actions' },
+          h('a', { class: 'b-go', href: '#/browser/' + found.node + '/' + r.address, 'aria-label': r.address + ' öffnen' }, icon('arrow'))));
+    });
+    // append() skips null (replaceChildren would print it).
+    box.replaceChildren();
+    append(box, [h('h2', { class: 'bc-h2', text: 'Treffer für „' + query + '“' }),
+      h('div', { class: 'bc-list' }, rows.length ? rows : h('p', { class: 'bc-empty-line', text: found.safe ? 'Nichts gefunden (der sichere Modus blendet 18+ und neue Inhaber aus).' : 'Nichts gefunden.' })),
+      found.more ? h('p', { class: 'bc-muted bc-p0', text: 'Es gibt mehr Treffer – genauer suchen.' }) : null]);
+  }
+
+  function chooseNet(found) {
+    const close = openDialog(h('div', { class: 'b-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'choose-title' },
+      h('h3', { id: 'choose-title', text: 'Welches Netz?' }),
+      h('p', { text: 'Mehrere deiner Netze haben diesen Kurznamen. Vergleiche Name und Netz-ID, bevor du öffnest.' }),
+      h('div', { class: 'bc-stack--tight' }, found.choose.map((c) => h('button', { class: 'b-btn b-btn--secondary', type: 'button', disabled: !c.usable,
+        onclick: () => { close(); location.hash = '#/browser/' + c.node + '/' + found.address; } },
+        c.net.name + ' · ' + c.net.fingerprint))),
+      h('div', { class: 'b-dialog__btns' }, h('button', { class: 'b-btn b-btn--ghost', type: 'button', text: 'Abbrechen', onclick: () => close() }))));
+  }
+
+  const LOCK = {
+    ok: ['lock', 'Geprüft', 'Dein Knoten hat Name und App geprüft. Keine Warnungen.'],
+    warn: ['lock', 'Vorsicht', 'Dein Knoten hat Name und App geprüft – aber lies die Hinweise.'],
+    blocked: ['unlock', 'Nicht geöffnet', 'BridgeControll öffnet das nicht.'],
+  };
+
+  function safetyPanel(found) {
+    const safety = found.safety;
+    const [lockIcon, lockTitle, lockText] = LOCK[safety.status] || LOCK.warn;
+    const facts = [
+      ['Netz', [h('span', { text: found.net.name }), h('span', { class: 'bc-mono bc-fp', text: found.net.fingerprint })]],
+      ['Inhaber', [pill(safety.owner_level >= 2 ? 'info' : 'warn', safety.owner_level_text), h('span', { class: 'bc-mono bc-fp', text: short(found.owner) })]],
+      ['Meldeweg', safety.contact && found.net.contact ? [h('span', { class: 'bc-mono', text: found.net.contact })] : [pill('warn', 'fehlt')]],
+      ['Kategorie', [found.category === 'adult' ? pill('warn', 'Inhalte ab 18') : pill('neutral', 'allgemein'),
+        safety.labels.name || safety.labels.target ? h('span', { class: 'bc-muted', text: 'von den Admins gekennzeichnet' }) : h('span', { class: 'bc-muted', text: 'Selbstauskunft' })]],
+    ];
+    if (found.app) facts.push(['App', [h('span', { text: found.app.name }), h('span', { class: 'bc-muted', text: 'Version ' + found.app.version + ' · ' + plural(found.app.hosts, 'Host', 'Hosts') })]]);
+    if (safety.reserved) facts.push(['Hinweis', [h('span', { class: 'bc-muted', text: 'enthält ein geschütztes Wort – nur vertraute Inhaber (Stufe 3) dürfen so einen Namen haben' })]]);
+    const list = h('dl', { class: 'bc-facts' }, facts.map(([label, value]) => [h('dt', { text: label }), h('dd', {}, value)]));
+    const warnings = safety.warnings.map((w) => h('li', { class: 'bc-warning', 'data-code': w.code }, icon('warn'), h('span', { text: w.text })));
+    return h('aside', { class: 'bc-card bc-safety', 'aria-label': 'Sicherheit' },
+      h('div', { class: 'bc-lock bc-lock--' + safety.status }, icon(lockIcon), h('span', { text: lockTitle })),
+      h('p', { class: 'bc-muted bc-p0', text: lockText }),
+      list,
+      warnings.length ? h('ul', { class: 'bc-warnings' }, warnings) : null);
+  }
+
+  function renderPage(page, found) {
+    const report = h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', onclick: () => reportDialog(found) }, icon('flag'), 'Melden');
+    const tools = [h('span', { class: 'bc-mono bc-browser__address', text: found.address })];
+    const frameBox = h('div', { class: 'bc-frame-wrap' });
+    const open = () => {
+      // The app runs sandboxed in an opaque origin of its own: scripts, forms and popups - nothing more.
+      const frame = document.createElement('iframe');
+      frame.className = 'bc-frame';
+      frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('title', 'App „' + found.name + '“');
+      frame.src = found.url;
+      frameBox.replaceChildren(frame);
+      newTab.hidden = false;
+    };
+    const newTab = h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: found.url || '#', target: '_blank', rel: 'noopener noreferrer' }, icon('external'), 'In neuem Tab öffnen');
+    newTab.hidden = true;
+    tools.push(newTab, report);
+    if (found.blocked) {
+      frameBox.replaceChildren(h('div', { class: 'b-empty bc-frame-note' }, h('h3', { text: 'Nicht geöffnet' }), h('p', { text: found.blocked })));
+    } else if (found.gate === 'adult') {
+      const ok = h('input', { type: 'checkbox' });
+      const button = h('button', { class: 'b-btn b-btn--primary', type: 'button', text: 'Öffnen', disabled: true, onclick: open });
+      ok.addEventListener('change', () => { button.disabled = !ok.checked; });
+      frameBox.replaceChildren(h('div', { class: 'bc-card bc-frame-note' }, h('strong', { class: 'bc-card__title', text: 'Inhalte ab 18' }),
+        h('p', { class: 'bc-text', text: 'Dieses Netz erlaubt gekennzeichnete Inhalte ab 18. Für eine Altersprüfung ist der Betreiber verantwortlich – Bridge prüft kein Alter.' }),
+        h('label', { class: 'b-check' }, ok, h('span', { class: 'b-check__box' }, icon('check3')), 'Ich bin volljährig und möchte die Seite öffnen.'),
+        h('div', { class: 'bc-row' }, button)));
+    } else if (found.gate === 'caution') {
+      frameBox.replaceChildren(h('div', { class: 'bc-card bc-frame-note' }, h('strong', { class: 'bc-card__title', text: 'Neuer Inhaber' }),
+        h('p', { class: 'bc-text', text: 'Den Namen hat ein Mitglied angemeldet, das noch kein Admin versiegelt hat. Das ist oft harmlos – gib dort aber keine Passwörter oder Zahlungsdaten ein.' }),
+        h('div', { class: 'bc-row' }, h('button', { class: 'b-btn b-btn--primary', type: 'button', text: 'Trotzdem öffnen', onclick: open }))));
+    } else {
+      open();
+    }
+    page.replaceChildren(h('div', { class: 'bc-cols' },
+      h('div', { class: 'bc-cols__main bc-stack--tight' },
+        h('div', { class: 'bc-row bc-row--between' }, h('div', { class: 'bc-stack--tight' },
+          h('h2', { class: 'bc-h2', text: found.name }), found.description ? h('p', { class: 'bc-text bc-p0', text: found.description }) : null),
+          h('div', { class: 'bc-row' }, tools)),
+        frameBox),
+      h('div', { class: 'bc-cols__side' }, safetyPanel(found))));
+  }
+
+  function reportDialog(found) {
+    const reasons = [['phishing', 'Phishing oder Betrug'], ['illegal', 'Illegale Inhalte'], ['adult_unlabeled', '18+ ohne Kennzeichnung'], ['spam', 'Spam'], ['other', 'Sonstiges']];
+    let reason = null;
+    const list = h('div', { class: 'bc-stack--tight', role: 'radiogroup', 'aria-labelledby': 'report-reason-label' },
+      reasons.map(([value, label]) => h('label', { class: 'b-radio' },
+        h('input', { type: 'radio', name: 'report-reason', value, onchange: () => { reason = value; } }), h('span', { class: 'b-radio__dot' }), label)));
+    const text = h('textarea', { class: 'b-input bc-textarea', maxlength: '500', placeholder: 'Was ist dir aufgefallen? (optional, höchstens 500 Zeichen)' });
+    const body = [
+      h('div', { class: 'b-field' }, h('span', { class: 'b-flabel', id: 'report-reason-label', text: 'Grund' }), list,
+        h('span', { class: 'b-hint', id: 'report-reason-hint', hidden: true })),
+      field('report-text', 'Beschreibung', text),
+      h('p', { class: 'bc-muted bc-p0', text: 'Deine Meldung geht an die Admins von „' + found.net.name + '“ – den Betreiber dieses Netzes, nicht an Bridge. Sie sehen, von welchem Mitglied (deinem PC) sie kommt. Den Text verschlüsselt dein PC für den Log-Führer des Netzes: Der Knoten, bei dem die Meldung abgegeben wird, kann ihn nicht lesen. Eine Meldung löst nichts automatisch aus; höchstens 10 Meldungen am Tag.' }),
+      found.net.contact ? h('p', { class: 'bc-muted bc-p0' }, 'Meldeweg des Betreibers: ', h('span', { class: 'bc-mono', text: found.net.contact })) : null,
+    ];
+    formDialog('„' + found.address + '“ melden', null, body, 'Melden', async () => {
+      if (!reason) {
+        const hint = document.getElementById('report-reason-hint');
+        hint.className = 'b-hint b-hint--err';
+        hint.replaceChildren(icon('err'), 'Bitte einen Grund wählen.');
+        hint.hidden = false;
+        return false;
+      }
+      const result = await api('POST', '/api/nodes/' + found.node + '/report', { target: found.name, reason, text: text.value });
+      toast('ok', result.duplicate ? 'Schon gemeldet' : 'Meldung gesendet', 'An die Admins von „' + result.net + '“.');
+      return true;
+    }, { wide: true });
+  }
+
+  // A page loaded before a node existed (or changed its port) does not allow framing it yet: load the page again -
+  // only for an origin that really is a reader of this PC (`frames` of /api/browser) and is not in this page's CSP,
+  // at most once per page load (review 9: a framed app that navigates to other 127.0.0.1 ports caused a reload loop).
+  let frameReloaded = false;
+  let frameChecking = false;
+  document.addEventListener('securitypolicyviolation', async (event) => {
+    if (frameReloaded || frameChecking || !String(event.violatedDirective || '').startsWith('frame-src')) return;
+    let origin = '';
+    try { origin = new URL(String(event.blockedURI || '')).origin; } catch (_) { return; }
+    const policy = String(event.originalPolicy || '').split(';').map((part) => part.trim().split(/\s+/));
+    const allowed = (policy.find((part) => part[0] === 'frame-src') || []).slice(1);
+    if (allowed.includes(origin)) return;
+    frameChecking = true;
+    let frames = [];
+    try { frames = (await api('GET', '/api/browser')).frames || []; } catch (_) { frames = []; }
+    frameChecking = false;
+    if (frameReloaded || !Array.isArray(frames) || !frames.includes(origin)) return;
+    // Across loads: never twice for the same origin (should the CSP still lack it, no loop).
+    let last = null;
+    try { last = sessionStorage.getItem('bc-frame-reload'); sessionStorage.setItem('bc-frame-reload', origin); } catch (_) { last = origin; }
+    if (last === origin) return;
+    frameReloaded = true;
+    location.reload();
+  });
 
   route();
 })();

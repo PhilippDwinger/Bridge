@@ -50,7 +50,8 @@ die Signaturen weg (ADR 0010).
 | `seal` | Knoten-/Dienst-ID, Stufe, Dienst-Arten | Admin (Stufe 2), Mehr-Augen (Stufe 3), Wächter (Stufe 1 automatisch) |
 | `revoke` | ID der widerrufenen Aussage oder Identität, Grund | wer ausstellen durfte, oder Owner |
 | `ban` | Identität, Dauer, Grund | Admin |
-| `name` | Name → Ziel-ID, Dienst-Art, Beschreibung, Schlagworte | Inhaber des Ziels (+ Freigabe nach Namensregel) |
+| `name` | Name → Ziel-ID, Art (`app`/`node`/`member`), Beschreibung, Schlagworte, Kategorie, Karten (08 §3) | Inhaber des Ziels nach den Namensregeln des Manifests; bei Apps App-Schlüssel **und** Inhaber (`sigs`) |
+| `label` | Ziel (Name oder ID), Kategorie `adult`/`general`, Grund (08 §5) | Admin mit Recht `seals` |
 | `log` | Log-Eintrag: Nummer, Hash des Vorgängers, Aussage | Stufe-3-Wächter |
 | `app` | Eine Version einer Bridge-App: Dateien (Pfad → Blob), Hosts, Karten von App-Schlüssel und Owner (07 §3) | App-Schlüssel **und** Owner (`sigs`, beide Pflicht); steht nicht im Log |
 
@@ -135,8 +136,10 @@ signiert sind, dient die Transport-Verschlüsselung nur dem Schutz der Metadaten
 | POST | `/v4/node/watch` | Knoten meldet sich beim Wächter zu Proben an; die Proben selbst nutzen `/v4/info` und `/v4/net/{netz}/head` (06 §11) |
 | POST | `/v4/blob/begin` · `/chunk` · `/info` · `/hashes` · `/get` | Dateien nach Inhalt hochladen und lesen (Phase 4a, 07 §7) |
 | POST | `/v4/app/publish` · `/v4/app/manifest` · `/v4/node/app` | App-Versionen abgeben, abfragen, unter Hosts anbieten (07 §7) |
-| GET | `/app/<app-id>/<pfad>` | Dateien einer App in abgeschotteter Herkunft ausliefern (07 §5) |
+| GET | `/app/<app-id>/<pfad>` | Dateien einer App in abgeschotteter Herkunft ausliefern (07 §5); auch nicht gehostete Apps als Leser für lokale Aufrufer (08 §8) |
 | OPTIONS | `/v4/…` | CORS-Vorabfrage von Browsern (07 §5) |
+| GET/POST | `/v4/names/info` · `/resolve` · `/search` · `/list` · `/submit` | Namen auflösen, suchen, eintragen (Phase 4, 08 §7) |
+| POST | `/v4/report` · `/v4/node/report` · `/v4/admin/reports` · `/v4/admin/report` | Meldungen abgeben, weiterreichen, lesen, erledigen (08 §6) |
 
 Die Bridge-API erlaubt Aufrufe aus Apps im Browser (Phase 4a): jede Antwort unter `/v4/` trägt
 `Access-Control-Allow-Origin: *`, nie `Allow-Credentials` (Sitzungen nur per Bearer-Token, keine Cookies).

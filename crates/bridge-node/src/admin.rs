@@ -24,8 +24,8 @@ use bridge_core::keys::check_url;
 use bridge_core::{Id, Identity, JoinLink, KeyCard, Mnemonic, Role, SignedRequest, Statement};
 use bridge_net::statements::DELEGATION_LIFETIME_MS;
 use bridge_net::{
-    Ban, Body, Delegation, Invite, JoinMode, Log, Manifest, NetState, Revoke, RevokeTarget, Rights, Seal, Service,
-    Services, WitnessedHead, issue_cosign, verify_head,
+    AdultPolicy, Ban, Body, Category, Delegation, Invite, JoinMode, Label, LabelTarget, Log, Manifest, NetState,
+    Revoke, RevokeTarget, Rights, Seal, Service, Services, WitnessedHead, issue_cosign, verify_head,
 };
 use bridge_store::Store;
 use bridge_transport::HttpClient;
@@ -65,12 +65,62 @@ pub struct Created {
     pub admin: Id,
     /// Join link for clients (with the owner node as gateway).
     pub link: String,
+    /// The network's short name (addresses `<name>.<short>`).
+    pub short: String,
+}
+
+/// Options of a new network that the template leaves open (docs/08 §2): short name, the operator's contact (Meldeweg)
+/// and the 18+ policy. `net create` requires the contact; older callers without it get a network flagged "ohne
+/// Meldeweg".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetOptions {
+    /// Short name for addresses `<name>.<short>` (`None`: derived from the network name, see [`derive_short`]).
+    pub short: Option<String>,
+    /// The operator's contact for reports (`None`: none - flagged everywhere).
+    pub contact: Option<String>,
+    /// 18+ allowed (`false`: forbidden, the default).
+    pub adult: bool,
+}
+
+/// A short name from a network name: lower-case ASCII letters and digits, everything else one `-`, at most 24
+/// characters; `netz` if too little is left.
+#[must_use]
+pub fn derive_short(name: &str) -> String {
+    let mut short = String::new();
+    for c in name.chars() {
+        let c = match c {
+            'ä' | 'Ä' => Some("ae"),
+            'ö' | 'Ö' => Some("oe"),
+            'ü' | 'Ü' => Some("ue"),
+            'ß' => Some("ss"),
+            _ => None,
+        }
+        .map(str::to_owned)
+        .unwrap_or_else(|| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase().to_string() } else { "-".to_owned() });
+        for c in c.chars() {
+            if c == '-' && (short.is_empty() || short.ends_with('-')) {
+                continue;
+            }
+            short.push(c);
+        }
+    }
+    short.truncate(bridge_net::names::MAX_SHORT_CHARS);
+    let short = short.trim_end_matches('-').to_owned();
+    if bridge_net::names::check_short(&short).is_ok() { short } else { "netz".to_owned() }
 }
 
 /// Creates a new network in `data_dir` (see module docs) with 24 new words. `url`: the public address of the owner
 /// node.
 pub fn create_network(data_dir: &Path, name: &str, url: &str, mode: JoinMode, now_ms: i64) -> Result<Created, String> {
-    create_network_with_words(data_dir, name, url, mode, now_ms, &Mnemonic::generate(&mut OsRng))
+    create_network_with_options(
+        data_dir,
+        name,
+        url,
+        mode,
+        now_ms,
+        &Mnemonic::generate(&mut OsRng),
+        &NetOptions::default(),
+    )
 }
 
 /// Like [`create_network`], with words made (and shown) before: BridgeControll shows the words in one step of its
@@ -83,6 +133,20 @@ pub fn create_network_with_words(
     mode: JoinMode,
     now_ms: i64,
     words: &Mnemonic,
+) -> Result<Created, String> {
+    create_network_with_options(data_dir, name, url, mode, now_ms, words, &NetOptions::default())
+}
+
+/// Like [`create_network_with_words`], with the options of docs/08 §2 (short name, contact, 18+ policy) in the
+/// genesis manifest.
+pub fn create_network_with_options(
+    data_dir: &Path,
+    name: &str,
+    url: &str,
+    mode: JoinMode,
+    now_ms: i64,
+    words: &Mnemonic,
+    options: &NetOptions,
 ) -> Result<Created, String> {
     check_url(url).map_err(|_| "--url: eine Adresse wie https://pc.tail1234.ts.net:8443/knoten1".to_owned())?;
     std::fs::create_dir_all(data_dir).map_err(|e| format!("Daten-Ordner: {e}"))?;
@@ -103,6 +167,19 @@ pub fn create_network_with_words(
     let mut manifest = Manifest::template(mode, name, master_card, node.id(), url)
         .map_err(|e| format!("Name oder Adresse ungültig: {e}"))?;
     manifest.gateways[0].card = Some(node_card.clone());
+    let short = options.short.clone().unwrap_or_else(|| derive_short(name));
+    bridge_net::names::check_short(&short)
+        .map_err(|_| "--short: 2-24 Zeichen a-z 0-9 -, nicht mit - beginnend oder endend".to_owned())?;
+    manifest.short = Some(short);
+    if let Some(contact) = &options.contact {
+        let count = contact.chars().count();
+        if count == 0 || count > bridge_net::names::MAX_CONTACT_CHARS || contact.chars().any(char::is_control) {
+            return Err("--contact: 1-200 Zeichen, z. B. eine E-Mail-Adresse".into());
+        }
+        manifest.contact = Some(contact.clone());
+    }
+    manifest.adult = Some(if options.adult { AdultPolicy::Allowed } else { AdultPolicy::Forbidden });
+    manifest.to_body().map_err(|e| format!("Manifest ungültig: {e}"))?;
     let admin = Identity::generate(&mut OsRng);
     let delegation = Delegation {
         admin: admin.id().clone(),
@@ -151,7 +228,8 @@ pub fn create_network_with_words(
     let link =
         JoinLink { net: net.clone(), gateway: url.to_owned(), code: None, node: Some(node.id().clone()), tls: None }
             .to_link();
-    Ok(Created { words: words.words(), net, node: node.id().clone(), admin: admin.id().clone(), link })
+    let short = manifest.short.clone().unwrap_or_default();
+    Ok(Created { words: words.words(), net, node: node.id().clone(), admin: admin.id().clone(), link, short })
 }
 
 /// A new invite code: 12 characters of Crockford Base32 in groups of four (60 bits).
@@ -575,6 +653,42 @@ impl AdminClient {
         let submitted = self.submit(&statement).await?;
         Ok((statement, submitted))
     }
+
+    /// Labels a name or an ID (docs/08 §5; needs the right `seals`) for `days` days.
+    pub async fn label(
+        &self,
+        target: LabelTarget,
+        category: Category,
+        days: u32,
+        reason: &str,
+    ) -> Result<(Statement, Submitted), String> {
+        let label = Label { target, category, reason: reason.to_owned() };
+        let statement =
+            self.sign(&label, i64::from(days.clamp(1, 730)) * DAY_MS).map_err(|e| format!("Kennzeichnung: {e}"))?;
+        let submitted = self.submit(&statement).await?;
+        Ok((statement, submitted))
+    }
+
+    /// A request signed by the admin key for the owner node.
+    fn request(&self, op: &str, body: Value) -> Result<Vec<u8>, String> {
+        SignedRequest::sign(&self.identity, &self.node, op, body, Self::now(), &mut OsRng)
+            .and_then(|request| request.to_bytes())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The reports at the owner node (docs/08 §6): `status` `open`, `done` or `all`; newest first, at most 100.
+    pub async fn reports(&self, status: &str, max: u32) -> Result<Vec<Value>, String> {
+        let body = self.request("reports", json!({"status": status, "max": max.clamp(1, 100)}))?;
+        let answer = self.answer(self.http.post("/v4/admin/reports", None, body).await, &self.url)?;
+        Ok(answer.get("reports").and_then(Value::as_array).cloned().unwrap_or_default())
+    }
+
+    /// Sets the status of a report (`open` or `done`).
+    pub async fn report_status(&self, id: &str, status: &str) -> Result<(), String> {
+        let body = self.request("report-status", json!({"id": id, "status": status}))?;
+        self.answer(self.http.post("/v4/admin/report", None, body).await, &self.url)?;
+        Ok(())
+    }
 }
 
 /// What `bridge-node net watch-status` shows (docs/06 §11.7): read from the data folder alone (database and log),
@@ -870,6 +984,61 @@ mod tests {
             let path = entry.map_err(|e| e.to_string())?.path();
             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
             assert!(!bytes.windows(created.words.len()).any(|w| w == created.words.as_bytes()), "{}", path.display());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn network_options_go_into_the_genesis() -> Result<(), String> {
+        assert_eq!(derive_short("Mein Netz"), "mein-netz");
+        assert_eq!(derive_short("Grüße & Bäume!"), "gruesse-baeume");
+        assert_eq!(derive_short("!!"), "netz");
+        assert_eq!(derive_short(&"x".repeat(40)).len(), 24);
+        let now = crate::SystemClock.now_ms();
+        let words = Mnemonic::generate(&mut OsRng);
+        let options =
+            NetOptions { short: Some("meinnetz".into()), contact: Some("abuse@example.org".into()), adult: true };
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let created = create_network_with_options(
+            dir.path(),
+            "Mein Netz",
+            "http://127.0.0.1:7400",
+            JoinMode::Open,
+            now,
+            &words,
+            &options,
+        )?;
+        assert_eq!(created.short, "meinnetz");
+        let store = Store::open(&dir.path().join(DB_FILE)).map_err(|e| e.to_string())?;
+        let entries = store.net_log_load(created.net.as_str(), 16).map_err(|e| e.to_string())?;
+        let manifest = NetState::replay(&created.net, &entries).map_err(|e| e.to_string())?.manifest().clone();
+        assert_eq!(manifest.short.as_deref(), Some("meinnetz"));
+        assert_eq!(manifest.contact.as_deref(), Some("abuse@example.org"));
+        assert_eq!(manifest.adult_policy(), AdultPolicy::Allowed);
+        // Without options: short from the name, 18+ forbidden, no contact (flagged).
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let created = create_network(dir.path(), "Mein Netz", "http://127.0.0.1:7400", JoinMode::Open, now)?;
+        assert_eq!(created.short, "mein-netz");
+        // Bad options are refused before anything is stored.
+        for bad in [
+            NetOptions { short: Some("Mein Netz".into()), ..NetOptions::default() },
+            NetOptions { contact: Some(String::new()), ..NetOptions::default() },
+            NetOptions { contact: Some("x".repeat(201)), ..NetOptions::default() },
+        ] {
+            let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+            assert!(
+                create_network_with_options(
+                    dir.path(),
+                    "N",
+                    "http://127.0.0.1:7400",
+                    JoinMode::Open,
+                    now,
+                    &words,
+                    &bad
+                )
+                .is_err()
+            );
+            assert!(!dir.path().join(ADMIN_KEY_FILE).exists(), "nothing stored");
         }
         Ok(())
     }

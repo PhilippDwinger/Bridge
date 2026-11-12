@@ -1,7 +1,7 @@
 //! # bridge-net – BridgeNet (docs/06)
 //!
 //! Pure logic of a network: typed statements (manifest, delegation, invite, member, seal, revoke, ban, head, cosign,
-//! home, app), the transparency log as an RFC 6962 Merkle tree with signed heads, witness cosignatures and split-view
+//! home, app, name, label), the transparency log as an RFC 6962 Merkle tree with signed heads, witness cosignatures and split-view
 //! evidence (ADR 0006), and the network state that every node computes by replaying the log in order (ADR 0009).
 //!
 //! No I/O, no clock (times are passed in), no global state, no randomness - every function is deterministic and
@@ -30,6 +30,7 @@ pub mod apps;
 pub mod error;
 pub mod log;
 pub mod merkle;
+pub mod names;
 pub mod state;
 pub mod statements;
 
@@ -40,7 +41,11 @@ pub use log::{
     verify_head,
 };
 pub use merkle::{Hash, Tree};
-pub use state::{Ahead, Applied, Endorsement, NetState, RulesAhead, SealInfo, Transition, Transitions};
+pub use names::{AdultPolicy, Category, Label, LabelTarget, Name, NameKind, NameRules};
+pub use state::{
+    Ahead, Applied, Endorsement, NameInfo, NetState, ResolvedName, RulesAhead, SealInfo, Search, Transition,
+    Transitions,
+};
 pub use statements::{
     AppRules, Approvals, Ban, Body, Cosign, Delegation, GatewayEntry, HeadBody, Home, Invite, Join, JoinMode, Kind,
     Limits, LogRules, Manifest, Member, Revoke, RevokeTarget, Right, Rights, Seal, Service, Services, WATCH_SERVICES,

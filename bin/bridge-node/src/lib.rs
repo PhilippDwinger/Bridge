@@ -3,8 +3,10 @@
 //! ```text
 //! bridge-node --data <folder> [--listen 127.0.0.1:7400] [--name <text>] [--url <public url>]...
 //!             [--trust-proxy <ip>]... [--pow-bits <n>] [--join-net <link>] [--lan <port>|<ip:port>]
-//!             [--standalone-blobs <MiB>] [--probe web|-]
-//! bridge-node net create --data <folder> --name <text> --url <public url> [--template open|invite|closed]
+//!             [--standalone-blobs <MiB>] [--probe web|-] [--reader off|local|lan|tailnet]
+//!             [--reader-listen 127.0.0.1:<port>]
+//! bridge-node net create --data <folder> --name <text> --url <public url> --contact <text> [--short <name>]
+//!                        [--template open|invite|closed] [--adult allowed|forbidden]
 //! bridge-node net invite --data <folder> [--uses 1] [--days 30] [--node <url>]
 //! bridge-node net seal   --data <folder> --node-url <url> --node-id <id> [--level <1-3>] [--services <list>]
 //!                        [--node <url>]
@@ -13,6 +15,12 @@
 //! bridge-node net rescue --data <folder> (--witnesses <ids> [--threshold <n>] [--logs <ids>] | --file <json>)
 //!                        [--node <url>]
 //! bridge-node net watch-status --data <folder>
+//! bridge-node net label  --data <folder> --target <name|id> --category adult|general [--reason <text>] [--days 365]
+//! bridge-node net reports --data <folder> [--status open|done|all] [--done <id>] [--open <id>]
+//! bridge-node name register --data <folder> --name <name> (--app <id> | --kind node|member) [--description <text>]
+//!                           [--tags a,b] [--category general|adult] [--days 365] [--node <url>]
+//! bridge-node name list   --data <folder> [--owner <id>] [--node <url>]
+//! bridge-node name revoke --data <folder> --name <name> [--reason <text>] [--node <url>]
 //! bridge-node app create  --data <folder> --name <text>
 //! bridge-node app publish --data <folder> --app <id> --folder <path> [--host <node-id>]... [--entry <file>]
 //!                         [--description <text>] [--node <url>]
@@ -20,7 +28,9 @@
 //! ```
 //! `net rescue` reads the 24 words from the terminal or standard input (one line, never shown, stored or logged; past
 //! std's stdin buffer, see `secret`).
-//! Behind Tailscale Funnel: `--listen 127.0.0.1:<port> --trust-proxy 127.0.0.1 --url https://…`. Stop with Ctrl+C.
+//! Behind Tailscale Funnel: `--listen 127.0.0.1:<port> --trust-proxy 127.0.0.1 --url https://…`, and for the own
+//! browser `--reader-listen 127.0.0.1:<other port>` (docs/08 §8: a loopback listener without proxy trust). Stop with
+//! Ctrl+C.
 //! LAN (docs/06 §2): `--lan 7443` listens with TLS on 0.0.0.0:7443, announces the node via mDNS and finds other
 //! nodes of its network there; the node's card then carries the fingerprint of its certificate (`node-tls.pem`).
 //! The `net` commands talk to the running owner node (address from `admin-key.json`, or `--node`).
@@ -32,7 +42,8 @@
 //!
 //! The whole program lives in this library so other programs can run a node the same way: [`run_cli`] is what the
 //! `bridge-node` binary does, [`run_node`] runs one node with the same flags until a given shutdown signal
-//! (BridgeControll v2 starts every node as its own process this way, ADR 0017).
+//! (BridgeControll v2 starts every node as its own process this way, ADR 0017). The modules [`apps`] and [`names`]
+//! are what `app …` and `name …` do - BridgeControll's owner dashboard uses them as they are.
 
 use std::future::Future;
 use std::io::Read;
@@ -44,10 +55,11 @@ use bridge_core::encoding::b64;
 use bridge_core::{Id, Identity, JoinLink, Mnemonic};
 use bridge_net::{RevokeTarget, Services, WATCH_SERVICES};
 use bridge_node::admin::{self, AdminClient};
-use bridge_node::{Clock as _, LanConfig, NetConfig, NodeConfig, PeerAddresses, SystemClock};
+use bridge_node::{Clock as _, LanConfig, NetConfig, NodeConfig, PeerAddresses, ReaderAccess, SystemClock};
 use tokio::net::TcpListener;
 
-mod apps;
+pub mod apps;
+pub mod names;
 mod secret;
 
 /// The usage text (German, it reaches people through the terminal).
@@ -55,13 +67,22 @@ pub const USAGE: &str = "Aufruf:
   bridge-node --data <ordner> [--listen 127.0.0.1:7400] [--name <text>] [--url <öffentliche adresse>]...
               [--trust-proxy <ip>]... [--pow-bits <0-28>] [--join-net <link> | --join-net-file <datei>]
               [--lan <port>] [--standalone-blobs <MiB>] [--probe web|-] [--peer-addresses public|tailnet|any]
+              [--reader off|local|lan|tailnet] [--reader-listen 127.0.0.1:<port>]
               (--lan 7443: auch im LAN per TLS auf 0.0.0.0:7443, per mDNS angekündigt; oder --lan <ip:port>)
               (--standalone-blobs: Hochladen von Dateien auf einem Knoten ohne Netz erlauben, höchstens so viele MiB)
               (--probe web: Wächter des Netzes prüfen den Knoten und geben ihm Stufe 1 mit Dienst web; - ohne Dienst)
               (--join-net-file: der Einladungslink steht in dieser Datei - so steht kein Code in der Prozessliste)
               (--peer-addresses: Adressen anderer Knoten, die kein Admin bestätigt hat - public: nur öffentliche
                (Standard), tailnet: dazu Tailscale 100.64.0.0/10 + fd7a:115c:a1e0::/48, any: alle; docs/06 §2)
-  bridge-node net create --data <ordner> --name <text> --url <öffentliche adresse> [--template open|invite|closed]
+              (--reader: Apps anderer Hosts für den eigenen Browser laden und prüfen - local: nur dieser PC
+               (Standard), lan: auch das Heimnetz (10/8, 172.16/12, 192.168/16, IPv6-ULA ohne Tailscale), tailnet:
+               auch das eigene Tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48), off: aus; docs/08 §8)
+              (--reader-listen: ein zweiter Zugang nur für diesen PC (127.0.0.1 oder [::1]) mit Leser und
+               Namenssuche, ohne Proxy-Vertrauen - für Knoten hinter Tailscale Funnel; docs/08 §8)
+  bridge-node net create --data <ordner> --name <text> --url <öffentliche adresse> --contact <meldeweg>
+                         [--short <kurzname>] [--template open|invite|closed] [--adult allowed|forbidden]
+                         (--contact: wie man dich als Betreiber erreicht, z. B. eine E-Mail - Pflicht; --short: für
+                         Adressen wie shop.<kurzname>, sonst aus dem Namen; --adult: Standard forbidden)
   bridge-node net invite --data <ordner> [--uses 1] [--days 30] [--node <adresse>]
   bridge-node net seal   --data <ordner> --node-url <adresse> --node-id <id> [--level 1-3] [--services gateway,…]
                          [--node <adresse>]   (--node-id: die ID, die der Knoten beim Start anzeigt; ohne --level/
@@ -71,6 +92,14 @@ pub const USAGE: &str = "Aufruf:
   bridge-node net rescue --data <ordner> (--witnesses <id,…> [--threshold n] [--logs <id,…>] | --file <json>)
                          [--node <adresse>]   (Not-Wiederherstellung mit den 24 Wörtern, siehe docs/06 §5)
   bridge-node net watch-status --data <ordner>   (was der Wächter in diesem Ordner tut, docs/06 §11)
+  bridge-node net label  --data <ordner> --target <name|id> --category adult|general [--reason <text>] [--days 365]
+                         (Kennzeichnung durch einen Admin mit Recht seals, docs/08 §5)
+  bridge-node net reports --data <ordner> [--status open|done|all] [--done <id>] [--open <id>] [--node <adresse>]
+                         (Meldungen der Mitglieder lesen und erledigen, docs/08 §6)
+  bridge-node name register --data <ordner> --name <name> (--app <id> | --kind node|member) [--description <text>]
+                         [--tags a,b] [--category general|adult] [--days 365] [--node <adresse>]
+  bridge-node name list   --data <ordner> [--owner <id>] [--node <adresse>]
+  bridge-node name revoke --data <ordner> --name <name> [--reason <text>] [--node <adresse>]
   bridge-node app create  --data <ordner> --name <text>   (App-Schlüssel in <ordner>/apps/<app-id>.json)
   bridge-node app publish --data <ordner> --app <id> --folder <pfad> [--host <knoten-id>]... [--entry index.html]
                           [--description <text>] [--node <adresse>]   (neue Version; Hosts brauchen ein Siegel mit
@@ -146,6 +175,8 @@ fn run_args(flags: &Flags) -> Result<Run, String> {
         "--probe",
         "--join-net-file",
         "--peer-addresses",
+        "--reader",
+        "--reader-listen",
     ])?;
     let mut config = NodeConfig::new(flags.need("--data")?);
     let listen = match flags.one("--listen") {
@@ -193,7 +224,28 @@ fn run_args(flags: &Flags) -> Result<Run, String> {
     if let Some(probe) = flags.one("--probe") {
         config.probe = Some(probe_services(probe)?);
     }
+    if let Some(reader) = flags.one("--reader") {
+        config.reader.access = ReaderAccess::parse(reader).ok_or("--reader: off, local, lan oder tailnet")?;
+    }
+    if let Some(text) = flags.one("--reader-listen") {
+        config.reader_listen = Some(reader_listen(text)?);
+    }
     Ok(Run { config, listen })
+}
+
+/// `--reader-listen 127.0.0.1:7500` (or just the port, on 127.0.0.1): only a loopback address (docs/08 §8).
+fn reader_listen(text: &str) -> Result<SocketAddr, String> {
+    let address = match text.parse::<u16>() {
+        Ok(port) => SocketAddr::from(([127, 0, 0, 1], port)),
+        Err(_) => text.parse::<SocketAddr>().map_err(|_| "--reader-listen: z. B. 127.0.0.1:7500".to_owned())?,
+    };
+    if !address.ip().is_loopback() {
+        return Err("--reader-listen: nur 127.0.0.1 oder [::1] - der Zugang ist allein für diesen PC".into());
+    }
+    if address.port() == 0 {
+        return Err("--reader-listen: Port 1-65535".into());
+    }
+    Ok(address)
 }
 
 /// `--join-net-file`: the join link from a file (at most 4 KiB, outer whitespace ignored) - so no invite code shows
@@ -247,6 +299,9 @@ async fn run(flags: &Flags, shutdown: impl Future<Output = ()>) -> Result<(), St
         TcpListener::bind(run.listen).await.map_err(|e| format!("kann nicht auf {} lauschen: {e}", run.listen))?;
     let node = bridge_node::start(run.config, listener).await.map_err(|e| format!("Start fehlgeschlagen: {e}"))?;
     println!("Bridge-4-Knoten {} lauscht auf http://{}", node.card().id(), node.local_addr());
+    if let Some(addr) = node.reader_addr() {
+        println!("Leser für den eigenen Browser: http://{addr} (nur dieser PC, ohne Proxy)");
+    }
     if let (Some(addr), Some(pin)) = (node.lan_addr(), node.card().tls()) {
         println!("LAN: https://{addr} (TLS), Fingerabdruck {}", b64(pin));
         if node.lan_announced() {
@@ -273,11 +328,31 @@ pub fn is_info(message: &str) -> bool {
 }
 
 fn create(flags: &Flags) -> Result<(), String> {
-    flags.only(&["--data", "--name", "--url", "--template"])?;
+    flags.only(&["--data", "--name", "--url", "--template", "--short", "--contact", "--adult"])?;
     let data = PathBuf::from(flags.need("--data")?);
     let mode = admin::parse_template(flags.one("--template").unwrap_or("open"))?;
-    let created =
-        admin::create_network(&data, flags.need("--name")?, flags.need("--url")?, mode, SystemClock.now_ms())?;
+    let contact = flags.one("--contact").ok_or_else(|| {
+        format!(
+            "--contact fehlt: Als Betreiber eines Netzes brauchst du einen Meldeweg (z. B. eine E-Mail-Adresse), über \
+             den man dir Missbrauch melden kann (NUTZUNGSREGELN.md).\n{USAGE}"
+        )
+    })?;
+    let adult = match flags.one("--adult").unwrap_or("forbidden") {
+        "allowed" => true,
+        "forbidden" => false,
+        _ => return Err("--adult: allowed oder forbidden".into()),
+    };
+    let options =
+        admin::NetOptions { short: flags.one("--short").map(str::to_owned), contact: Some(contact.to_owned()), adult };
+    let created = admin::create_network_with_options(
+        &data,
+        flags.need("--name")?,
+        flags.need("--url")?,
+        mode,
+        SystemClock.now_ms(),
+        &Mnemonic::generate(&mut rand_core::OsRng),
+        &options,
+    )?;
     println!("Neues BridgeNet erstellt.");
     println!("  Netz-ID:       {}", created.net);
     println!("  Owner-Knoten:  {} (Log-Führer, Zeuge, Empfänger)", created.node);
@@ -300,6 +375,8 @@ fn create(flags: &Flags) -> Result<(), String> {
     println!();
     println!("Starten:          bridge-node --data {} --listen <ip:port, wo die Adresse ankommt>", data.display());
     println!("Link für Clients: {}", created.link);
+    println!("Adressen:         <name>.{} (Meldeweg: {contact})", created.short);
+    println!("Als Betreiber bist du für dein Netz verantwortlich - siehe NUTZUNGSREGELN.md.");
     Ok(())
 }
 
@@ -389,7 +466,132 @@ async fn admin_command(command: &str, flags: &Flags) -> Result<(), String> {
                 println!("Der Log-Führer hat das cosign angenommen, meldet den Kopf aber noch nicht als bezeugt.");
             }
         }
+        "label" => {
+            flags.only(&["--data", "--node", "--target", "--category", "--reason", "--days"])?;
+            let target = bridge_net::LabelTarget::parse(flags.need("--target")?)
+                .map_err(|_| "--target: ein Name oder eine ID".to_owned())?;
+            let category =
+                bridge_net::Category::parse(flags.need("--category")?).ok_or("--category: adult oder general")?;
+            let (statement, submitted) = client
+                .label(target, category, flags.number("--days", 365)?, flags.one("--reason").unwrap_or(""))
+                .await?;
+            println!("Gekennzeichnet als {} (Log-Eintrag {}).", category.as_str(), submitted.index);
+            println!("Zum Aufheben: bridge-node net revoke --data {} --statement {}", data.display(), statement.hash());
+        }
+        "reports" => {
+            flags.only(&["--data", "--node", "--status", "--done", "--open"])?;
+            if let Some(id) = flags.one("--done") {
+                client.report_status(id, "done").await?;
+                println!("Meldung {id} ist erledigt.");
+                return Ok(());
+            }
+            if let Some(id) = flags.one("--open") {
+                client.report_status(id, "open").await?;
+                println!("Meldung {id} ist wieder offen.");
+                return Ok(());
+            }
+            let status = flags.one("--status").unwrap_or("open");
+            if !["open", "done", "all"].contains(&status) {
+                return Err("--status: open, done oder all".into());
+            }
+            let reports = client.reports(status, 100).await?;
+            println!("{} Meldungen ({status}):", reports.len());
+            for report in &reports {
+                let text = |name: &str| report.get(name).and_then(serde_json::Value::as_str).unwrap_or("-").to_owned();
+                println!(
+                    "  {}  {}  Grund {}  von {}  über {}  [{}]",
+                    text("id"),
+                    text("target"),
+                    text("reason"),
+                    text("reporter"),
+                    text("via"),
+                    text("status")
+                );
+                match report.get("text").and_then(serde_json::Value::as_str) {
+                    Some("") => {}
+                    Some(message) => println!("      „{}“", message.replace('\n', " / ")),
+                    // Sealed to another log operator (review 9): only that node can open the text.
+                    None => println!("      (Text nur für den Log-Führer {} lesbar)", text("sealed_to")),
+                }
+            }
+            println!("Eine Meldung löst nichts von selbst aus. Werkzeuge: net label, net revoke, net ban.");
+        }
         other => return Err(format!("unbekannter Befehl net {other}\n{USAGE}")),
+    }
+    Ok(())
+}
+
+/// `bridge-node name …` (docs/08 §10).
+async fn name_command(command: &str, flags: &Flags) -> Result<(), String> {
+    let data = PathBuf::from(flags.need("--data")?);
+    match command {
+        "register" => {
+            flags.only(&[
+                "--data",
+                "--node",
+                "--name",
+                "--app",
+                "--kind",
+                "--description",
+                "--tags",
+                "--category",
+                "--days",
+            ])?;
+            let target = match (flags.one("--app"), flags.one("--kind")) {
+                (Some(app), None) => names::Target::App(Id::parse(app).map_err(|_| "--app: eine App-ID")?),
+                (None, Some("node")) => names::Target::Node,
+                (None, Some("member")) => names::Target::Member,
+                _ => return Err(format!("genau eins von --app <id> oder --kind node|member\n{USAGE}")),
+            };
+            let tags: Vec<String> = flags
+                .one("--tags")
+                .map(|tags| tags.split(',').map(|tag| tag.trim().to_owned()).filter(|tag| !tag.is_empty()).collect())
+                .unwrap_or_default();
+            let category = bridge_net::Category::parse(flags.one("--category").unwrap_or("general"))
+                .ok_or("--category: general oder adult")?;
+            let request = names::Request {
+                name: flags.need("--name")?,
+                target,
+                description: flags.one("--description").unwrap_or(""),
+                tags,
+                category,
+                days: flags.number("--days", 365)?,
+            };
+            let done = names::register(&data, request, flags.one("--node")).await?;
+            println!("Name {} angemeldet (Log-Eintrag {}).", done.address, done.index);
+            println!(
+                "Aussage: {} - zum Abmelden: bridge-node name revoke --data {} --name {}",
+                done.hash,
+                data.display(),
+                flags.need("--name")?
+            );
+        }
+        "list" => {
+            flags.only(&["--data", "--node", "--owner"])?;
+            let owner = flags.one("--owner").map(Id::parse).transpose().map_err(|_| "--owner: eine ID")?;
+            let (listed, total) = names::list(&data, owner.as_ref(), flags.one("--node")).await?;
+            println!("{} Namen (im Netz insgesamt {total}):", listed.len());
+            for name in &listed {
+                println!(
+                    "  {:<32} {:<6} Ziel {}  Inhaber {}  {}  noch {}  ({})",
+                    name.address,
+                    name.kind,
+                    name.target,
+                    name.owner,
+                    name.status,
+                    duration(name.left_ms),
+                    name.hash
+                );
+            }
+        }
+        "revoke" => {
+            flags.only(&["--data", "--node", "--name", "--reason"])?;
+            let name = flags.need("--name")?;
+            let (who, index) =
+                names::revoke(&data, name, flags.one("--reason").unwrap_or(""), flags.one("--node")).await?;
+            println!("Name {name} {who} widerrufen (Log-Eintrag {index}).");
+        }
+        other => return Err(format!("unbekannter Befehl name {other}\n{USAGE}")),
     }
     Ok(())
 }
@@ -601,6 +803,13 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
             Ok(flags) => app_command(&command, &Flags(flags)).await,
             Err(message) => Err(message),
         }
+    } else if args.peek().map(String::as_str) == Some("name") {
+        args.next();
+        let command = args.next().unwrap_or_default();
+        match flags(args) {
+            Ok(flags) => name_command(&command, &Flags(flags)).await,
+            Err(message) => Err(message),
+        }
     } else if args.peek().map(String::as_str) == Some("net") {
         args.next();
         let command = args.next().unwrap_or_default();
@@ -713,6 +922,24 @@ mod tests {
         for bad in ["gateway", "web,watch", "storage", "", "x"] {
             assert!(run_args(&args(&["--data", "d", "--probe", bad])?).is_err(), "{bad}");
         }
+        Ok(())
+    }
+
+    /// Review 9: `--reader tailnet` and the loopback listener for the own browser (`--reader-listen`, loopback only).
+    #[test]
+    fn reader_flags() -> Result<(), String> {
+        let config = run_args(&args(&["--data", "d"])?)?.config;
+        assert_eq!((config.reader.access, config.reader_listen), (ReaderAccess::Local, None), "defaults");
+        let tailnet = run_args(&args(&["--data", "d", "--reader", "tailnet"])?)?.config;
+        assert_eq!(tailnet.reader.access, ReaderAccess::Tailnet);
+        let local = run_args(&args(&["--data", "d", "--reader-listen", "7500"])?)?.config;
+        assert_eq!(local.reader_listen, Some(SocketAddr::from(([127, 0, 0, 1], 7500))));
+        let v6 = run_args(&args(&["--data", "d", "--reader-listen", "[::1]:7501"])?)?.config;
+        assert_eq!(v6.reader_listen.map(|addr| addr.port()), Some(7501));
+        for bad in ["0.0.0.0:7500", "192.168.1.2:7500", "100.64.0.1:7500", "127.0.0.1:0", "0", "x"] {
+            assert!(run_args(&args(&["--data", "d", "--reader-listen", bad])?).is_err(), "{bad}");
+        }
+        assert!(run_args(&args(&["--data", "d", "--reader", "all"])?).is_err());
         Ok(())
     }
 

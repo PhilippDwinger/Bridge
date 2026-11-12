@@ -21,6 +21,7 @@ bridge-net.workspace = true
 bridge-node.workspace = true
 bridge-node-cli.workspace = true
 bridge-transport.workspace = true
+bridge-sdk.workspace = true
 tokio = { workspace = true, features = ["process", "io-std"] }
 hyper.workspace = true
 hyper-util.workspace = true
@@ -37,4 +38,3 @@ fs4.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 reqwest.workspace = true
-bridge-sdk.workspace = true

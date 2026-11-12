@@ -2,6 +2,10 @@
 //! in the answer to that POST), checked with a short quiz, and used in step 4 to create the network. In between they
 //! live only here, in memory, wiped on drop ([`Mnemonic`] keeps its entropy in `Zeroizing`): never written to disk,
 //! never logged, never in a URL. An assistant that is not finished within [`WIZARD_TTL_MS`] is dropped.
+//!
+//! Step 1 also asks for the rules a network needs from its operator (docs/08 §2, ADR 0018): the Meldeweg (`contact`,
+//! required), the short name for addresses (`short`, from the network name unless given) and the 18+ policy (default
+//! forbidden) - checked here, before any words are made ([`net_options`]).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -9,6 +13,7 @@ use std::sync::Mutex;
 use bridge_core::Mnemonic;
 use bridge_core::encoding::b64;
 use bridge_net::JoinMode;
+use bridge_node::admin::{NetOptions, derive_short};
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
@@ -25,6 +30,8 @@ pub struct Wizard {
     pub name: String,
     /// Its template.
     pub mode: JoinMode,
+    /// Short name, Meldeweg and 18+ policy of the genesis manifest.
+    pub options: NetOptions,
     /// The master key's words (never leave this process except in the answer of step 2).
     pub words: Mnemonic,
     /// Positions (1-24) asked in the quiz, ascending.
@@ -48,7 +55,13 @@ impl Wizards {
 
     /// Starts an assistant with new words. Returns its ID, the words (to show once) and the quiz positions. The
     /// oldest assistant goes when [`MAX_WIZARDS`] are open.
-    pub fn begin(&self, name: String, mode: JoinMode, now: i64) -> (String, Zeroizing<String>, [usize; QUIZ_WORDS]) {
+    pub fn begin(
+        &self,
+        name: String,
+        mode: JoinMode,
+        options: NetOptions,
+        now: i64,
+    ) -> (String, Zeroizing<String>, [usize; QUIZ_WORDS]) {
         let words = Mnemonic::generate(&mut OsRng);
         let quiz = quiz_positions(&mut OsRng);
         let mut id = [0u8; 16];
@@ -63,7 +76,7 @@ impl Wizards {
             };
             open.remove(&oldest);
         }
-        open.insert(id.clone(), Wizard { name, mode, words, quiz, confirmed: false, created: now });
+        open.insert(id.clone(), Wizard { name, mode, options, words, quiz, confirmed: false, created: now });
         (id, text, quiz)
     }
 
@@ -123,6 +136,41 @@ impl Wizards {
     }
 }
 
+/// The options of a new network from step 1 (German errors by field): `contact` 1-200 characters without control
+/// characters (required - the operator must be reachable for reports, NUTZUNGSREGELN.md), `short` the network's short
+/// name (`a-z 0-9 -`, 2-24; empty: derived from `name`), `adult` `allowed` or `forbidden` (empty: forbidden).
+pub fn net_options(name: &str, contact: &str, short: &str, adult: &str) -> Result<NetOptions, (&'static str, String)> {
+    let contact = contact.trim();
+    let count = contact.chars().count();
+    if count == 0 {
+        return Err((
+            "contact",
+            "Bitte einen Meldeweg angeben (z. B. eine E-Mail-Adresse) - als Betreiber musst du für Meldungen \
+             erreichbar sein."
+                .into(),
+        ));
+    }
+    if count > bridge_net::names::MAX_CONTACT_CHARS || contact.chars().any(char::is_control) {
+        return Err(("contact", "Meldeweg: höchstens 200 Zeichen, keine Steuerzeichen".into()));
+    }
+    let short = match short.trim() {
+        "" => derive_short(name),
+        given => given.to_owned(),
+    };
+    if bridge_net::names::check_short(&short).is_err() {
+        return Err((
+            "short",
+            "Kurzname: 2-24 Zeichen a-z, 0-9 und -, nicht mit - beginnend oder endend, kein --".into(),
+        ));
+    }
+    let adult = match adult {
+        "" | "forbidden" => false,
+        "allowed" => true,
+        _ => return Err(("adult", "18+: allowed oder forbidden".into())),
+    };
+    Ok(NetOptions { short: Some(short), contact: Some(contact.to_owned()), adult })
+}
+
 fn live<'a>(open: &'a mut HashMap<String, Wizard>, id: &str, now: i64) -> Result<&'a mut Wizard, String> {
     open.retain(|_, wizard| now.saturating_sub(wizard.created) < WIZARD_TTL_MS);
     open.get_mut(id).ok_or_else(|| "Assistent abgelaufen - bitte neu beginnen.".to_owned())
@@ -158,7 +206,7 @@ mod tests {
     #[test]
     fn quiz_must_be_passed_before_taking() -> Result<(), String> {
         let wizards = Wizards::default();
-        let (id, words, quiz) = wizards.begin("Testnetz".into(), JoinMode::Invite, 0);
+        let (id, words, quiz) = wizards.begin("Testnetz".into(), JoinMode::Invite, NetOptions::default(), 0);
         assert_eq!(words.split(' ').count(), 24);
         assert!(quiz[0] < quiz[1] && quiz[1] < quiz[2] && quiz[0] >= 1 && quiz[2] <= 24, "{quiz:?}");
         assert!(wizards.take(&id, 1).is_err(), "not confirmed yet");
@@ -181,13 +229,49 @@ mod tests {
     #[test]
     fn expiry_and_bounds() {
         let wizards = Wizards::default();
-        let (id, _, _) = wizards.begin("A".into(), JoinMode::Open, 0);
+        let (id, _, _) = wizards.begin("A".into(), JoinMode::Open, NetOptions::default(), 0);
         assert!(wizards.confirm(&id, &[], true, WIZARD_TTL_MS).is_err(), "expired");
-        let ids: Vec<String> = (0..6).map(|n| wizards.begin("B".into(), JoinMode::Open, n).0).collect();
+        let ids: Vec<String> =
+            (0..6).map(|n| wizards.begin("B".into(), JoinMode::Open, NetOptions::default(), n).0).collect();
         assert_eq!(wizards.lock().len(), MAX_WIZARDS);
         assert!(!wizards.lock().contains_key(&ids[0]), "the oldest went");
         wizards.cancel(&ids[5]);
         assert!(!wizards.lock().contains_key(&ids[5]));
+    }
+
+    /// Docs/08 §2: a new network needs a Meldeweg; the short name comes from the name unless given; 18+ is forbidden
+    /// unless chosen.
+    #[test]
+    fn options_of_a_new_network() {
+        let options = net_options("Grüße & Bäume", " abuse@example.org ", "", "");
+        assert_eq!(
+            options,
+            Ok(NetOptions {
+                short: Some("gruesse-baeume".into()),
+                contact: Some("abuse@example.org".into()),
+                adult: false
+            })
+        );
+        assert_eq!(
+            net_options("X", "a@b.de", "meinnetz", "allowed").map(|o| (o.short, o.adult)),
+            Ok((Some("meinnetz".into()), true))
+        );
+        for (contact, short, adult, field) in [
+            ("", "", "", "contact"),
+            ("   ", "", "", "contact"),
+            ("a\u{7}b", "", "", "contact"),
+            (&"x".repeat(201), "", "", "contact"),
+            ("a@b.de", "Mein Netz", "", "short"),
+            ("a@b.de", "-x", "", "short"),
+            ("a@b.de", "a--b", "", "short"),
+            ("a@b.de", "", "yes", "adult"),
+        ] {
+            assert_eq!(
+                net_options("Netz", contact, short, adult).err().map(|(field, _)| field),
+                Some(field),
+                "{contact:?} {short:?}"
+            );
+        }
     }
 
     #[test]

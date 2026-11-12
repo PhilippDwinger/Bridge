@@ -198,7 +198,8 @@ async fn security_headers_on_every_answer() -> TestResult {
     // The words of the assistant only come with a POST; GET knows no assistant.
     let (status, _) = app.get("/api/wizard/start").await?;
     assert_eq!(status, 404);
-    let started = app.ok("/api/wizard/start", &json!({"name": "Netz", "template": "open"})).await?;
+    let started =
+        app.ok("/api/wizard/start", &json!({"name": "Netz", "template": "open", "contact": common::CONTACT})).await?;
     assert_eq!(started["words"].as_array().map(Vec::len), Some(24));
     app.shutdown().await;
     Ok(())
@@ -329,6 +330,111 @@ async fn admin_api_refuses_harm() -> TestResult {
         json!({"listen_port": 7999, "lan_port": null, "autostart": true, "name": "a\nb"}),
     ] {
         assert_eq!(app.post(&format!("/api/nodes/{owner}/settings"), &body).await?.0, 400, "{body}");
+    }
+    app.shutdown().await;
+    Ok(())
+}
+
+/// The `Content-Security-Policy` of an answer (lower case).
+async fn csp_of(app: &common::TestApp, path: &str) -> Result<String, String> {
+    let host = format!("127.0.0.1:{}", app.port);
+    let answer = raw(app.port, &get_request(path, &host, Some(&app.cookie))).await?.to_lowercase();
+    let head = answer.split("\r\n\r\n").next().unwrap_or_default().to_owned();
+    head.lines()
+        .find_map(|line| line.strip_prefix("content-security-policy: ").map(str::to_owned))
+        .ok_or_else(|| format!("{path}: no CSP"))
+}
+
+/// Docs/08 §12: the page may frame exactly the readers of this PC's nodes (`http://127.0.0.1:<port>`) - nothing
+/// before a node exists, nothing for API answers, nothing for a node with the reader off; everything else stays strict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_frames_only_the_own_node_readers() -> TestResult {
+    let app = start().await?;
+    assert!(csp_of(&app, "/").await?.contains("frame-src 'none'"), "no node yet");
+    let (owner, _) = app.create_net("Rahmennetz", "open").await?;
+    let port = app.row(&owner).await?["listen_port"].as_u64().ok_or("no port")?;
+    let page = csp_of(&app, "/").await?;
+    assert!(page.contains(&format!("frame-src http://127.0.0.1:{port};")), "{page}");
+    assert!(
+        page.contains("frame-ancestors 'none'") && page.contains("default-src 'self'") && !page.contains('*'),
+        "{page}"
+    );
+    assert!(page.contains("script-src 'self'") && page.contains("connect-src 'self'"), "{page}");
+    for path in ["/api/overview", "/api/browser", "/ui/app.js", "/design/tokens.css"] {
+        assert!(csp_of(&app, path).await?.contains("frame-src 'none'"), "{path}");
+    }
+    // Reader off: the node is no longer framed.
+    let row = app.row(&owner).await?;
+    app.ok(
+        &format!("/api/nodes/{owner}/settings"),
+        &json!({"listen_port": row["listen_port"], "lan_port": null, "autostart": true, "reader": "off"}),
+    )
+    .await?;
+    assert_eq!(app.row(&owner).await?["reader"], "off");
+    assert!(csp_of(&app, "/").await?.contains("frame-src 'none'"));
+    let bad = app
+        .post(
+            &format!("/api/nodes/{owner}/settings"),
+            &json!({"listen_port": row["listen_port"], "lan_port": null, "autostart": true, "reader": "alle"}),
+        )
+        .await?;
+    assert_eq!(bad.0, 400);
+    app.shutdown().await;
+    Ok(())
+}
+
+/// The page never builds HTML from data (names, descriptions, report texts go in with `textContent`), and the app
+/// frame is sandboxed without `allow-same-origin`, the sandbox set before the address.
+#[test]
+fn the_ui_renders_data_as_text_and_sandboxes_apps() {
+    let js = String::from_utf8_lossy(bridgecontroll::assets::get("/ui/app.js").map_or(&[][..], |asset| asset.bytes))
+        .to_string();
+    assert!(js.len() > 10_000);
+    for forbidden in
+        [".innerHTML", ".outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "srcdoc"]
+    {
+        assert!(!js.contains(forbidden), "{forbidden} in app.js");
+    }
+    for forbidden in ["allow-same-origin", "allow-top-navigation", "allow-popups-to-escape-sandbox", "allow-modals"] {
+        // Only the comment that forbids it may name allow-same-origin.
+        let uses = js.matches(forbidden).count();
+        let allowed = usize::from(forbidden == "allow-same-origin");
+        assert!(uses <= allowed, "{forbidden}: {uses}×");
+    }
+    let sandbox = js.find("setAttribute('sandbox', 'allow-scripts allow-forms allow-popups')").unwrap_or(usize::MAX);
+    let src = js.find("frame.src = found.url").unwrap_or(0);
+    assert!(sandbox < src, "the sandbox is set before the address");
+    assert_eq!(js.matches("createElement('iframe')").count(), 1, "one place makes frames");
+    // The text of a new tab carries no opener and no referrer.
+    assert!(js.contains("rel: 'noopener noreferrer'"));
+}
+
+/// The browser API refuses what it does not understand (fail closed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_browser_api_refuses_garbage() -> TestResult {
+    let app = start().await?;
+    let (_, empty) = app.get("/api/browser").await?;
+    assert_eq!(empty["nets"], json!([]));
+    for body in [
+        json!({"address": ""}),
+        json!({"address": "x".repeat(81)}),
+        json!({"address": "shop.<script>"}),
+        json!({"address": "shop", "node": "../../x"}),
+        json!({"address": "shop", "safe": "ja"}),
+        json!({"address": "shop"}),
+    ] {
+        assert_eq!(app.post("/api/browser/resolve", &body).await?.0, 400, "{body}");
+    }
+    for body in [json!({"node": "0a1b2c3d", "q": "shop"}), json!({"node": "x", "q": "shop"}), json!({"q": "shop"})] {
+        assert_eq!(app.post("/api/browser/search", &body).await?.0, 400, "{body}");
+    }
+    for path in ["/api/nodes/0a1b2c3d/reports", "/api/nodes/ZZZZ/reports", "/api/nodes/../reports"] {
+        let (status, _) = app.get(path).await?;
+        assert!(matches!(status, 400 | 404), "{path}: {status}");
+    }
+    for action in ["report", "name-register", "name-revoke", "report-status", "report-action", "contact"] {
+        let (status, _) = app.post(&format!("/api/nodes/0a1b2c3d/{action}"), &json!({})).await?;
+        assert!(matches!(status, 400 | 404), "{action}: {status}");
     }
     app.shutdown().await;
     Ok(())

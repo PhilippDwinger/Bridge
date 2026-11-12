@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use bridge_core::json::parse_strict;
+use bridge_node::ReaderAccess;
 use bridge_transport::PeerAddresses;
 use serde_json::{Map, Value, json};
 
@@ -85,6 +86,12 @@ pub struct NodeEntry {
     /// Which addresses other nodes chose the node calls (`--peer-addresses`, docs/06 §2): BridgeControll's default is
     /// `tailnet` (public + Tailscale's ranges); the settings offer "Öffentlich", "Öffentlich + Tailnet", "Alle".
     pub peer_addresses: PeerAddresses,
+    /// Who may use the node's reader (`--reader`, docs/08 §8): `local` (default, the Bridge-Browser of this PC),
+    /// `lan`, `tailnet` or `off`.
+    pub reader: ReaderAccess,
+    /// The port of the node's loopback reader on 127.0.0.1 (`--reader-listen`, review 9): only for a node with a public
+    /// address, whose main port trusts the local proxy (Tailscale Funnel) - the Bridge-Browser of this PC uses this one.
+    pub reader_port: Option<u16>,
     /// Created (ms since 1970).
     pub created: i64,
 }
@@ -116,6 +123,8 @@ impl NodeEntry {
             "probe": self.probe,
             "offer_gateway": self.offer_gateway,
             "peer_addresses": self.peer_addresses.as_str(),
+            "reader": self.reader.as_str(),
+            "reader_port": self.reader_port,
             "created": self.created,
         })
     }
@@ -127,8 +136,20 @@ impl NodeEntry {
             None => PeerAddresses::Tailnet,
             Some(value) => value.as_str().and_then(PeerAddresses::parse).ok_or("Knoten: peer_addresses")?,
         };
+        // `reader` came with the Bridge-Browser: a file without it means the node's default (`local`).
+        let reader = match object.get("reader") {
+            None => ReaderAccess::Local,
+            Some(value) => value.as_str().and_then(ReaderAccess::parse).ok_or("Knoten: reader")?,
+        };
+        // `reader_port` came with the loopback reader (review 9): a file without it means none (yet).
+        let reader_port = match object.get("reader_port") {
+            None | Some(Value::Null) => None,
+            other => Some(port(other).ok_or("Knoten: reader_port")?),
+        };
         let mut object = object.clone();
         object.remove("peer_addresses");
+        object.remove("reader");
+        object.remove("reader_port");
         let object = &object;
         exact(
             object,
@@ -170,6 +191,8 @@ impl NodeEntry {
             probe: optional_text("probe")?,
             offer_gateway: flag("offer_gateway")?,
             peer_addresses,
+            reader,
+            reader_port,
             created: object.get("created").and_then(Value::as_i64).ok_or("Knoten: created")?,
         };
         entry.check()?;
@@ -188,6 +211,11 @@ impl NodeEntry {
         }
         if self.lan_port == Some(self.listen_port) {
             return Err("LAN-Port und Port müssen verschieden sein".into());
+        }
+        if let Some(reader) = self.reader_port {
+            if reader < MIN_PORT || reader == self.listen_port || Some(reader) == self.lan_port {
+                return Err(format!("Leser-Port: ab {MIN_PORT}, verschieden von Port und LAN-Port"));
+            }
         }
         if let Some(url) = &self.public_url {
             bridge_core::keys::check_url(url).map_err(|_| format!("Adresse {url:?} ist ungültig"))?;
@@ -291,7 +319,7 @@ impl AppConfig {
             if !ids.insert(node.id.as_str()) {
                 return Err(format!("Knoten {} doppelt", node.id));
             }
-            for port in std::iter::once(node.listen_port).chain(node.lan_port) {
+            for port in std::iter::once(node.listen_port).chain(node.lan_port).chain(node.reader_port) {
                 if !ports.insert(port) {
                     return Err(format!("Port {port} doppelt vergeben"));
                 }
@@ -336,7 +364,7 @@ impl AppConfig {
         self.nodes
             .iter()
             .filter(|node| Some(node.id.as_str()) != except)
-            .any(|node| node.listen_port == port || node.lan_port == Some(port))
+            .any(|node| node.listen_port == port || node.lan_port == Some(port) || node.reader_port == Some(port))
     }
 }
 
@@ -411,6 +439,8 @@ mod tests {
             probe: Some("web".into()),
             offer_gateway: true,
             peer_addresses: PeerAddresses::Tailnet,
+            reader: ReaderAccess::Local,
+            reader_port: None,
             created: 1,
         }
     }
@@ -517,6 +547,51 @@ mod tests {
         assert_eq!(AppConfig::parse(old.as_bytes())?.nodes[0].peer_addresses, PeerAddresses::Tailnet, "old file");
         let bad = text.replacen("\"peer_addresses\": \"tailnet\"", "\"peer_addresses\": \"lan\"", 1);
         assert!(AppConfig::parse(bad.as_bytes()).is_err());
+        Ok(())
+    }
+
+    /// The reader of a node (Bridge-Browser): kept as `off`, `local` or `lan`; files from before it existed load with
+    /// `local`; anything else is a bad entry.
+    #[test]
+    fn reader_per_node() -> Result<(), String> {
+        let mut off = entry("0a1b2c3d", 7401);
+        off.reader = ReaderAccess::Off;
+        let mut lan = entry("0a1b2c3e", 7402);
+        lan.reader = ReaderAccess::Lan;
+        let config = AppConfig { nodes: vec![off, lan, entry("0a1b2c3f", 7403)] };
+        assert_eq!(AppConfig::parse(&config.to_bytes())?, config);
+        let text = String::from_utf8_lossy(&AppConfig { nodes: vec![entry("0a1b2c3d", 7401)] }.to_bytes()).to_string();
+        let old = text.replacen("      \"reader\": \"local\",\n", "", 1);
+        assert_ne!(old, text);
+        assert_eq!(AppConfig::parse(old.as_bytes())?.nodes[0].reader, ReaderAccess::Local, "old file");
+        for bad in ["\"reader\": \"public\"", "\"reader\": true"] {
+            let changed = text.replacen("\"reader\": \"local\"", bad, 1);
+            assert!(AppConfig::parse(changed.as_bytes()).is_err(), "{bad}");
+        }
+        Ok(())
+    }
+
+    /// Review 9: `tailnet` as reader, and the loopback reader port - kept, checked against the other ports, missing in
+    /// older files.
+    #[test]
+    fn reader_tailnet_and_reader_port() -> Result<(), String> {
+        let mut node = entry("0a1b2c3d", 7401);
+        node.reader = ReaderAccess::Tailnet;
+        node.reader_port = Some(7601);
+        let config = AppConfig { nodes: vec![node.clone(), entry("0a1b2c3e", 7402)] };
+        assert_eq!(AppConfig::parse(&config.to_bytes())?, config);
+        let text = String::from_utf8_lossy(&config.to_bytes()).to_string();
+        let old = text.replacen("      \"reader_port\": 7601,\n", "", 1);
+        assert_ne!(old, text);
+        assert_eq!(AppConfig::parse(old.as_bytes())?.nodes[0].reader_port, None, "old file");
+        for port in [7401, 1000] {
+            let mut bad = node.clone();
+            bad.reader_port = Some(port);
+            assert!(bad.check().is_err(), "{port}");
+        }
+        let mut clash = entry("0a1b2c3e", 7402);
+        clash.reader_port = Some(7601);
+        assert!(AppConfig { nodes: vec![node, clash] }.check().is_err(), "the same reader port twice");
         Ok(())
     }
 

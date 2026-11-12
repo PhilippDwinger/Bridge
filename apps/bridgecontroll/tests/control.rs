@@ -242,7 +242,22 @@ async fn assistant_rules() -> TestResult {
     for body in [json!({"name": "", "template": "open"}), json!({"name": "x", "template": "secret"})] {
         assert_eq!(app.post("/api/wizard/start", &body).await?.0, 400, "{body}");
     }
-    let started = app.ok("/api/wizard/start", &json!({"name": "Quiznetz", "template": "closed"})).await?;
+    // The operator's Meldeweg is required (docs/08 §2) - checked before any words are made.
+    for (body, field) in [
+        (json!({"name": "Quiznetz", "template": "closed"}), "contact"),
+        (json!({"name": "Quiznetz", "template": "closed", "contact": "  "}), "contact"),
+        (json!({"name": "Quiznetz", "template": "closed", "contact": "a\u{7}b"}), "contact"),
+        (json!({"name": "Quiznetz", "template": "closed", "contact": "a@b.de", "short": "Mein Netz"}), "short"),
+        (json!({"name": "Quiznetz", "template": "closed", "contact": "a@b.de", "adult": "vielleicht"}), "adult"),
+    ] {
+        let (status, answer) = app.post("/api/wizard/start", &body).await?;
+        assert_eq!((status, answer["field"].as_str()), (400, Some(field)), "{body}: {answer}");
+        assert!(answer.get("words").is_none(), "no words for a network that could not be made");
+    }
+    assert_eq!(app.ok("/api/wizard/short", &json!({"name": "Grüße & Bäume"})).await?["short"], "gruesse-baeume");
+    let started = app
+        .ok("/api/wizard/start", &json!({"name": "Quiznetz", "template": "closed", "contact": common::CONTACT}))
+        .await?;
     let wizard = started["wizard"].clone();
     // Not confirmed: no network.
     let port = free_port()?;

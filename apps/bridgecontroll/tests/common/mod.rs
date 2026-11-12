@@ -13,6 +13,9 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 pub type TestResult = Result<(), String>;
 
+/// The Meldeweg of the networks the tests create (docs/08 §2: required).
+pub const CONTACT: &str = "meldungen@example.org";
+
 /// The program itself: started in node mode for every node.
 pub fn node_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bridgecontroll"))
@@ -134,7 +137,8 @@ impl TestApp {
         template: &str,
         lan: bool,
     ) -> Result<(String, Value, Vec<String>), String> {
-        let started = self.ok("/api/wizard/start", &json!({"name": name, "template": template})).await?;
+        let started =
+            self.ok("/api/wizard/start", &json!({"name": name, "template": template, "contact": CONTACT})).await?;
         let wizard = started["wizard"].as_str().ok_or("no wizard")?.to_owned();
         let words: Vec<String> = started["words"]
             .as_array()

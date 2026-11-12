@@ -3,8 +3,9 @@
 //! A local web app (ADR 0017): this program serves its screens on `127.0.0.1` only and opens the default browser.
 //! It creates networks (assistant "Neues BridgeNet"), joins networks with a link, runs every node of this PC as its
 //! own process (the same program in node mode, watched by [`supervisor`]) and shows the owner dashboard (seals,
-//! members, invites, apps, transparency log). Admin actions use the admin key in the owner node's folder exactly like
-//! `bridge-node net …` ([`bridge_node::admin`]).
+//! members, invites, apps, names, reports, transparency log). Admin actions use the admin key in the owner node's
+//! folder exactly like `bridge-node net …` / `name …` ([`bridge_node::admin`], [`moderation`]). The Bridge-Browser
+//! ([`browser`]) opens `shop.meinnetz` through the user's own node, which checks everything itself.
 //!
 //! Zero Trust also on this PC ([`http`]): a random session (256 bit) handed over once with a one-time login link,
 //! then an `HttpOnly` / `SameSite=Strict` cookie; strict `Host` check (DNS rebinding), `Origin` check on every change
@@ -17,9 +18,11 @@
 pub mod api;
 pub mod assets;
 pub mod autostart;
+pub mod browser;
 pub mod config;
 pub mod http;
 pub mod logfile;
+pub mod moderation;
 pub mod ops;
 pub mod qr;
 pub mod status;
@@ -255,7 +258,9 @@ pub async fn start(options: Options) -> Result<Running, String> {
 /// from a crash is simply replaced), starts the status rounds and the nodes marked for autostart.
 pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Running, String> {
     std::fs::create_dir_all(&options.app_dir).map_err(|e| format!("{}: {e}", options.app_dir.display()))?;
-    let config::Loaded { config, warnings } = AppConfig::load(&options.app_dir)?;
+    let config::Loaded { mut config, warnings } = AppConfig::load(&options.app_dir)?;
+    // Older settings: nodes with a public address get their loopback reader port now (review 9).
+    ops::assign_reader_ports(&mut config);
     for warning in &warnings {
         tracing::warn!(%warning, "Einstellungen");
     }

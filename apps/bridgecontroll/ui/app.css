@@ -67,6 +67,37 @@
 .bc-link-btn:hover { color: var(--bridge-blue-700); }
 .bc-link-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 4px; }
 
+/* Namen und Meldungen im Owner-Dashboard (docs/08 §12) */
+.bc-list .srv__name.bc-name { font-size: var(--fs-h2); overflow-wrap: anywhere; }
+.bc-report { display: flex; flex-direction: column; gap: var(--space-2); padding: 14px 0; border-bottom: 1px solid var(--line); }
+.bc-report__target { color: var(--text); }
+.bc-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Bridge-Browser */
+.bc-browser__bar { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-4); align-items: center; }
+.bc-browser__bar .b-wrap { flex: 1 1 420px; min-width: 0; }
+.bc-in-icon--static { cursor: default; }
+.bc-in-icon--static:hover { background: transparent; color: var(--muted); }
+.bc-browser__page:empty { display: none; }
+.bc-browser__address { color: var(--text); }
+.bc-result .srv__body { display: flex; flex-direction: column; gap: var(--space-2); }
+.bc-frame-wrap { min-height: 520px; display: flex; border: 1px solid var(--line); border-radius: var(--r-l); overflow: hidden; background: var(--surface); }
+.bc-frame { display: block; flex: 1 1 auto; width: 100%; height: 70vh; min-height: 520px; border: 0; background: var(--surface); }
+.bc-frame-note { margin: auto; max-width: 520px; box-sizing: border-box; }
+.bc-safety { gap: var(--space-3); }
+.bc-lock { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-size: var(--fs-h2); font-weight: 600; }
+.bc-lock svg { width: 26px; height: 26px; flex: none; }
+.bc-lock--ok { color: var(--ok); }
+.bc-lock--warn { color: var(--warn); }
+.bc-lock--blocked { color: var(--err); }
+.bc-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 14px; margin: 0; }
+.bc-facts dt { color: var(--muted); font-size: var(--fs-small); padding-top: 3px; }
+.bc-facts dd { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-width: 0; color: var(--text); }
+.bc-fp { font-size: 12px; color: var(--muted); }
+.bc-warnings { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
+.bc-warning { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-s); background: var(--warn-bg); color: var(--warn); font-size: var(--fs-small); line-height: 1.45; }
+.bc-warning svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+
 /* N04 Dialoge */
 .bc-dialog-form { width: 100%; max-width: 620px; max-height: calc(100vh - 40px); overflow: auto; }
 .bc-dialog-wide { max-width: 720px; }
@@ -80,6 +111,7 @@
 
 @media (max-width: 760px) {
   .bc-main, .bc-dash { padding: 24px 16px; }
+  .bc-frame, .bc-frame-wrap { min-height: 420px; }
   .bc-words { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bc-grid3, .bc-grid2 { grid-template-columns: minmax(0, 1fr); }
 }

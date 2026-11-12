@@ -50,10 +50,14 @@ pub fn is_web_host(state: &NetState, id: &Id, at: i64) -> bool {
 }
 
 /// The network's rules for an app version at `at`: the owner is a member with at least `apps.min_level` and not
-/// banned, and neither the app ID nor the owner is banned (`ban` in the log works on app IDs as well).
+/// banned, neither the app ID nor the owner is banned (`ban` in the log works on app IDs as well), and the app ID is
+/// not labeled 18+ in a network that forbids it.
 pub fn check_standing(state: &NetState, manifest: &AppManifest, at: i64) -> NetResult<()> {
     if state.is_banned(&manifest.app, at) || state.is_banned(&manifest.owner, at) {
         return Err(NetError::Banned);
+    }
+    if state.app_labeled_adult(&manifest.app, at) {
+        return Err(NetError::forbidden("app: labeled 18+ in a network that forbids it (docs/08 §5)"));
     }
     let level = state.level(&manifest.owner, at).ok_or(NetError::NotMember)?;
     if level < state.manifest().app_min_level() {

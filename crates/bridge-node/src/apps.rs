@@ -90,15 +90,15 @@ const MAX_OFFER_BYTES: usize = MAX_APP_MANIFEST_BYTES + MAX_REQUEST_BYTES + 1024
 const MAX_QUERY_BYTES: usize = 1024;
 
 /// The listed hosts of a version that count in the network, with their cards from the log.
-type Hosts = Vec<(Id, Option<KeyCard>)>;
+pub(crate) type Hosts = Vec<(Id, Option<KeyCard>)>;
 /// Order of versions: higher `version` first, then the larger statement hash (all hosts agree).
-type Rank = (u64, [u8; 32]);
+pub(crate) type Rank = (u64, [u8; 32]);
 
 /// One verified version of an app.
 #[derive(Clone)]
 pub(crate) struct Version {
-    statement: Arc<Statement>,
-    manifest: Arc<AppManifest>,
+    pub(crate) statement: Arc<Statement>,
+    pub(crate) manifest: Arc<AppManifest>,
 }
 
 impl Version {
@@ -106,7 +106,7 @@ impl Version {
         Self { statement: Arc::new(statement), manifest: Arc::new(manifest) }
     }
 
-    fn rank(&self) -> Rank {
+    pub(crate) fn rank(&self) -> Rank {
         (self.manifest.version, self.statement.hash_bytes())
     }
 
@@ -294,7 +294,7 @@ impl Apps {
         lock(&self.hosted).get(app).and_then(Hosted::newest).cloned()
     }
 
-    fn current(&self, app: &Id) -> Option<Version> {
+    pub(crate) fn current(&self, app: &Id) -> Option<Version> {
         lock(&self.hosted).get(app).and_then(|hosted| hosted.current.clone())
     }
 
@@ -1046,7 +1046,7 @@ impl Node {
     }
 
     /// A full `/v4/app/manifest` answer, verified (both signatures, the network's rules) and of this app.
-    fn parse_manifest(&self, app: &Id, body: &Map<String, Value>, now: i64) -> Option<(Version, Hosts)> {
+    pub(crate) fn parse_manifest(&self, app: &Id, body: &Map<String, Value>, now: i64) -> Option<(Version, Hosts)> {
         let value = body.get("manifest").cloned()?;
         let statement = Statement::from_value_with_limit(value, MAX_APP_MANIFEST_BYTES).ok()?;
         self.check_version(statement, now).ok().filter(|(version, _)| &version.manifest.app == app)
@@ -1152,7 +1152,12 @@ impl Node {
 
     /// The hash list of a blob that is not here yet: `/v4/blob/info` at up to 8 sources first, the list only from
     /// one that has the blob with this size - the first list that matches the ID.
-    async fn lookup_hash_list(&self, id: &BlobId, size: u64, sources: &[Vec<Endpoint>]) -> NodeResult<HashList> {
+    pub(crate) async fn lookup_hash_list(
+        &self,
+        id: &BlobId,
+        size: u64,
+        sources: &[Vec<Endpoint>],
+    ) -> NodeResult<HashList> {
         let parts = blob::parts_for(size)?;
         let start = usize::from(id.as_bytes()[0]) % sources.len().max(1);
         let picked = sources.iter().cycle().skip(start).take(sources.len().min(SOURCES_PER_LOOKUP));
@@ -1336,7 +1341,10 @@ impl Node {
             // `/app/<id>` → `/app/<id>/`, relative (works behind a path prefix too).
             return Ok(Response { status: 308, ..Response::ok(Vec::new()) }.with_header("location", format!("{app}/")));
         };
-        let version = self.inner.apps.current(&app).ok_or_else(not_found)?;
+        let Some(version) = self.inner.apps.current(&app) else {
+            // Not hosted here: maybe as reader for the owner's own browser (docs/08 §8) - else 404 as before.
+            return self.reader_file(request, &app, path, now).await;
+        };
         if self.still_valid(&version, now).is_err() {
             self.inner.apps.wake(); // the loop stops it for good
             return Err(not_found());

@@ -10,4 +10,7 @@
 | [05_FAHRPLAN](05_FAHRPLAN.md) | Phasen mit Abnahme, offene Fragen |
 | [06_BRIDGENET](06_BRIDGENET.md) | Phase 3: Hauptschlüssel, Netz-Aussagen, Transparenz-Log, Netz-Zustand, Beitritt, Weiterleitung |
 | [07_APPS_UND_DATEIEN](07_APPS_UND_DATEIEN.md) | Phase 4a: Dateien nach Inhalt, Bridge-Apps mit mehreren Hosts, Ausliefern, spätere Daten-Werkzeuge |
-| `adr/` | Entscheidungen: 0001 Zero Trust + Abteile · 0002 Lizenz · 0003 Rust/Tauri · 0004 Transport (Internet/LAN) · 0005 Plugin-Isolation · 0006 Merkle-Log mit Zeugen · 0007 PoW optional · 0008 Nonce-Invariante · 0009 Netz-Zustand aus dem Log · 0010 Aussage-Identität + Log-Regel-Wechsel · 0011 TLS im Transport · 0012 Not-Wiederherstellung · 0013 Übergangs-Köpfe beim Aufholen · 0014 Not-Form nur mit dem ersten Log-Führer · 0015 Apps und Dateien · 0016 Wächter und automatische Stufe 1 · 0017 BridgeControll v2 |
+| [08_NAMEN_WEB_BROWSER](08_NAMEN_WEB_BROWSER.md) | Phase 4: Namen im Log, Verwechslungs-Schutz, Kennzeichnung, Meldungen, Auflösen und Suchen, Leser im eigenen Knoten |
+| `adr/` | Entscheidungen: 0001 Zero Trust + Abteile · 0002 Lizenz · 0003 Rust/Tauri · 0004 Transport (Internet/LAN) · 0005 Plugin-Isolation · 0006 Merkle-Log mit Zeugen · 0007 PoW optional · 0008 Nonce-Invariante · 0009 Netz-Zustand aus dem Log · 0010 Aussage-Identität + Log-Regel-Wechsel · 0011 TLS im Transport · 0012 Not-Wiederherstellung · 0013 Übergangs-Köpfe beim Aufholen · 0014 Not-Form nur mit dem ersten Log-Führer · 0015 Apps und Dateien · 0016 Wächter und automatische Stufe 1 · 0017 BridgeControll v2 · 0018 Missbrauch und Haftung |
+
+Nutzungsregeln (Entwurf): [../NUTZUNGSREGELN.md](../NUTZUNGSREGELN.md)

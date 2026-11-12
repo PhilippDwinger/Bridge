@@ -115,6 +115,54 @@
      100.x). Je Knoten in den Einstellungen: „Öffentlich“ / „Öffentlich + Tailnet“ / „Alle (unsicher)“
      (`peer_addresses` in `bridgecontroll.json`: `public`/`tailnet`/`any`; fehlt das Feld in einer älteren Datei, gilt
      `tailnet`). `bridge-node` selbst bleibt bei `public`.
+- **Nachtrag 2 (Phase 4 in BridgeControll, 12.11.2026)** – Bridge-Browser, Namen, Meldungen (docs/08 §12); Paddy hat
+  mit „mach einfach weiter“ übergeben, die Details hat Claude entschieden (Freigabe durch Paddy steht aus):
+  1. **Browser in der App, App im `iframe`**: Die Seite zeigt fremde Apps in `<iframe sandbox="allow-scripts
+     allow-forms allow-popups">` (nie `allow-same-origin`, Sandbox vor der Adresse gesetzt), geladen direkt vom **Leser
+     des eigenen Knotens** auf `http://127.0.0.1:<port>` – nicht durch BridgeControll durchgereicht (der Knoten prüft
+     jede Datei und setzt die Sandbox-CSP selbst; BridgeControll bleibt ohne fremde Inhalte). Die CSP von `/` erlaubt
+     in `frame-src` genau diese Herkünfte (je Knoten mit Leser und ohne öffentliche Adresse), alle anderen Antworten
+     `frame-src 'none'`. Verworfen: Proxy der App durch BridgeControll (fremde Inhalte im eigenen Ursprung) und
+     `frame-src http://127.0.0.1:*` (zu weit).
+  2. **Daten nur als Text**: Namen, Beschreibungen, Schlagworte und Meldungstexte kommen nur mit `textContent` ins
+     DOM; die Antworten der Knoten prüft BridgeControll streng (Felder, Grenzen, Netz-ID) und öffnet nur `open` =
+     `/app/<ziel>/` eines App-Namens mit passendem Owner. Warnungen übersetzt das Programm (Deutsch), nicht die Seite.
+  3. **Wer meldet**: der Mitglieds-Schlüssel des PCs im Ordner des Knotens (`owner-key.json`, derselbe wie für
+     `app publish`), mit Sitzung bei einem Empfänger. Verworfen: mit dem Knoten-Schlüssel melden (eine Anmeldung mit
+     Client-Karte und `home` würde die Karte und das Postfach des Knotens beim Empfänger überschreiben). Folge: Ein
+     Mitglieds-Knoten in einem Einladungs-Netz kann nicht selbst melden – die Antwort nennt den Meldeweg (docs/08 §11).
+  4. **Betreiber-Schlüssel Stufe 2**: Namen von Apps und vom Betreiber gehören dem Mitglieds-Schlüssel des Owner-Ordners;
+     BridgeControll siegelt ihn vor dem ersten Namen mit Stufe 2 ohne Dienste (kleinste Stufe, mit der die sichere
+     Suche seine Namen zeigt; Stufe 3 für reservierte Wörter bleibt eine bewusste Admin-Entscheidung über die
+     Kommandozeile). Er erscheint als „Du (Betreiber)“ unter den Mitgliedern, nicht unter den Knoten (die Knoten-Liste
+     zeigt nur Siegel mit Knoten-Karte).
+  5. **Meldungen holen** kostet eine signierte Admin-Anfrage: alle 15 s und nach jeder Aktion, nicht bei jeder
+     Status-Runde. Schnell-Aktionen spielen das Log des Owner-Knotens frisch ab (nicht die Sicht der letzten Runde).
+  6. **Ein PC, eine Adresse**: Alles auf dem PC erreicht die Knoten von `127.0.0.1` und teilt deren Grenzen je Adresse;
+     Admin-Aktionen und Namens-Abfragen werden bei `RATE_LIMITED` wiederholt (höchstens dreimal, eine Sekunde Abstand;
+     eine abgelehnte Anfrage hat nichts verändert, jede Wiederholung ist neu signiert).
+  7. **Leser je Knoten** in den Einstellungen (`reader`: `off`/`local`/`lan`, Standard `local`, ältere Dateien
+     `local`); Knoten mit öffentlicher Adresse öffnen keine Apps (vertrauter Proxy, docs/08 §11).
+  8. **Assistent**: Meldeweg ist Pflicht (geprüft, bevor Wörter erzeugt werden), Kurzname aus dem Namen vorgeschlagen
+     (`POST /api/wizard/short`), 18+ Standard „nicht erlaubt“; erstellt mit `admin::create_network_with_options`.
+  9. **Bibliothek statt Kopie**: Namen über `bridge_node_cli::names` (jetzt öffentlich, ebenso `apps`), Admin-Aktionen
+     über `AdminClient`; neu nur `apps::list`, `apps::admit_owner`, `names::refusal` (öffentlich) und
+     `ReaderAccess::as_str`.
+- **Nachtrag 3 (Prüfung 9, 12.11.2026)** – Befunde zu Phase 4 in BridgeControll, von Claude entschieden (Freigabe durch
+  Paddy steht aus; docs/08 §12):
+  1. **Keine Neulade-Schleife**: Eine App im Rahmen, die ihn auf beliebige Ports von `127.0.0.1` lenkte, löste je Port
+     eine CSP-Verletzung und damit ein Neuladen der Seite aus. Jetzt lädt die Seite nur neu, wenn die blockierte
+     Herkunft in `frames` von `GET /api/browser` steht und nicht in der eigenen CSP (`originalPolicy`), höchstens einmal
+     je Laden und nie zweimal für dieselbe Herkunft (Playwright-Test: sechs fremde Ports → kein Neuladen).
+  2. **„App sperren“ nur für Apps**: angeboten und vom Server angenommen nur für das Ziel eines App-Namens im Log oder
+     einen App-Schlüssel des Owner-Ordners; nie für Netz, Log-Führer, Zeugen, Wächter, Empfänger, Admins (die Rolle
+     gewinnt). Zeile und Bestätigung nennen die Art der ID.
+  3. **Leser-Port für Knoten mit öffentlicher Adresse** (ersetzt Nachtrag 2 Punkt 7 „öffnen keine Apps“): eigener Port ab
+     7601 (`reader_port`), Start mit `--reader-listen 127.0.0.1:<port>`; der Browser rahmt, löst auf und sucht dort.
+     Ältere Einstellungen bekommen den Port beim Start (gespeichert mit der nächsten Änderung).
+  4. **Melden**: Der Text geht an den ersten Log-Führer versiegelt hinaus; ohne dessen Karte im Log keine Meldung mit
+     Text. Ein an einen anderen Log-Führer versiegelter Text erscheint als solcher.
+  5. **Leser „Tailnet“** in den Einstellungen; Warnung „Karte nicht geprüft“ (`card_unverified`) im Schloss.
 - **Folgen**:
   - Phase 3 hat ihr „per Klick“: Assistent, Beitritt per Link, Siegeln/Entziehen, Sperren, Einladungen mit QR-Code.
   - Getestet: Steuer-API mit echten Knoten-Prozessen (erstellen → beitreten → siegeln → Stufe sichtbar → Mitglied
@@ -129,5 +177,7 @@
   - Die Wörter liegen kurz im Speicher von Browser und Programm (wie bei `net create` im Terminal); ein Browser kann
     Seiten im Speicher behalten, bis der Tab geschlossen ist.
   - Admin-Verlängerung, `cascade` und Not-Wiederherstellung (24 Wörter) gibt es weiter nur über die Kommandozeile.
+  - Phase 4 in der App: kein Hochladen von Apps (weiter `bridge-node app publish`), Melden von Mitglieds-Knoten in
+    Einladungs-Netzen nur über den Meldeweg (docs/08 §11). (Leser hinter Tailscale Funnel: gelöst, Nachtrag 3.)
   - Windows-Teile (Autostart-Datei, kein Konsolenfenster, `CREATE_NO_WINDOW`) baut die CI; ausgeführt wurden sie hier
     nicht.

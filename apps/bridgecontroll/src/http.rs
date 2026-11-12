@@ -12,7 +12,10 @@
 //!   application/json` - a form or a script of another site can send neither without a CORS preflight, and there is
 //!   no CORS here at all.
 //! - **Headers** on every answer: CSP `default-src 'self'` (no inline scripts or styles, nothing from elsewhere),
-//!   `frame-ancestors 'none'`, `nosniff`, no referrer, `no-store` for everything but the design files.
+//!   `frame-src 'none'`, `frame-ancestors 'none'`, `nosniff`, no referrer, `no-store` for everything but the design
+//!   files. Only the page itself (`/`) may frame something: exactly the readers of this PC's nodes
+//!   (`http://127.0.0.1:<node port>`, [`crate::browser::frame_origins`]) - the Bridge-Browser shows apps there in a
+//!   sandboxed `iframe`.
 //! - `POST /api/launch` is how a second start of the app asks for a new login link: it proves the launch key from the
 //!   owner-only instance file without sending it (`X-Launch-Nonce`, `X-Launch-Proof` = MAC of the nonce under the key;
 //!   each nonce once), and the answer carries a MAC of nonce and login path, so the second start opens nothing a
@@ -57,9 +60,29 @@ const MAX_LAUNCH_NONCES: usize = 64;
 /// MAC domains of the launch protocol (`bridge_core::crypto::mac`).
 const LAUNCH_REQUEST: &str = "bridgecontroll/launch-request";
 const LAUNCH_ANSWER: &str = "bridgecontroll/launch-answer";
-/// The Content-Security-Policy of every answer.
+/// The Content-Security-Policy of every answer (the page `/` gets [`page_csp`]).
 pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; \
-                       connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+                       connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; \
+                       frame-ancestors 'none'";
+
+/// The CSP of the page `/`: like [`CSP`], but `frame-src` lists exactly `origins` (the readers of this PC's nodes,
+/// `http://127.0.0.1:<port>` - nothing else is accepted); none: `'none'`.
+#[must_use]
+pub fn page_csp(origins: &[String]) -> String {
+    let allowed: Vec<&str> = origins
+        .iter()
+        .map(String::as_str)
+        .filter(|origin| {
+            origin
+                .strip_prefix("http://127.0.0.1:")
+                .is_some_and(|port| !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .collect();
+    if allowed.is_empty() {
+        return CSP.to_owned();
+    }
+    CSP.replace("frame-src 'none'", &format!("frame-src {}", allowed.join(" ")))
+}
 
 /// Session and login links of the running app.
 pub struct Auth {
@@ -213,6 +236,8 @@ pub struct Answer {
     pub headers: Vec<(&'static str, String)>,
     /// May be cached (design files).
     pub cacheable: bool,
+    /// The page `/` (its CSP may frame the node readers).
+    pub page: bool,
 }
 
 impl Answer {
@@ -238,6 +263,7 @@ impl Answer {
             body: Bytes::from(body),
             headers: Vec::new(),
             cacheable: false,
+            page: false,
         }
     }
 
@@ -247,6 +273,12 @@ impl Answer {
         Self::json(status, &json!({"error": text}))
     }
 
+    /// An error of one form field: `{"error": text, "field": name}`.
+    #[must_use]
+    pub fn field_error(status: u16, field: &str, text: &str) -> Self {
+        Self::json(status, &json!({"error": text, "field": field}))
+    }
+
     fn page(status: u16, bytes: &'static [u8]) -> Self {
         Self {
             status,
@@ -254,6 +286,7 @@ impl Answer {
             body: Bytes::from_static(bytes),
             headers: Vec::new(),
             cacheable: false,
+            page: false,
         }
     }
 
@@ -264,6 +297,7 @@ impl Answer {
             body: Bytes::from_static(asset.bytes),
             headers: Vec::new(),
             cacheable: asset.content_type.starts_with("font/"),
+            page: false,
         }
     }
 }
@@ -315,7 +349,8 @@ pub fn serve(listener: TcpListener, app: Arc<App>) -> JoinHandle<()> {
 /// One request: checks, routing, common headers.
 async fn answer(app: &App, request: Request<Incoming>) -> Response<Full<Bytes>> {
     let answer = checked(app, request).await;
-    finish(answer)
+    let csp = if answer.page { page_csp(&crate::browser::frame_origins(app).await) } else { CSP.to_owned() };
+    finish(answer, &csp)
 }
 
 fn header<'a>(request: &'a Request<Incoming>, name: &str) -> Option<&'a str> {
@@ -395,7 +430,7 @@ async fn checked(app: &App, request: Request<Incoming>) -> Answer {
         return api::route(app, &Call { method: &method, path: &path, query: &query, body: &body }).await;
     }
     match assets::get(&path) {
-        Some(asset) if method == Method::GET => Answer::asset(asset),
+        Some(asset) if method == Method::GET => Answer { page: path == "/", ..Answer::asset(asset) },
         _ => Answer::error(404, "Nicht gefunden"),
     }
 }
@@ -415,6 +450,7 @@ fn login(app: &App, code: &str, now: i64) -> Answer {
         body: Bytes::from_static(b"Angemeldet"),
         headers: vec![("location", "/".into()), ("set-cookie", app.auth.cookie())],
         cacheable: false,
+        page: false,
     }
 }
 
@@ -437,12 +473,12 @@ async fn read_body(request: Request<Incoming>) -> Result<Bytes, Answer> {
     }
 }
 
-/// Adds the common headers.
-fn finish(answer: Answer) -> Response<Full<Bytes>> {
+/// Adds the common headers (`csp`: [`CSP`], or [`page_csp`] for the page).
+fn finish(answer: Answer, csp: &str) -> Response<Full<Bytes>> {
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(answer.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header("content-type", answer.content_type)
-        .header("content-security-policy", CSP)
+        .header("content-security-policy", csp)
         .header("x-content-type-options", "nosniff")
         .header("x-frame-options", "DENY")
         .header("referrer-policy", "no-referrer")
@@ -458,6 +494,25 @@ fn finish(answer: Answer) -> Response<Full<Bytes>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page may frame exactly the node readers of this PC - nothing else gets into `frame-src`.
+    #[test]
+    fn page_csp_frames_only_local_readers() {
+        assert_eq!(page_csp(&[]), CSP);
+        assert!(CSP.contains("frame-src 'none'") && CSP.contains("frame-ancestors 'none'"));
+        let csp = page_csp(&["http://127.0.0.1:7401".into(), "http://127.0.0.1:7402".into()]);
+        assert!(csp.contains("frame-src http://127.0.0.1:7401 http://127.0.0.1:7402;"), "{csp}");
+        assert!(csp.contains("frame-ancestors 'none'") && csp.contains("default-src 'self'"));
+        for bad in [
+            "*",
+            "http://evil.example",
+            "http://127.0.0.1:*",
+            "http://127.0.0.1:1; script-src *",
+            "https://127.0.0.1:1",
+        ] {
+            assert_eq!(page_csp(&[bad.to_owned()]), CSP, "{bad}");
+        }
+    }
 
     #[test]
     fn login_codes_work_once_and_expire() {

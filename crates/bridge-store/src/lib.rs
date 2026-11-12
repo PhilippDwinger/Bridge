@@ -16,7 +16,10 @@
 //! for blobs that are not here yet) and an app its rank (version + statement hash; a stopped app keeps only that).
 //!
 //! Since schema 7 what a watcher keeps (docs/06 §11.7): the nodes registered for probes and their probe history;
-//! since schema 8 with the time of the first registration (a full table makes room by that order).
+//! since schema 8 with the time of the first registration (a full table makes room by that order). Since schema 9
+//! reports of members about names and apps (docs/08 §6) - not in the log, who reports is private; since schema 10 with
+//! the reporter's level (a full table makes room with the open reports of the lowest level first) - their texts are
+//! sealed to the log operator, nothing to decrypt here either.
 //!
 //! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core`. It never checks hashes or signatures itself -
 //! the node verifies every part before it is stored and after it is read.
@@ -32,6 +35,7 @@ use thiserror::Error;
 mod apps;
 mod blobs;
 mod net;
+mod reports;
 mod watch;
 
 pub use apps::{AppLimits, AppRow, AppState, AppStored, Reservation};
@@ -43,6 +47,7 @@ pub use net::{
     HeadRow, HomeRow, HomeStored, MAX_EVIDENCE_PER_NET, MAX_HEAD_ROWS_PER_NET, Outgoing, RelayItem, RelayLimits,
     TransitionRow,
 };
+pub use reports::{ReportLimits, ReportRow, ReportStored};
 pub use watch::{Probe, Registration, Standing, WatchNode, WatchRegistered};
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
@@ -131,6 +136,20 @@ const MIGRATIONS: &[&str] = &[
     // 8: review 8 (docs/06 §11.5): when the table of a watcher is full, a new registration takes the place of the
     // oldest one that is not passing its probes - the time of the first registration decides "oldest".
     "ALTER TABLE watch_nodes ADD COLUMN registered INTEGER NOT NULL DEFAULT 0;",
+    // 9: reports (docs/08 §6): what members report about names and apps - at the gateway that received them and at
+    // the log operator they are handed on to (not in the log: who reports is private).
+    "CREATE TABLE reports (net TEXT NOT NULL, id TEXT NOT NULL, reporter TEXT NOT NULL, target TEXT NOT NULL,
+                           reason TEXT NOT NULL, text TEXT NOT NULL, request BLOB NOT NULL, card BLOB NOT NULL,
+                           via TEXT NOT NULL, received INTEGER NOT NULL, status TEXT NOT NULL, handled_by TEXT,
+                           handled_at INTEGER, forwarded INTEGER NOT NULL, PRIMARY KEY (net, id)) WITHOUT ROWID;
+     CREATE INDEX reports_by_reporter ON reports (net, reporter, received);
+     CREATE INDEX reports_by_received ON reports (net, received);
+     CREATE INDEX reports_by_status ON reports (net, status, received);
+     CREATE INDEX reports_done ON reports (status, handled_at);",
+    // 10: review 9 (docs/08 §6): the reporter's level when the report came in - a full table makes room with the
+    // oldest open report of a lower level, and open reports of level 0 age out.
+    "ALTER TABLE reports ADD COLUMN level INTEGER NOT NULL DEFAULT 0;
+     CREATE INDEX reports_by_level ON reports (net, status, level, received);",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

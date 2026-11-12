@@ -158,6 +158,8 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 | `cosign` | `{"head":"<hash des head>","log":"<id>","size":n,"root":"<32 Byte>"}` | Zeuge (im Manifest); für den Übergangs-Kopf einer Not-Wiederherstellung auch der Hauptschlüssel (§5) – **steht nicht im Log** |
 | `home` | `{"node":"<id des Empfängers>"}` | das Mitglied selbst – **steht nicht im Log** (§8) |
 | `app` | eine Version einer Bridge-App (07 §3) | App-Schlüssel **und** Owner (`sigs`) – **steht nicht im Log**, die Hosts behalten sie (Phase 4a) |
+| `name` | Name → Ziel, Art, Inhaber, Karten, Beschreibung, Schlagworte, Kategorie (08 §3) | der Inhaber (bei Apps mit dem App-Schlüssel, `sigs`) nach den Namensregeln (Phase 4) |
+| `label` | `{"target":"<name oder id>","category":"adult\|general","reason":"…"}` (08 §5) | Admin mit `seals` (Phase 4) |
 
 - **Hash einer Aussage** = Base64url(SHA-256(kanonische Bytes der Aussage **ohne** `sig` bzw. `sigs`)). Er ist die
   Identität der Aussage für Widerruf (`revoke` mit `statement`), Ersetzen („neuer ersetzt älter“), Doppelte und
@@ -167,7 +169,8 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 - **Karten im Log**: Das Manifest trägt die Karte des Hauptschlüssels (`card`, Rolle `net`), jede Delegation die
   Karte des Admins (`card`, Rolle `admin`, Pflicht), ein Siegel optional die Karte des Inhabers (Pflicht bei
   `gateway`, mit `urls`). So kann jeder, der das Log hat, alle Signaturen prüfen.
-- **Mehr-Augen** (`sigs`) nur bei `manifest` und `seal`; alle anderen Arten haben genau einen Aussteller. Jeder
+- **Mehr-Augen** (`sigs`) nur bei `manifest` und `seal` (dazu `name` einer App: App-Schlüssel + Inhaber, 08 §3); alle
+  anderen Arten haben genau einen Aussteller. Jeder
   Unterzeichner muss selbst berechtigt sein. `sigs` ist streng aufsteigend nach `iss` sortiert (derselbe
   Unterzeichner zweimal ist damit ungültig), jeder Eintrag ist genau `{"iss","sig"}` – sonst ist die Aussage ungültig
   (04 §3: genau eine Byte-Form).
@@ -191,7 +194,8 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
     Jahren vergessen ist oder ein späteres Manifest X wieder nennt (begrenzte Liste mit 1.024 Einträgen; ist sie
     voll, endet die Start-Empfänger-Ausnahme für alle – fail closed).
 - `revoke` mit `statement`: Hauptschlüssel, ein Unterzeichner der Aussage, oder ein Admin mit dem passenden Recht
-  (`members` für member/invite, `seals` für seal, `bans` für ban; Delegationen nur der Hauptschlüssel). Ziel muss
+  (`members` für member/invite, `seals` für seal, `name` und `label`, `bans` für ban; Delegationen nur der
+  Hauptschlüssel). Ziel muss
   gerade gelten; Manifeste und Widerrufe sind nicht widerrufbar (neue Version bzw. neue Aussage).
 
 ## 4. Manifest
@@ -208,7 +212,8 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
   je 1–16, `limits.members` 1–1.000.000, `limits.log_entries_per_day` 1–100.000. Alle Felder sind Pflicht – außer
   dem optionalen `apps` (Phase 4a, 07 §3): `{"min_level":0-3}`, die Stufe, die ein Owner zum Veröffentlichen von Apps
   braucht (ohne das Feld: 0), und dem optionalen `watch` (Regeln der Wächter, §11.3; ohne das Feld: die
-  Standardwerte dort). Fehlen sie, bleiben sie weg (ältere Manifeste behalten ihre Bytes und ihren Hash).
+  Standardwerte dort) und – *Phase 4* – `short`, `contact`, `names`, `adult`, `blocklists` (08 §2). Fehlen sie,
+  bleiben sie weg (ältere Manifeste behalten ihre Bytes und ihren Hash).
 - Das neueste Manifest gilt bis zur nächsten Version; sein `exp` zählt nur beim Annehmen.
 - `version` steigt bei jeder Änderung um genau 1. Das jeweils neueste gültige Manifest gilt.
 - `logs`: 1–3 Log-Führer, `witnesses`: 1–16 Zeugen, `1 ≤ witness_threshold ≤ len(witnesses)`. Beide Listen dürfen die
@@ -231,7 +236,7 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 
 ## 5. Transparenz-Log
 - **Einträge**: kanonische Bytes von Aussagen der Arten `manifest`, `delegation`, `invite`, `member`, `seal`,
-  `revoke`, `ban` (je max. 64 KiB). **Eintrag 0 = Genesis-Manifest** (Version 1, signiert von der Netz-ID).
+  `revoke`, `ban`, *seit Phase 4* `name` und `label` (08 §3, §5; je max. 64 KiB). **Eintrag 0 = Genesis-Manifest** (Version 1, signiert von der Netz-ID).
 - **Merkle-Baum nach RFC 6962**: Blatt = SHA-256(0x00 ‖ Eintrag), Knoten = SHA-256(0x01 ‖ links ‖ rechts), leerer
   Baum = SHA-256(""). Nachweise: Inclusion (Eintrag i in Größe n) und Consistency (Größe m → n) wie RFC 6962 §2.1.
 - **Kopf** (`head`): Größe + Wurzel, signiert vom Log-Führer, `iat` = Zeit, `exp` = `iat` + 30 Tage. Neuer Kopf,
@@ -598,8 +603,9 @@ ohne Netz kennt keinen dieser Endpunkte (404); ein Knoten, der sein Log noch lä
 - **BridgeControll v2** ist gebaut (ADR 0017, `apps/bridgecontroll`): Assistent „Neues BridgeNet“, Beitritt per Link,
   Siegeln mit ID-Bestätigung (Knoten dieses PCs oder Knoten-Ausweis, §7), Siegel entziehen, Sperren, Einladungen mit
   QR-Code, Owner-Dashboard. Daneben (und für alles, was die 24 Wörter braucht) gibt es die Kommandozeile:
-  - `bridge-node net create --data <ordner> --name <text> --url <öffentliche adresse> [--template open|invite|closed]`
-    zeigt die 24 Wörter **einmal** an, legt die Knoten-Identität (falls nötig), den delegierten Admin-Schlüssel
+  - `bridge-node net create --data <ordner> --name <text> --url <öffentliche adresse> --contact <meldeweg>
+    [--short <kurzname>] [--template open|invite|closed] [--adult allowed|forbidden]` (*Phase 4*: `--contact`,
+    `--short`, `--adult`, 08 §2) zeigt die 24 Wörter **einmal** an, legt die Knoten-Identität (falls nötig), den delegierten Admin-Schlüssel
     `admin-key.json` (alle Rechte, 90 Tage, nur für den Besitzer lesbar), Genesis-Manifest (1 Jahr), Delegation und
     das Siegel des Owner-Knotens (Stufe 3: `gateway`, `log`, `witness`, 1 Jahr) an. Der nächste Start
     `bridge-node --data <ordner>` ist der Owner-Knoten.

@@ -28,3 +28,34 @@ Fragen/Wünsche an den Design-Claude:
 3. Eine mehrzeilige Eingabe (Knoten-Ausweis einfügen) gibt es im UI-Kit nicht; ich nutze `textarea.b-input` mit
    größerer Mindesthöhe. Passt das?
 4. Ein ⋯-Menü (K10 öffnet …) ist im UI-Kit nicht gezeichnet; ich zeige die drei Aktionen in einem kleinen Dialog (K50).
+
+## 12.11.2026 – Bau-Claude: Phase 4 in BridgeControll v2 (Bridge-Browser, Namen, Meldungen)
+
+Neue Bildschirme, gebaut nur aus UI-Kit-Bausteinen (Layout-Werte in `ui/app.css`, nur `var(--…)`); Bildschirmfotos
+macht der Rauchtest (`tests/ui/smoke.py`, Bilder 02 und 15–22):
+
+- **Bridge-Browser** (`#/browser`, von der Startseite und aus jedem Dashboard): Kopf wie N03 (`bc-hero`), Netz-Wahl
+  (K23 `b-seg`, bei einem Netz ein K31-Chip mit ID-Fingerabdruck), Adresszeile K19 (`b-wrap` mit Globus-Icon, Eingabe
+  ohne eigenen Rahmen) + Primärknopf „Öffnen“ + K20 „Sicherer Modus“. Treffer als `srv`-Zeilen (Name, Beschreibung,
+  Chips/Pillen, runder Pfeil K11). Geöffnete Seite: links die App in einem gerahmten `iframe`, darüber Adresse, „In
+  neuem Tab öffnen“ (Ghost) und „Melden“ (K04 Gefahr); rechts eine Karte „Schloss“ (Schloss-Icon + „Geprüft“ grün /
+  „Vorsicht“ amber-braun / „Nicht geöffnet“ rot, Fakten-Liste, Warnungen als kleine `--warn-bg`-Kästen). Schranken
+  (18+, neuer Inhaber) als Karte an Stelle der App.
+- **Melden** (Dialog K27): Gründe als K22 `b-radio`, Text als `textarea.b-input`, Hinweis, an wen die Meldung geht.
+- **Namen** (Owner-Dashboard, Hauptspalte): `srv`-Zeilen mit Adresse (Sora, 22 px), Pillen „Gilt“/„Löst nicht auf“,
+  Chips; „Name anmelden“ (Dialog: Name als K18 mit Nachsatz `.kurzname`, Ziel als K23, App als K25 `b-selectwrap`).
+- **Meldungen** (Owner-Dashboard, Hauptspalte): Filter K24 `b-seg--sm`, je Meldung eine Zeile mit Grund-Pille (err für
+  Phishing/illegal, sonst warn), Ziel, Status, Text (Zeilenumbrüche erhalten), Schnell-Aktionen als kleine
+  Sekundär-Knöpfe, „Erledigt“ als Ghost; Banner K49 „Meldeweg fehlt“ mit Knopf; Seitenleiste „Regeln für Namen“.
+- **Assistent Schritt 1**: zweite Karte „Du bist der Betreiber“ (Meldeweg, Kurzname als K18 mit Vorsatz `shop.`, 18+
+  als K23).
+- **Einstellungen**: „Leser für den Bridge-Browser“ als K23.
+
+Fragen/Wünsche an den Design-Claude:
+1. Für das „Schloss“ (Sicherheits-Status einer Seite) gibt es keinen Baustein; ich nutze eine `bc-card` mit Icon in
+   `--ok`/`--warn`/`--err`. Wäre ein eigener Baustein „Sicherheits-Karte“ (wie ein Browser-Schloss) sinnvoll?
+2. Warnungen in der Karte sind kleine Kästen in `--warn-bg`/`--warn` – ähnlich `b-banner--warn`, aber kleiner. Passt
+   das, oder soll es ein `b-banner--sm` geben?
+3. Der Rahmen um die App (`iframe`) ist eine Fläche `--surface` mit `--r-l` und Linie – bitte prüfen, ob sich die
+   fremde App genug von BridgeControll abhebt (eine Kopfleiste „Diese Seite gehört nicht zu BridgeControll“?).
+

@@ -176,6 +176,36 @@ freigegeben).
 - Dienst `names` (DNS + Suche), Dienst `web` (Websites von Knoten, auch hinter dem Router), Bridge-Browser.
 - **Abnahme**: `shop.meinnetz` im Browser öffnet die Website eines anderen PCs; Suche nach „shop“ liefert eine Liste;
   gefälschter Namens-Eintrag wird abgewiesen.
+- **Stand (12.11.2026): Kern gebaut, Abnahme-Tests grün** (docs/08, ADR 0018; Freigabe durch Paddy steht aus). Dazu der
+  Missbrauchsschutz nach Paddys Vorgabe vom 10.11. (`NUTZUNGSREGELN.md`, Entwurf – anwaltlich prüfen lassen).
+  - `bridge-net`: Manifest-Felder `short`, `contact`, `names`, `adult`, `blocklists`; Aussagen `name` (im Log: wer zuerst
+    kommt, Stufe + Kontingent, App-Namen von App-Schlüssel **und** Inhaber, Verwechslungs-Skelett, reservierte Wörter
+    ab Stufe 3, 18+-Regel, max. 1 Jahr, Verlängern, Widerruf) und `label` (Admins mit `seals`); Auflösen, Suche mit
+    Rang und sicherer Suche, Kennzeichnungs-Vorrang, 18+-gekennzeichnete Apps in `forbidden`-Netzen nicht mehr gültig.
+  - `bridge-store` (Schema 9): Meldungen (begrenzt je Mitglied und Knoten, Doppelte, Status, Weitergabe).
+  - `bridge-transport`: `Request::host`, `Request::forwarded`. `bridge-guard`: eigene Grenze je Adresse für Namen.
+  - `bridge-node`: `/v4/names/info|resolve|search|list|submit`, `/v4/report`, `/v4/node/report`,
+    `/v4/admin/reports|report`, Leser für nicht gehostete Apps (nur lokal, geprüft, LRU-Speicher), Weitergabe der
+    Meldungen an den Log-Führer. Kommandozeile `name register|list|revoke`, `net label`, `net reports`,
+    `net create --contact --short --adult`, `--reader off|local|lan`.
+  - Tests: `crates/bridge-net/tests/net_names.rs` (Fälschungen, Regeln, Kennzeichnung, Suche, Abspielen gleich),
+    Einheits-Tests (`names.rs`, Manifest, `reports.rs` im Store, Leser, Meldungen), `tests/e2e/tests/phase4_names.rs`
+    (Abnahme: App auf einem anderen PC bekommt `shop`, ein eigener Knoten löst `shop.testnetz` auf und lädt sie über
+    seinen Leser, Suche; gefälschte Namen; 18+ in sicherer Suche und Kennzeichnung; 18+-Kennzeichnung stoppt eine App;
+    Meldungen beim Owner-Knoten, Grenzen, gefälschte Weitergabe; Leser lehnt Fremde und manipulierte Teile ab).
+  - **Prüfung 9 (12.11.2026)**: Suche begrenzt und neben der Sperre, Namen mit eigenem Topf und Tagesbudget, Böden statt
+    Widerrufs-Tabelle, Kennzeichnung am Inhaber und 18+ gewinnt, App-Schlüssel widerruft, reservierte Schlagworte,
+    versiegelte Meldungstexte, Leser `lan`/`tailnet` und `--reader-listen`, `card_verified` (ADR 0018 Nachtrag, ADR 0017
+    Nachtrag 3). Tests: `crates/bridge-net/tests/net_review9.rs`, Einheits-Tests in `state.rs`, `names.rs`,
+    `reports.rs`, `reader.rs`, `tests/e2e/tests/phase4_review9.rs`, `smoke.py` (Neulade-Schleife).
+  - **BridgeControll (12.11.2026)**: Bridge-Browser (Adresse, Suche, sicherer Modus, Schloss mit Warnungen, 18+-Schranke,
+    App im Sandbox-`iframe` vom Leser des eigenen Knotens, Melden), im Assistenten Meldeweg (Pflicht), Kurzname und
+    18+-Regel, im Owner-Dashboard Namen, Meldungen mit Schnell-Aktionen und „Meldeweg fehlt“, Leser je Knoten in den
+    Einstellungen (docs/08 §12, ADR 0017 Nachtrag 2). Tests: `apps/bridgecontroll/tests/browser.rs` (auflösen, suchen,
+    Leser liefert die App, Meldung beim Owner, erledigen, Schnell-Aktionen, Meldeweg ändern), `security.rs` (CSP
+    `frame-src` nur die Leser dieses PCs, Sandbox ohne `allow-same-origin`, kein HTML aus Daten, Müll an die
+    Browser-API), Playwright-Rauchtest bis „Meldung erledigt“.
+  - Offen: docs/08 §11 (u. a. Sperrlisten nur als Feld, Leser in großen Netzen, Leser hinter Tailscale Funnel).
 
 ## Phase 5 – Speicher und Rechnen
 - `storage`: Verschlüsselung beim Client, Erasure Coding, Verteilung auf verschiedene Besitzer, Speicher-Proben,

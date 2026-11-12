@@ -26,6 +26,7 @@ impl Node {
             (Method::Post, "/v4/node/homes") => return self.homes_out(&request.body, now).await,
             (Method::Post, "/v4/node/app") => return self.app_offer_in(&request.body, now).await,
             (Method::Post, "/v4/node/watch") => return self.watch_in(&request.body, request.peer, now).await,
+            (Method::Post, "/v4/node/report") => return self.node_report_in(&request.body, now).await,
             _ => {}
         }
         let rest = request.path.strip_prefix("/v4/net/").ok_or_else(NodeError::not_found)?;

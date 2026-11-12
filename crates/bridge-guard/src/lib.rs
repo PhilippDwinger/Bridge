@@ -86,6 +86,8 @@ pub struct Limits {
     /// Unauthenticated reads of blobs and apps per address (`/v4/blob/info|hashes|get`, `/v4/app/manifest`,
     /// `GET /app/…`; docs/07 §7) - on top of the general bucket.
     pub reads_per_address: Rate,
+    /// Name lookups per address (`/v4/names/resolve|search|list|info`, docs/08 §7) - on top of the general bucket.
+    pub names_per_address: Rate,
     /// Sent envelopes per identity.
     pub sends_per_identity: Rate,
     /// Mailbox quotas.
@@ -118,6 +120,7 @@ impl Default for Limits {
             challenges_per_address: Rate { per_second: 2, burst: 10 },
             proofs_per_address: Rate { per_second: 5, burst: 10 },
             reads_per_address: Rate { per_second: 10, burst: 40 },
+            names_per_address: Rate { per_second: 5, burst: 20 },
             sends_per_identity: Rate { per_second: 10, burst: 30 },
             mailbox: MailboxLimits {
                 max_envelopes: 1_000,
@@ -340,6 +343,7 @@ pub struct Guard {
     challenges_per_address: RateLimiter<IpAddr>,
     proofs_per_address: RateLimiter<IpAddr>,
     reads_per_address: RateLimiter<IpAddr>,
+    names_per_address: RateLimiter<IpAddr>,
     sends: RateLimiter<Id>,
     nonces: Mutex<NonceTable>,
     challenges: Mutex<ChallengeTable>,
@@ -356,6 +360,7 @@ impl Guard {
             challenges_per_address: RateLimiter::new(limits.challenges_per_address, limits.max_tracked),
             proofs_per_address: RateLimiter::new(limits.proofs_per_address, limits.max_tracked),
             reads_per_address: RateLimiter::new(limits.reads_per_address, limits.max_tracked),
+            names_per_address: RateLimiter::new(limits.names_per_address, limits.max_tracked),
             sends: RateLimiter::new(limits.sends_per_identity, limits.max_tracked),
             nonces: Mutex::new(NonceTable::new(limits.max_tracked)),
             challenges: Mutex::new(ChallengeTable {
@@ -395,6 +400,11 @@ impl Guard {
     /// An unauthenticated blob or app read for this address (tighter than the general bucket, docs/07 §7)?
     pub fn admit_read(&self, ip: IpAddr, now_ms: i64) -> GuardResult<()> {
         self.reads_per_address.check(&address_key(ip), now_ms)
+    }
+
+    /// A name lookup for this address (docs/08 §7: its own bucket, tighter than the general one)?
+    pub fn admit_names(&self, ip: IpAddr, now_ms: i64) -> GuardResult<()> {
+        self.names_per_address.check(&address_key(ip), now_ms)
     }
 
     /// How many proof-of-work bits a new challenge needs right now (0 = none).

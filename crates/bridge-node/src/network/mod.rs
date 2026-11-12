@@ -730,6 +730,24 @@ impl Node {
         Ok(work(core))
     }
 
+    /// Runs `work` on a snapshot of the network state in a blocking thread (review 9): the core lock is held only to
+    /// copy the `Arc` (O(1)), never during the work, and no worker thread is busy with it - other requests go on. An
+    /// append while a snapshot is held changes a copy of the state (counted in `state_copies`); the work is bounded by
+    /// the caller. `UNAVAILABLE` like [`Node::with_core`].
+    pub(crate) async fn on_snapshot<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&NetState) -> T + Send + 'static,
+    ) -> crate::NodeResult<T> {
+        let state = self.with_core(|core| Arc::clone(&core.state))?;
+        tokio::task::spawn_blocking(move || {
+            let result = work(&state);
+            drop(state); // in the blocking thread, before the answer goes out
+            result
+        })
+        .await
+        .map_err(|_| crate::NodeError::unavailable())
+    }
+
     /// Persists a head row (best effort - it is a cache of what can be fetched again).
     pub(crate) async fn store_head(&self, row: Option<HeadRow>) {
         let (Some(row), Some(network)) = (row, self.network()) else { return };
@@ -817,6 +835,7 @@ pub(crate) fn spawn(node: &Node) -> Vec<JoinHandle<()>> {
         tokio::spawn(duty(node.clone(), timing.relay_retry, Duty::Relay)),
         tokio::spawn(duty(node.clone(), timing.homes, Duty::Homes)),
         tokio::spawn(duty(node.clone(), timing.watch, Duty::Watch)),
+        tokio::spawn(duty(node.clone(), timing.relay_retry, Duty::Reports)),
     ];
     if network.probe.is_some() {
         tasks.push(tokio::spawn(duty(node.clone(), timing.register, Duty::Register)));
@@ -834,6 +853,7 @@ enum Duty {
     Homes,
     Watch,
     Register,
+    Reports,
 }
 
 /// One duty: run, then wait for the interval (or a wake-up), forever. A round never panics the task: errors are
@@ -850,6 +870,7 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Homes => node.homes_round().await,
             Duty::Watch => node.watch_round().await,
             Duty::Register => node.register_round().await,
+            Duty::Reports => node.reports_round().await,
         }
         let Some(network) = node.network() else { return };
         let wake = match duty {
@@ -857,7 +878,7 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Head => Some(&network.wake_head),
             Duty::Witness => Some(&network.wake_witness),
             Duty::Relay => Some(&network.wake_relay),
-            Duty::Gossip | Duty::Homes | Duty::Watch | Duty::Register => None,
+            Duty::Gossip | Duty::Homes | Duty::Watch | Duty::Register | Duty::Reports => None,
         };
         match wake {
             Some(wake) => {

@@ -43,7 +43,12 @@ pub fn copy(identity: &Identity) -> Identity {
 impl AppNet {
     /// Creates the network and `hosts` further web hosts; waits until every node knows every seal.
     pub async fn new(hosts: usize) -> Result<Self, String> {
-        let net = TestNet::create(JoinMode::Open).await?;
+        Self::with_options(hosts, &TestNet::options()).await
+    }
+
+    /// Like [`AppNet::new`], with other network options (docs/08 §2, e.g. 18+ allowed).
+    pub async fn with_options(hosts: usize, options: &admin::NetOptions) -> Result<Self, String> {
+        let net = TestNet::create_full(JoinMode::Open, None, None, options).await?;
         let services = admin::parse_services("gateway,log,witness,web")?;
         net.admin.seal(&net.owner.url, &net.owner.id(), 3, services).await?;
         let mut nodes = Vec::new();

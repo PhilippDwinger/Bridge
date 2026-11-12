@@ -32,6 +32,8 @@ const READY_WAIT: Duration = Duration::from_secs(30);
 /// First port tried for a node, and for its LAN listener.
 const FIRST_PORT: u16 = 7401;
 const FIRST_LAN_PORT: u16 = 7443;
+/// First port tried for a node's loopback reader (`--reader-listen`, review 9).
+const FIRST_READER_PORT: u16 = 7601;
 /// Most members listed in the dashboard.
 const MAX_MEMBERS_SHOWN: usize = 100;
 /// Most members looked at for a search.
@@ -42,7 +44,9 @@ pub const JOIN_LINK_FILE: &str = "join-link.txt";
 
 /// The arguments of a node process (after `node --supervised`): data folder, listener on 127.0.0.1, its name, its
 /// address (the public one with the local proxy trusted, else the local one), LAN, the file with the join link (never
-/// the link itself: command lines are readable by every user of the PC - [`write_join_link`] writes the file), probes.
+/// the link itself: command lines are readable by every user of the PC - [`write_join_link`] writes the file), probes,
+/// the address rule and the reader (Bridge-Browser, docs/08 §8) - for a node with a public address with its loopback
+/// reader port (review 9).
 #[must_use]
 pub fn node_args(entry: &NodeEntry, dir: &Path) -> Vec<String> {
     let mut args = vec![
@@ -68,7 +72,31 @@ pub fn node_args(entry: &NodeEntry, dir: &Path) -> Vec<String> {
         args.extend(["--probe".to_owned(), probe.clone()]);
     }
     args.extend(["--peer-addresses".to_owned(), entry.peer_addresses.as_str().to_owned()]);
+    args.extend(["--reader".to_owned(), entry.reader.as_str().to_owned()]);
+    if let (Some(_), Some(port), true) =
+        (&entry.public_url, entry.reader_port, entry.reader != bridge_node::ReaderAccess::Off)
+    {
+        args.extend(["--reader-listen".to_owned(), format!("127.0.0.1:{port}")]);
+    }
     args
+}
+
+/// Gives every node with a public address a loopback reader port (review 9: its main port trusts the local proxy, so
+/// this PC's browser needs another one) and takes it from nodes without one. Ports already given stay.
+pub fn assign_reader_ports(config: &mut AppConfig) {
+    for index in 0..config.nodes.len() {
+        let Some(node) = config.nodes.get(index) else { break };
+        let wanted = node.public_url.is_some();
+        let avoid: Vec<u16> = std::iter::once(node.listen_port).chain(node.lan_port).collect();
+        let port = match (wanted, node.reader_port) {
+            (true, None) => Some(free_port(config, FIRST_READER_PORT, false, &avoid)),
+            (true, known) => known,
+            (false, _) => None,
+        };
+        if let Some(node) = config.nodes.get_mut(index) {
+            node.reader_port = port;
+        }
+    }
 }
 
 /// Writes the join link into the node's folder (owner-only, atomically) - or removes the file without a link.
@@ -253,14 +281,35 @@ fn service_names(services: Services) -> Vec<&'static str> {
 }
 
 /// The admin client of an owner node, talking to it on this PC.
-fn admin_client(app: &App, entry: &NodeEntry) -> Result<AdminClient, String> {
+pub(crate) fn admin_client(app: &App, entry: &NodeEntry) -> Result<AdminClient, String> {
     if entry.role != NodeRole::Owner {
         return Err("Das geht nur beim Owner-Knoten eines Netzes.".into());
     }
     AdminClient::load(&app.node_dir(entry), Some(&entry.local_url()))
 }
 
-async fn entry_of(app: &App, id: &str) -> Result<NodeEntry, String> {
+/// Runs a request to a node of this PC again (at most four tries, a second apart) while the node answers
+/// `RATE_LIMITED`: everything on this PC - the app, its status rounds, the other local nodes, the browser - reaches it
+/// from 127.0.0.1 and shares that address's limit (docs/04 §7). A refused request changed nothing; each try signs anew.
+pub(crate) async fn patient<T, F, Fut>(mut action: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut tries = 0;
+    loop {
+        match action().await {
+            Err(error) if error.contains("RATE_LIMITED") && tries < 3 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// The settings entry of a node of this PC.
+pub(crate) async fn entry_of(app: &App, id: &str) -> Result<NodeEntry, String> {
     config::check_id(id)?;
     app.config.lock().await.node(id).cloned().ok_or_else(|| "Diesen Knoten gibt es nicht (mehr).".to_owned())
 }
@@ -269,6 +318,7 @@ async fn save(app: &App, change: impl FnOnce(&mut AppConfig) -> Result<(), Strin
     let mut config = app.config.lock().await;
     let mut next = config.clone();
     change(&mut next)?;
+    assign_reader_ports(&mut next);
     next.save(&app.options.app_dir)?;
     *config = next;
     Ok(())
@@ -291,8 +341,8 @@ impl From<String> for CreateError {
     }
 }
 
-/// Step 4 of the assistant: creates the network in a new node folder (genesis, delegation, owner seal - with the
-/// words shown in step 2), starts the owner node, waits until it serves, and returns its join link (with a code in
+/// Step 4 of the assistant: creates the network in a new node folder (genesis with the short name, Meldeweg and 18+
+/// policy of step 1, delegation, owner seal - with the words shown in step 2), starts the owner node, waits until it serves, and returns its join link (with a code in
 /// an invite network) and the QR code. Once the network exists the answer is a success; if the node is slow to
 /// start, it says so (`warning`) and the link comes from the dashboard later.
 pub async fn create_net(app: &App, wizard: &Wizard, reach: &Reach, uses: u32) -> Result<Value, CreateError> {
@@ -317,6 +367,8 @@ pub async fn create_net(app: &App, wizard: &Wizard, reach: &Reach, uses: u32) ->
             probe: None,
             offer_gateway: false,
             peer_addresses: bridge_transport::PeerAddresses::Tailnet,
+            reader: bridge_node::ReaderAccess::Local,
+            reader_port: None,
             created: now_ms(),
         };
         entry.check()?;
@@ -324,11 +376,11 @@ pub async fn create_net(app: &App, wizard: &Wizard, reach: &Reach, uses: u32) ->
         (entry, dir)
     };
     let url = entry.public_url.clone().unwrap_or_else(|| entry.local_url());
-    let (name, mode) = (wizard.name.clone(), wizard.mode);
+    let (name, mode, options) = (wizard.name.clone(), wizard.mode, wizard.options.clone());
     let words = bridge_core::Mnemonic::parse(&wizard.words.words()).map_err(|e| e.to_string())?;
     let target = dir.clone();
     let created = tokio::task::spawn_blocking(move || {
-        admin::create_network_with_words(&target, &name, &url, mode, now_ms(), &words)
+        admin::create_network_with_options(&target, &name, &url, mode, now_ms(), &words, &options)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -519,6 +571,8 @@ pub async fn join(app: &App, request: JoinRequest) -> Result<Value, String> {
             probe: request.host_apps.then(|| "web".to_owned()),
             offer_gateway: request.offer_gateway,
             peer_addresses: bridge_transport::PeerAddresses::Tailnet,
+            reader: bridge_node::ReaderAccess::Local,
+            reader_port: None,
             created: now_ms(),
         }
     };
@@ -661,8 +715,8 @@ pub async fn unban(app: &App, id: &str, subject: &str) -> Result<Value, String> 
 
 // --- settings, delete ---------------------------------------------------------------------------------------------
 
-/// Changes a node's name, ports, address, autostart and address rule (`peer_addresses`: `public`, `tailnet`, `any`;
-/// without the field it stays); a running node is restarted with them.
+/// Changes a node's name, ports, address, autostart, address rule (`peer_addresses`: `public`, `tailnet`, `any`) and
+/// reader (`reader`: `off`, `local`, `lan`; without a field it stays); a running node is restarted with them.
 pub async fn settings(app: &App, id: &str, body: &serde_json::Map<String, Value>) -> Result<Value, String> {
     let entry = entry_of(app, id).await?;
     let reach = Reach::from_json(body)?;
@@ -673,6 +727,12 @@ pub async fn settings(app: &App, id: &str, body: &serde_json::Map<String, Value>
             .as_str()
             .and_then(bridge_transport::PeerAddresses::parse)
             .ok_or("Adressen anderer Knoten: public, tailnet oder any")?,
+    };
+    let reader = match body.get("reader") {
+        None => entry.reader,
+        Some(value) => {
+            value.as_str().and_then(bridge_node::ReaderAccess::parse).ok_or("Leser: off, local, lan oder tailnet")?
+        }
     };
     let name = body.get("name").and_then(Value::as_str).map_or_else(|| entry.name.clone(), |n| n.trim().to_owned());
     config::check_name(&name, "Name des Knotens")?;
@@ -690,6 +750,7 @@ pub async fn settings(app: &App, id: &str, body: &serde_json::Map<String, Value>
     changed.public_url = reach.public_url;
     changed.autostart = autostart;
     changed.peer_addresses = peer_addresses;
+    changed.reader = reader;
     changed.check()?;
     let restart = running && node_args(&changed, &app.node_dir(&changed)) != node_args(&entry, &app.node_dir(&entry));
     save(app, |config| {
@@ -862,6 +923,8 @@ async fn overview_row(app: &App, entry: &NodeEntry) -> Value {
         "public_url": entry.public_url,
         "autostart": entry.autostart,
         "peer_addresses": entry.peer_addresses.as_str(),
+        "reader": entry.reader.as_str(),
+        "reader_port": entry.reader_port,
         "offer_gateway": entry.offer_gateway,
         "probe": entry.probe,
         "joining": entry.join_link.is_some(),
@@ -884,9 +947,17 @@ async fn overview_row(app: &App, entry: &NodeEntry) -> Value {
             "evidence": cache.evidence,
             "members": view.state.member_count(),
             "gateways": view.state.gateways(now).len(),
+            "short": manifest.short,
+            "contact": manifest.contact.is_some(),
+            "adult": manifest.adult_policy().as_str(),
         });
         row["me"] = standing(&view.state, info.card.id(), now);
     }
+    // The Bridge-Browser opens apps through this node's reader - or says why it can not (docs/08 §8).
+    row["browser"] = match crate::browser::reader_blocker(app, entry, &cache) {
+        None => json!({"usable": true, "why": Value::Null}),
+        Some(why) => json!({"usable": false, "why": why}),
+    };
     row
 }
 
@@ -925,7 +996,7 @@ pub async fn overview(app: &App) -> Value {
 }
 
 /// The dashboard of a node: for an owner node the whole network (nodes, candidates, members, invites, apps, log,
-/// watcher), for a member node its own standing.
+/// watcher, names, Meldeweg), for a member node its own standing.
 pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String> {
     let entry = entry_of(app, id).await?;
     let mut answer = json!({"node": overview_row(app, &entry).await});
@@ -945,8 +1016,16 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
     let manifest = state.manifest();
     let owner_id = info.card.id().clone();
 
-    // Nodes: everything sealed (active), the owner node, and the nodes of this PC in this network.
-    let mut ids: BTreeSet<Id> = view.sealed.iter().filter(|id| !state.seals(id, now).is_empty()).cloned().collect();
+    // Nodes: every node sealed (active; a member's seal has no node card), the owner node, and the nodes of this PC in
+    // this network.
+    let mut ids: BTreeSet<Id> = view
+        .sealed
+        .iter()
+        .filter(|id| {
+            !state.seals(id, now).is_empty() && state.card_of(id).is_some_and(|card| card.role() == Role::Node)
+        })
+        .cloned()
+        .collect();
     ids.insert(owner_id.clone());
     for (_, local) in locals.iter().filter(|(_, local)| local.net.as_ref() == Some(&view.net)) {
         ids.insert(local.card.id().clone());
@@ -1082,6 +1161,10 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
         None
     };
     let link = app.links.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).cloned();
+    // Names, Meldeweg and the operator's member key (docs/08 §12).
+    let names = crate::moderation::names_view(state, now);
+    let app_keys = crate::moderation::app_keys(&dir).await;
+    let operator = crate::moderation::operator_id(&dir);
     answer["net"] = json!({
         "id": view.net.as_str(),
         "name": manifest.name,
@@ -1098,7 +1181,16 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
         "evidence": cache.evidence,
         "members": total,
         "gateways": state.gateways(now).len(),
+        "short": manifest.short,
+        "contact": manifest.contact,
+        "adult": manifest.adult_policy().as_str(),
+        "join_mode": manifest.join.mode.as_str(),
     });
+    answer["names"] = names;
+    answer["app_keys"] = json!(app_keys);
+    answer["operator"] = json!(operator.as_ref().map(|id| json!({
+        "id": id.as_str(), "level": state.level(id, now), "member": state.is_member(id, now),
+    })));
     answer["nodes"] = json!(nodes);
     answer["candidates"] = json!(candidates);
     answer["members"] = json!({"total": total, "list": members, "more": total > MAX_MEMBERS_SHOWN});
@@ -1200,6 +1292,8 @@ mod tests {
             probe: None,
             offer_gateway: false,
             peer_addresses: bridge_transport::PeerAddresses::Tailnet,
+            reader: bridge_node::ReaderAccess::Local,
+            reader_port: None,
             created: 0,
         }
     }
@@ -1220,7 +1314,9 @@ mod tests {
                 "--url",
                 "http://127.0.0.1:7401",
                 "--peer-addresses",
-                "tailnet"
+                "tailnet",
+                "--reader",
+                "local"
             ]
         );
         let mut full = entry();
@@ -1234,10 +1330,50 @@ mod tests {
         assert!(
             args.contains("--lan 7443")
                 && args.contains(&format!("--join-net-file {file}"))
-                && args.ends_with("--probe web --peer-addresses tailnet")
+                && args.ends_with("--probe web --peer-addresses tailnet --reader local")
         );
         // Review 8, finding 7: the link (with its invite code) is never on the command line.
         assert!(!args.contains("bridge4://") && !args.contains("GEHEIM"), "{args}");
+        // Review 9: with its loopback reader port, a public node gets the listener for this PC's browser.
+        full.reader_port = Some(7601);
+        let args = node_args(&full, dir).join(" ");
+        assert!(args.ends_with("--reader local --reader-listen 127.0.0.1:7601"), "{args}");
+        full.reader = bridge_node::ReaderAccess::Off;
+        assert!(!node_args(&full, dir).join(" ").contains("--reader-listen"), "no reader, no listener");
+    }
+
+    /// Review 9 (open point of the UI): a node with a public address trusts the local proxy on its main port; it gets
+    /// a loopback reader port of its own (distinct from every other port), a node without one gets none.
+    #[test]
+    fn public_nodes_get_a_loopback_reader_port() -> Result<(), String> {
+        let mut config = AppConfig::default();
+        let mut public = entry();
+        public.public_url = Some("https://pc.tail1.ts.net:8443/k".into());
+        let mut second = public.clone();
+        second.id = "0a1b2c3e".into();
+        second.listen_port = 7402;
+        let mut local = entry();
+        local.id = "0a1b2c3f".into();
+        local.listen_port = 7403;
+        local.reader_port = Some(7699);
+        config.nodes = vec![public, second, local];
+        assign_reader_ports(&mut config);
+        let ports: Vec<Option<u16>> = config.nodes.iter().map(|node| node.reader_port).collect();
+        assert!(ports[0].is_some() && ports[1].is_some() && ports[0] != ports[1], "{ports:?}");
+        assert_eq!(ports[2], None, "no public address: the main port serves the browser");
+        config.check()?;
+        // Ports given stay.
+        let before = ports.clone();
+        assign_reader_ports(&mut config);
+        assert_eq!(config.nodes.iter().map(|node| node.reader_port).collect::<Vec<_>>(), before);
+        // The browser frames and asks exactly that port - never the main port of a public node.
+        let origin = crate::browser::reader_origin(&config.nodes[0]);
+        assert_eq!(origin, before[0].map(|port| format!("http://127.0.0.1:{port}")));
+        assert_eq!(crate::browser::reader_origin(&config.nodes[2]).as_deref(), Some("http://127.0.0.1:7403"));
+        let mut unassigned = config.nodes[0].clone();
+        unassigned.reader_port = None;
+        assert_eq!(crate::browser::reader_origin(&unassigned), None, "public without a reader port: nothing");
+        Ok(())
     }
 
     #[test]

@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::error::{NetError, NetResult};
 use crate::merkle::{Hash, MAX_TREE_SIZE};
+use crate::names::{AdultPolicy, MAX_BLOCKLISTS, MAX_CONTACT_CHARS, NameRules, check_short, id_set};
 
 /// One day in milliseconds.
 pub const DAY_MS: i64 = 24 * 3600 * 1000;
@@ -77,12 +78,25 @@ pub enum Kind {
     Home,
     /// One version of a Bridge app (docs/07 §3; not in the log - hosts keep it).
     App,
+    /// A name of an app, node or member (docs/08 §3; log).
+    Name,
+    /// An admin's label of a name or target (docs/08 §5; log).
+    Label,
 }
 
 impl Kind {
     /// The kinds that are entries of the transparency log.
-    pub const LOG_KINDS: [Kind; 7] =
-        [Kind::Manifest, Kind::Delegation, Kind::Invite, Kind::Member, Kind::Seal, Kind::Revoke, Kind::Ban];
+    pub const LOG_KINDS: [Kind; 9] = [
+        Kind::Manifest,
+        Kind::Delegation,
+        Kind::Invite,
+        Kind::Member,
+        Kind::Seal,
+        Kind::Revoke,
+        Kind::Ban,
+        Kind::Name,
+        Kind::Label,
+    ];
 
     /// Wire name (`t`).
     #[must_use]
@@ -99,6 +113,8 @@ impl Kind {
             Self::Cosign => "cosign",
             Self::Home => "home",
             Self::App => "app",
+            Self::Name => "name",
+            Self::Label => "label",
         }
     }
 
@@ -117,6 +133,8 @@ impl Kind {
             "cosign" => Self::Cosign,
             "home" => Self::Home,
             "app" => Self::App,
+            "name" => Self::Name,
+            "label" => Self::Label,
             _ => return None,
         })
     }
@@ -164,7 +182,7 @@ pub trait Body: Sized {
 }
 
 /// `to_body` = build, then parse with the strict parser (a builder can never produce what others refuse).
-fn checked<B: Body>(value: Value) -> NetResult<Value> {
+pub(crate) fn checked<B: Body>(value: Value) -> NetResult<Value> {
     B::from_body(&value)?;
     Ok(value)
 }
@@ -636,6 +654,16 @@ pub struct Manifest {
     pub apps: Option<AppRules>,
     /// Rules of the watchers (optional field `watch`, docs/06 §11.3; `None` = not in the body, the defaults hold).
     pub watch: Option<WatchRules>,
+    /// Short name of the network for addresses `<name>.<short>` (optional field `short`, docs/08 §2).
+    pub short: Option<String>,
+    /// The operator's way to receive reports (optional field `contact`, docs/08 §2; `None`: flagged everywhere).
+    pub contact: Option<String>,
+    /// Name rules (optional field `names`, docs/08 §2; `None`: the defaults hold).
+    pub names: Option<NameRules>,
+    /// Whether 18+ content is allowed (optional field `adult`, docs/08 §2; `None`: forbidden).
+    pub adult: Option<AdultPolicy>,
+    /// Publishers of blocklists (optional field `blocklists`, docs/08 §9; only the field so far).
+    pub blocklists: Option<Vec<Id>>,
 }
 
 /// Who runs and who witnesses the log: the part of a manifest that heads are checked against (docs/06 §5). Which
@@ -649,6 +677,9 @@ pub struct LogRules {
     /// Cosignatures needed for a witnessed head.
     pub witness_threshold: usize,
 }
+
+/// Optional fields of the manifest (absent fields stay absent: older manifests keep their bytes).
+const MANIFEST_OPTIONAL: [&str; 7] = ["apps", "watch", "short", "contact", "names", "adult", "blocklists"];
 
 const MANIFEST_FIELDS: [&str; 12] = [
     "name",
@@ -691,6 +722,11 @@ impl Manifest {
             card: master_card,
             apps: None,
             watch: None,
+            short: None,
+            contact: None,
+            names: None,
+            adult: None,
+            blocklists: None,
         };
         manifest.to_body()?;
         Ok(manifest)
@@ -716,6 +752,18 @@ impl Manifest {
     #[must_use]
     pub fn watch_rules(&self) -> WatchRules {
         self.watch.unwrap_or_default()
+    }
+
+    /// Name rules (`names`, or the defaults without the field).
+    #[must_use]
+    pub fn name_rules(&self) -> NameRules {
+        self.names.clone().unwrap_or_default()
+    }
+
+    /// Whether 18+ content is allowed (`adult`, default forbidden).
+    #[must_use]
+    pub fn adult_policy(&self) -> AdultPolicy {
+        self.adult.unwrap_or(AdultPolicy::Forbidden)
     }
 
     /// A copy with the version increased by one - the start of every change.
@@ -749,7 +797,7 @@ impl Body for Manifest {
 
     fn from_body(body: &Value) -> NetResult<Self> {
         let object = object(body, "manifest")?;
-        fields(object, &MANIFEST_FIELDS, &["apps", "watch"], "manifest")?;
+        fields(object, &MANIFEST_FIELDS, &MANIFEST_OPTIONAL, "manifest")?;
         let name = text(object, "name")?;
         check_text(name, 1, MAX_NET_NAME_CHARS, false, "name")?;
         let description = text(object, "description")?;
@@ -803,6 +851,36 @@ impl Body for Manifest {
                 ));
             }
         }
+        let short = match object.get("short") {
+            None => None,
+            Some(_) => {
+                let short = text(object, "short")?;
+                check_short(short)?;
+                Some(short.to_owned())
+            }
+        };
+        let contact = match object.get("contact") {
+            None => None,
+            Some(_) => {
+                let contact = text(object, "contact")?;
+                check_text(contact, 1, MAX_CONTACT_CHARS, false, "contact")?;
+                Some(contact.to_owned())
+            }
+        };
+        let names = object.get("names").map(NameRules::parse).transpose()?;
+        let adult = match object.get("adult") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .and_then(AdultPolicy::parse)
+                    .ok_or_else(|| NetError::format("adult: allowed or forbidden"))?,
+            ),
+        };
+        let blocklists = match object.get("blocklists") {
+            None => None,
+            Some(value) => Some(id_set(Some(value), MAX_BLOCKLISTS, "blocklists")?),
+        };
         Ok(Self {
             name: name.to_owned(),
             description: description.to_owned(),
@@ -818,6 +896,11 @@ impl Body for Manifest {
             card,
             apps,
             watch,
+            short,
+            contact,
+            names,
+            adult,
+            blocklists,
         })
     }
 
@@ -854,6 +937,21 @@ impl Body for Manifest {
         }
         if let Some(watch) = self.watch {
             body["watch"] = watch.to_value();
+        }
+        if let Some(short) = &self.short {
+            body["short"] = json!(short);
+        }
+        if let Some(contact) = &self.contact {
+            body["contact"] = json!(contact);
+        }
+        if let Some(names) = &self.names {
+            body["names"] = names.to_value();
+        }
+        if let Some(adult) = self.adult {
+            body["adult"] = json!(adult.as_str());
+        }
+        if let Some(blocklists) = &self.blocklists {
+            body["blocklists"] = ids_value(blocklists);
         }
         checked::<Self>(body)
     }
@@ -1233,12 +1331,12 @@ impl Body for Home {
 // ---------------------------------------------------------------------------------------------------------------
 // Strict field helpers
 
-fn object<'a>(value: &'a Value, what: &str) -> NetResult<&'a Map<String, Value>> {
+pub(crate) fn object<'a>(value: &'a Value, what: &str) -> NetResult<&'a Map<String, Value>> {
     value.as_object().ok_or_else(|| NetError::format(format!("{what}: not an object")))
 }
 
 /// Exactly the allowed fields: all `required` present, nothing besides `required` and `optional`.
-fn fields(object: &Map<String, Value>, required: &[&str], optional: &[&str], what: &str) -> NetResult<()> {
+pub(crate) fn fields(object: &Map<String, Value>, required: &[&str], optional: &[&str], what: &str) -> NetResult<()> {
     if let Some(unknown) =
         object.keys().find(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
     {
@@ -1250,18 +1348,22 @@ fn fields(object: &Map<String, Value>, required: &[&str], optional: &[&str], wha
     Ok(())
 }
 
-fn sub_object<'a>(object: &'a Map<String, Value>, name: &str, required: &[&str]) -> NetResult<&'a Map<String, Value>> {
+pub(crate) fn sub_object<'a>(
+    object: &'a Map<String, Value>,
+    name: &str,
+    required: &[&str],
+) -> NetResult<&'a Map<String, Value>> {
     let inner = object.get(name).ok_or_else(|| NetError::format(format!("{name}: missing")))?;
     let inner = self::object(inner, name)?;
     fields(inner, required, &[], name)?;
     Ok(inner)
 }
 
-fn text<'a>(object: &'a Map<String, Value>, name: &str) -> NetResult<&'a str> {
+pub(crate) fn text<'a>(object: &'a Map<String, Value>, name: &str) -> NetResult<&'a str> {
     object.get(name).and_then(Value::as_str).ok_or_else(|| NetError::format(format!("{name}: missing or not a string")))
 }
 
-fn number(object: &Map<String, Value>, name: &str, min: u64, max: u64) -> NetResult<u64> {
+pub(crate) fn number(object: &Map<String, Value>, name: &str, min: u64, max: u64) -> NetResult<u64> {
     object
         .get(name)
         .and_then(Value::as_u64)
@@ -1270,25 +1372,25 @@ fn number(object: &Map<String, Value>, name: &str, min: u64, max: u64) -> NetRes
 }
 
 /// Narrows a number already bounded by a small maximum.
-fn small(value: u64) -> usize {
+pub(crate) fn small(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-fn id(object: &Map<String, Value>, name: &str) -> NetResult<Id> {
+pub(crate) fn id(object: &Map<String, Value>, name: &str) -> NetResult<Id> {
     Ok(Id::parse(text(object, name)?)?)
 }
 
-fn hash(object: &Map<String, Value>, name: &str) -> NetResult<Hash> {
+pub(crate) fn hash(object: &Map<String, Value>, name: &str) -> NetResult<Hash> {
     Ok(b64_fixed::<32>(text(object, name)?, name)?)
 }
 
-fn card(value: Option<&Value>, what: &str) -> NetResult<KeyCard> {
+pub(crate) fn card(value: Option<&Value>, what: &str) -> NetResult<KeyCard> {
     let value = value.ok_or_else(|| NetError::format(format!("{what}: missing")))?;
     Ok(KeyCard::from_value(value.clone())?)
 }
 
 /// Text rules: length in characters, no control characters (line breaks only where allowed).
-fn check_text(text: &str, min_chars: usize, max_chars: usize, allow_newline: bool, what: &str) -> NetResult<()> {
+pub fn check_text(text: &str, min_chars: usize, max_chars: usize, allow_newline: bool, what: &str) -> NetResult<()> {
     let count = text.chars().count();
     if count < min_chars || count > max_chars {
         return Err(NetError::format(format!("{what}: {min_chars}..={max_chars} characters")));
@@ -1300,7 +1402,7 @@ fn check_text(text: &str, min_chars: usize, max_chars: usize, allow_newline: boo
 }
 
 /// 1..=max distinct IDs.
-fn id_list(value: Option<&Value>, max: usize, what: &str) -> NetResult<Vec<Id>> {
+pub(crate) fn id_list(value: Option<&Value>, max: usize, what: &str) -> NetResult<Vec<Id>> {
     let list = value
         .and_then(Value::as_array)
         .filter(|list| (1..=max).contains(&list.len()))
@@ -1317,7 +1419,7 @@ fn id_list(value: Option<&Value>, max: usize, what: &str) -> NetResult<Vec<Id>> 
     Ok(ids)
 }
 
-fn ids_value(ids: &[Id]) -> Value {
+pub(crate) fn ids_value(ids: &[Id]) -> Value {
     Value::Array(ids.iter().map(|id| json!(id.as_str())).collect())
 }
 
@@ -1326,6 +1428,7 @@ mod tests {
     use bridge_core::Role;
 
     use super::*;
+    use crate::names::{AdultPolicy, NameRules};
 
     const T0: i64 = 1_794_200_000_000;
 
@@ -1481,6 +1584,36 @@ mod tests {
         short["watch"]["probe_interval_s"] = json!(1);
         let rules = Manifest::from_body(&short)?.watch_rules();
         assert_eq!((rules.seal_ms(), rules.renew_ms(), rules.member_age_ms()), (60_000, 59_000, 1_000));
+        // Phase 4 (docs/08 §2): short, contact, names, adult, blocklists - optional, kept exactly, strict.
+        let mut phase4 = valid.clone();
+        phase4["short"] = json!("meinnetz");
+        phase4["contact"] = json!("abuse@example.org");
+        phase4["names"] = json!({"min_level": 1, "quota": [0, 3, 20, 100], "reserved": ["sparkasse"]});
+        phase4["adult"] = json!("allowed");
+        phase4["blocklists"] = json!([ids[0]]);
+        let parsed = Manifest::from_body(&phase4)?;
+        assert_eq!(parsed.to_body()?, phase4, "kept exactly");
+        assert_eq!(parsed.adult_policy(), AdultPolicy::Allowed);
+        assert_eq!(parsed.name_rules().reserved, vec!["sparkasse".to_owned()]);
+        let plain = Manifest::from_body(&valid)?;
+        assert_eq!((plain.adult_policy(), plain.name_rules()), (AdultPolicy::Forbidden, NameRules::default()));
+        assert_eq!((plain.short, plain.contact, plain.blocklists), (None, None, None));
+        r(&phase4, &["short"], json!("Mein Netz"));
+        r(&phase4, &["short"], json!("x"));
+        r(&phase4, &["short"], json!("x".repeat(25)));
+        r(&phase4, &["short"], json!(7));
+        r(&phase4, &["contact"], json!(""));
+        r(&phase4, &["contact"], json!("x".repeat(201)));
+        r(&phase4, &["contact"], json!("a\nb"));
+        r(&phase4, &["names", "min_level"], json!(4));
+        r(&phase4, &["names", "quota"], json!([0, 1, 2]));
+        r(&phase4, &["names", "extra"], json!(1));
+        r(&phase4, &["adult"], json!("yes"));
+        r(&phase4, &["blocklists"], json!([ids[0], ids[0]]));
+        r(&phase4, &["blocklists"], json!(ids[..9]));
+        let mut empty = phase4.clone();
+        empty["blocklists"] = json!([]);
+        assert!(Manifest::from_body(&empty).is_ok(), "an empty blocklist list is fine");
         // Limits at the edges are fine
         let mut edge = valid.clone();
         edge["limits"]["members"] = json!(MAX_MEMBERS_LIMIT);

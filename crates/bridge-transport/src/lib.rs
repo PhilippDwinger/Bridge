@@ -98,6 +98,11 @@ pub struct Request {
     pub bearer: Option<String>,
     /// The body (at most `max_body_bytes`).
     pub body: Bytes,
+    /// The `Host` header (at most 255 bytes, lower case), if any - for answers only meant for local callers.
+    pub host: Option<String>,
+    /// The request came through a proxy: from a trusted proxy, or with any forwarding header (`X-Forwarded-For`,
+    /// `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`) - never a local caller then, whatever `peer` says.
+    pub forwarded: bool,
 }
 
 /// A response: JSON unless `headers` name another `Content-Type`.
@@ -635,7 +640,8 @@ async fn answer<H: Handler>(
     let config = context.config;
     let path = request.uri().path().to_owned();
     let client = client_ip(&request, context.peer, config);
-    let reading = read_and_handle(request, client, &path, config, handler.as_ref());
+    let proxied = config.trusted_proxies.contains(&context.peer);
+    let reading = read_and_handle(request, client, proxied, &path, config, handler.as_ref());
     let response = match tokio::time::timeout(config.request_timeout, reading).await {
         Ok(response) => response,
         Err(_) => handler.decorate(&path, Response::error(503, "UNAVAILABLE", "request took too long", None)),
@@ -659,6 +665,7 @@ async fn answer<H: Handler>(
 async fn read_and_handle<H: Handler>(
     request: http::Request<Incoming>,
     peer: IpAddr,
+    proxied: bool,
     path: &str,
     config: &ServerConfig,
     handler: &H,
@@ -695,6 +702,16 @@ async fn read_and_handle<H: Handler>(
         .and_then(|value| value.strip_prefix("Bearer "))
         .filter(|token| token.len() <= 128)
         .map(str::to_owned);
+    let headers = request.headers();
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|host| host.len() <= 255)
+        .map(str::to_ascii_lowercase);
+    let forwarded = proxied
+        || ["x-forwarded-for", "forwarded", "x-real-ip", "x-forwarded-host"]
+            .iter()
+            .any(|name| headers.contains_key(*name));
     let reading = Limited::new(request.into_body(), config.max_body_bytes).collect();
     let body = match tokio::time::timeout(config.body_timeout, reading).await {
         Ok(Ok(collected)) => collected.to_bytes(),
@@ -704,7 +721,7 @@ async fn read_and_handle<H: Handler>(
         Ok(Err(_)) => return refuse(400, "BAD_FORMAT", "could not read the request body"),
         Err(_) => return refuse(408, "BAD_FORMAT", "request body too slow"),
     };
-    handler.handle(Request { method, path, peer, bearer, body }).await
+    handler.handle(Request { method, path, peer, bearer, body, host, forwarded }).await
 }
 
 /// The body of this request was (partly) not read: the connection cannot be reused, tell the client.
@@ -862,11 +879,13 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             let body = format!(
-                r#"{{"path":"{}","peer":"{}","bearer":{},"len":{}}}"#,
+                r#"{{"path":"{}","peer":"{}","bearer":{},"len":{},"host":"{}","forwarded":{}}}"#,
                 request.path,
                 request.peer,
                 request.bearer.map_or("null".to_owned(), |t| format!("\"{t}\"")),
-                request.body.len()
+                request.body.len(),
+                request.host.unwrap_or_default(),
+                request.forwarded
             );
             Response::ok(body.into_bytes())
         }
@@ -892,6 +911,9 @@ mod tests {
         assert_eq!(answer.status, 200);
         let text = String::from_utf8_lossy(&answer.body).to_string();
         assert!(text.contains(r#""bearer":"tok""#) && text.contains(r#""len":1000"#) && text.contains("127.0.0.1"));
+        // Host and "forwarded" (docs/08 §8): a direct call is not forwarded, the host is what the client asked for.
+        let host = format!(r#""host":"{}""#, server.local_addr());
+        assert!(text.contains(&host) && text.contains(r#""forwarded":false"#), "{text}");
         let too_big = client.post("/v4/x", None, vec![b'a'; 1001]).await?;
         assert_eq!(too_big.status, 413);
         assert!(String::from_utf8_lossy(&too_big.body).contains("TOO_LARGE"));
@@ -906,6 +928,21 @@ mod tests {
             .await
             .map_err(|e| TransportError::Connection(e.to_string()))?;
         assert!(spoofed.contains("127.0.0.1") && !spoofed.contains("6.6.6.6"));
+        // ... but the request counts as forwarded: never a local caller for answers only meant for the own computer.
+        assert!(spoofed.contains(r#""forwarded":true"#), "{spoofed}");
+        for name in ["forwarded", "x-real-ip", "x-forwarded-host"] {
+            let answer = reqwest::Client::new()
+                .get(format!("http://{}/x", server.local_addr()))
+                .header(name, "8.8.8.8")
+                .header("host", "Evil.Example")
+                .send()
+                .await
+                .map_err(|e| TransportError::Connection(e.to_string()))?
+                .text()
+                .await
+                .map_err(|e| TransportError::Connection(e.to_string()))?;
+            assert!(answer.contains(r#""forwarded":true"#) && answer.contains(r#""host":"evil.example""#), "{answer}");
+        }
         server.shutdown().await;
         Ok(())
     }
@@ -928,6 +965,7 @@ mod tests {
             .await
             .map_err(|e| TransportError::Connection(e.to_string()))?;
         assert!(forwarded.contains("7.7.7.7"), "{forwarded}");
+        assert!(forwarded.contains(r#""forwarded":true"#), "{forwarded}");
         for header in ["6.6.6.6, 203.0.113.7:4711", "6.6.6.6, unknown", "6.6.6.6, [2001:db8::1]:443"] {
             let answer = reqwest::Client::new()
                 .get(format!("http://{}/x", server.local_addr()))

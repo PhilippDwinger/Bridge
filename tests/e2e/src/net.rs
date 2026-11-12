@@ -52,19 +52,24 @@ where
 }
 
 /// A node config for tests: fast network timing and limits that let many nodes on 127.0.0.1 talk a lot - and, since
-/// all of them live on 127.0.0.1, private peer addresses allowed (review 8; the default refuses them).
+/// all of them live on 127.0.0.1, private peer addresses allowed (review 8; the default refuses them). The reader is
+/// off (docs/08 §8; reader tests turn it on).
 #[must_use]
 pub fn test_config(dir: &Path, network: Option<NetConfig>, url: &str) -> NodeConfig {
     let mut config = NodeConfig::new(dir);
     config.network = network;
     config.urls = vec![url.to_owned()];
     config.peer_addresses = bridge_node::PeerAddresses::Any;
+    // All test requests come from 127.0.0.1: with the reader on, a node that stopped hosting an app would still serve
+    // it as reader for "its own browser" - tests of hosting would not see the stop. Reader tests turn it on.
+    config.reader.access = bridge_node::ReaderAccess::Off;
     let fast = Rate { per_second: 100_000, burst: 100_000 };
     config.limits = Limits {
         per_address: fast,
         challenges_per_address: fast,
         proofs_per_address: fast,
         reads_per_address: fast,
+        names_per_address: fast,
         sends_per_identity: fast,
         ..Limits::default()
     };
@@ -180,11 +185,29 @@ impl TestNet {
     /// address in its card than the one it listens on (e.g. [`dead_url`]: other nodes can reach it only over the
     /// LAN). The admin key always talks to the real address.
     pub async fn create_with(mode: JoinMode, public: Option<&str>, lan: Option<LanConfig>) -> Result<Self, String> {
+        Self::create_full(mode, public, lan, &Self::options()).await
+    }
+
+    /// The network options of the test networks (docs/08 §2): short name `testnetz`, a contact, 18+ forbidden.
+    #[must_use]
+    pub fn options() -> admin::NetOptions {
+        admin::NetOptions { short: Some("testnetz".into()), contact: Some("abuse@test.example".into()), adult: false }
+    }
+
+    /// Like [`TestNet::create_with`], with other network options.
+    pub async fn create_full(
+        mode: JoinMode,
+        public: Option<&str>,
+        lan: Option<LanConfig>,
+        options: &admin::NetOptions,
+    ) -> Result<Self, String> {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
         let url = format!("http://{}", listener.local_addr().map_err(|e| e.to_string())?);
         let public = public.unwrap_or(&url).to_owned();
-        let created = admin::create_network(dir.path(), "Testnetz", &public, mode, now_ms())?;
+        let words = bridge_core::Mnemonic::generate(&mut OsRng);
+        let created =
+            admin::create_network_with_options(dir.path(), "Testnetz", &public, mode, now_ms(), &words, options)?;
         let master = bridge_core::Mnemonic::parse(&created.words)
             .and_then(|words| words.to_identity())
             .map_err(|e| e.to_string())?;
