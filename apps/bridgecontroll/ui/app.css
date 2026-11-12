@@ -15,7 +15,7 @@
 .bc-muted { color: var(--muted); font-size: var(--fs-small); }
 .bc-text { margin: 0; color: var(--text-2); line-height: 1.5; }
 .bc-p0 { margin: 0; }
-.start__wordmark.bc-wordmark { width: 200px; }
+.start__wordmark.bc-wordmark { width: 250px; }
 .hs__actions .b-btn--sticker { margin-left: 4px; }
 .bc-foot { display: flex; flex-direction: column; gap: 14px; }
 .bc-foot__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

@@ -26,6 +26,7 @@ pub mod moderation;
 pub mod ops;
 pub mod qr;
 pub mod sites;
+pub mod startmenu;
 pub mod status;
 pub mod supervisor;
 pub mod wizard;
@@ -100,6 +101,9 @@ pub struct Options {
     pub autostart_dir: Option<PathBuf>,
     /// The app folder was given explicitly (it then goes into the autostart entry).
     pub custom_app_dir: bool,
+    /// Where the start menu entry "BridgeControll" goes (`None`: none - the program sets the system's place, tests do
+    /// not touch the system).
+    pub menu_dir: Option<PathBuf>,
 }
 
 impl Options {
@@ -115,6 +119,7 @@ impl Options {
             start_nodes: true,
             autostart_dir: autostart::system_dir(),
             custom_app_dir: false,
+            menu_dir: None,
         }
     }
 }
@@ -282,6 +287,19 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
         quit: Notify::new(),
         options,
     });
+    // The first start makes the start menu entry if there is none (nothing on the desktop is touched then).
+    if let Some(menu) = app.options.menu_dir.clone().filter(|menu| !startmenu::exists(menu)) {
+        let app_dir = app.options.app_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let made = std::env::current_exe()
+                .map_err(|e| e.to_string())
+                .and_then(|exe| startmenu::set(&menu, &app_dir, &exe, false));
+            match made {
+                Ok(done) => tracing::info!(entry = %done.entry.display(), "Startmenü-Eintrag angelegt"),
+                Err(error) => tracing::warn!(%error, "Startmenü-Eintrag"),
+            }
+        });
+    }
     if app.options.start_nodes {
         let config = app.config.lock().await;
         for entry in config.nodes.iter().filter(|entry| entry.autostart) {

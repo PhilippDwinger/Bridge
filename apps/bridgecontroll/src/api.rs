@@ -65,6 +65,7 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
             Some(enabled) => result(ops::set_login_autostart(app, enabled).map(|()| json!({"ok": true}))),
             None => Answer::error(400, "login_autostart fehlt"),
         },
+        ["startmenu"] => result(ops::set_startmenu(app).await),
         ["quit"] => {
             app.quit.notify_waiters();
             app.quit.notify_one();

@@ -46,9 +46,11 @@ def free_port():
 
 
 def start_app(exe, data, port):
+    # The start menu entry goes into a temporary place, not into this machine's menu.
+    env = dict(os.environ, XDG_DATA_HOME=os.path.join(data, "xdg-data"))
     process = subprocess.Popen(
         [exe, "--data", data, "--port", str(port), "--no-browser"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     deadline = time.time() + 30
     while time.time() < deadline:
         line = process.stdout.readline()

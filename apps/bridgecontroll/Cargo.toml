@@ -16,6 +16,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+base64.workspace = true
 bridge-core.workspace = true
 bridge-net.workspace = true
 bridge-node.workspace = true

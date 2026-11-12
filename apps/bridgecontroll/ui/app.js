@@ -203,7 +203,7 @@
   function showLoggedOut() {
     stopTimer();
     app.replaceChildren(h('main', { class: 'bc-login' }, h('div', { class: 'b-empty' },
-      h('img', { class: 'bc-login__mark', src: '/design/logo/bridge-bildmarke.svg', alt: '' }),
+      h('img', { class: 'bc-login__mark', src: '/ui/logo/bridge4-bildmarke.svg', alt: '' }),
       h('h3', { text: 'Nicht angemeldet' }),
       h('p', { text: 'Öffne BridgeControll noch einmal (Doppelklick) – es öffnet sich dann mit einem neuen Anmelde-Link.' }))));
   }
@@ -424,7 +424,7 @@
       const main = h('main', { class: 'hs' + (first ? ' b-page-in' : '') },
         h('aside', { class: 'hs__aside' },
           h('div', { class: 'bc-stack' },
-            h('img', { class: 'start__wordmark bc-wordmark', src: '/design/logo/bridge-wortmarke.svg', alt: 'Bridge' }),
+            h('img', { class: 'start__wordmark bc-wordmark', src: '/ui/logo/bridge4-wortmarke.svg', alt: 'Bridge 4' }),
             h('p', { class: 'start__lead bc-p0' }, 'Deine BridgeNetze auf ', h('strong', { text: data.host }), '. Erstell ein eigenes Netz oder tritt einem bei.'),
             h('div', { class: 'b-stats' },
               h('div', { class: 'b-stat' }, h('span', { class: 'b-stat__val', text: String(data.nodes.length ? nets.size : 0) }), h('span', { class: 'b-stat__lbl', text: 'Netze' })),
@@ -436,9 +436,12 @@
               data.nodes.some((n) => n.net) ? h('a', { class: 'b-btn b-btn--ghost', href: '#/browser' }, icon('globe'), 'Bridge-Browser') : null)),
           h('div', { class: 'bc-foot' },
             h('div', { class: 'start__foot' },
-              h('img', { class: 'start__mark', src: '/design/logo/bridge-bildmarke.svg', alt: '' }),
+              h('img', { class: 'start__mark', src: '/ui/logo/bridge4-bildmarke.svg', alt: '' }),
               h('span', { class: 'start__version' }, h('span', { text: 'BridgeControll v2 · ' + data.version }), h('span', { text: 'Bridge 4 · bridge-node ' + data.version }))),
             h('div', { class: 'bc-foot__row' }, autostart,
+              data.startmenu && data.startmenu.supported ? h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button',
+                text: data.startmenu.exists ? 'Startmenü' : 'Ins Startmenü', title: 'Eintrag „BridgeControll“ im Startmenü auf dieses Programm setzen',
+                onclick: () => startmenuDialog(data.autostart.windows) }) : null,
               h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Beenden', onclick: quitDialog })))),
         list);
       app.replaceChildren(main);
@@ -452,7 +455,7 @@
 
   function emptyState() {
     return h('div', { class: 'b-empty' },
-      h('img', { class: 'bc-login__mark', src: '/design/logo/bridge-bildmarke.svg', alt: '' }),
+      h('img', { class: 'bc-login__mark', src: '/ui/logo/bridge4-bildmarke.svg', alt: '' }),
       h('h3', { text: 'Noch kein Netz' }),
       h('p', { text: 'Erstell dein erstes BridgeNet oder tritt mit einem Einladungslink einem Netz bei. Jeder Knoten läuft als eigenes Programm auf diesem PC.' }),
       h('a', { class: 'b-btn b-btn--primary', href: '#/neu' }, icon('plus'), 'Erstes Netz erstellen'));
@@ -1242,6 +1245,18 @@
       h('div', { class: 'bc-row bc-row--between' }, h('h2', { class: 'bc-h2', text: 'Namen' }),
         h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', onclick: () => nameDialog(ownerId, data) }, icon('plus'), 'Name anmelden')),
       h('div', { class: 'bc-list' }, rows));
+  }
+
+  function startmenuDialog(windows) {
+    const text = windows
+      ? 'Der Eintrag „BridgeControll“ im Startmenü (und damit die Windows-Suche) öffnet dann dieses Programm – Bridge 4. Eine Desktop-Verknüpfung „BridgeControll“ zur alten BridgeControll (Bridge 3) heißt danach „BridgeControll 3“ und funktioniert weiter.'
+      : 'Der Eintrag „BridgeControll“ im Anwendungsmenü öffnet dann dieses Programm – Bridge 4.';
+    confirmDialog('Ins Startmenü?', text, 'Eintragen', async () => {
+      const result = await api('POST', '/api/startmenu', {});
+      toast('ok', 'Im Startmenü', result.renamed_old ? 'Die alte heißt jetzt „BridgeControll 3“.' : 'Suche „BridgeControll“ öffnet jetzt Bridge 4.');
+      refresh();
+      return true;
+    }, false);
   }
 
   // ---------- Website hochladen (docs/07 §8a) ----------

@@ -789,6 +789,18 @@ pub async fn delete(app: &App, id: &str, confirm: &str) -> Result<Value, String>
     Ok(json!({"ok": true, "backup": backup.display().to_string()}))
 }
 
+/// `POST /api/startmenu`: the start menu entry "BridgeControll" to this program; on Windows a desktop shortcut
+/// "BridgeControll" to another program (Bridge 3) becomes "BridgeControll 3".
+pub async fn set_startmenu(app: &App) -> Result<Value, String> {
+    let menu = app.options.menu_dir.clone().ok_or("Einen Startmenü-Eintrag gibt es auf diesem System nicht.")?;
+    let app_dir = app.options.app_dir.clone();
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let done = tokio::task::spawn_blocking(move || crate::startmenu::set(&menu, &app_dir, &exe, true))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(json!({"ok": true, "renamed_old": done.renamed_old}))
+}
+
 /// Switches "start with the system" on or off.
 pub fn set_login_autostart(app: &App, enabled: bool) -> Result<(), String> {
     let dir = app.autostart_dir().ok_or("Autostart gibt es auf diesem System noch nicht.")?;
@@ -991,6 +1003,10 @@ pub async fn overview(app: &App) -> Value {
             "supported": app.autostart_dir().is_some(),
             "enabled": app.autostart_dir().is_some_and(autostart::is_enabled),
             "windows": cfg!(windows),
+        },
+        "startmenu": {
+            "supported": app.options.menu_dir.is_some(),
+            "exists": app.options.menu_dir.as_deref().is_some_and(crate::startmenu::exists),
         },
     })
 }

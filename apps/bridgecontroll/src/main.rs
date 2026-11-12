@@ -148,6 +148,7 @@ async fn app(args: &[String]) -> ExitCode {
     let mut options = Options::new(app_dir, exe);
     options.port = parsed.port;
     options.custom_app_dir = custom;
+    options.menu_dir = bridgecontroll::startmenu::system_dir();
     let running = match bridgecontroll::start_locked(options, lock).await {
         Ok(running) => running,
         Err(message) => {

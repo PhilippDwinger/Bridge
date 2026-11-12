@@ -185,6 +185,19 @@
      bleibt die Website veröffentlicht und die Antwort sagt es.
   5. **Ansehen**: Link auf den Leser dieses PCs (`http://127.0.0.1:<leser-port>/app/<id>/`, neuer Tab) – damit geht
      jeder Browser dieses PCs, auch Brave; mit Leser „Heimnetz“ auch andere Geräte im LAN über die IP des PCs.
+- **Nachtrag 5 (Startmenü und Bridge-4-Logos, 12.11.2026)** – Paddy: „BridgeControll“ in der Windows-Suche soll die
+  neue öffnen, die alte (Bridge 3) nutzbar bleiben; Bridge 3 und 4 sollen am Logo unterscheidbar sein.
+  1. **Startmenü**: Verknüpfung `BridgeControll.lnk` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs` auf dieses
+     Programm, Symbol `bridgecontroll4.ico` (im Programm eingebaut, beim Eintragen in den App-Ordner geschrieben).
+     Angelegt mit `WScript.Shell` über PowerShell (`-EncodedCommand`, Pfade als PowerShell-Zeichenketten mit
+     verdoppeltem `'`, Steuerzeichen abgelehnt) – keine Registry, kein weiteres Crate. Beim ersten Start, wenn es keinen
+     Eintrag gibt; sonst Knopf „Startmenü“ unten links. Der Knopf benennt außerdem eine Desktop-Verknüpfung
+     `BridgeControll.lnk`, die auf ein anderes Programm zeigt (Bridge 3, `BUILD_EXE.bat`), in `BridgeControll 3.lnk` um
+     – nur wenn es die noch nicht gibt. Linux: `~/.local/share/applications/bridgecontroll.desktop`. Nur das Programm
+     selbst setzt den Ort (`Options::menu_dir`); Tests und Bibliothek berühren nichts.
+  2. **Logos** aus dem Entwurf „Bridge 4 Design“ (Board L) in `ui/logo/` (nicht in `design/`, das gehört dem
+     Design-Claude): B01 Bildmarke mit „4“-Sticker, B02 „br.4“ auf der Startseite, B07 App-Kachel als Favicon und
+     Programm-Symbol, Z04 klein. Die „4“ ist als Pfad gesetzt (Sora 700), damit sie auch in `<img>` stimmt.
 - **Folgen**:
   - Phase 3 hat ihr „per Klick“: Assistent, Beitritt per Link, Siegeln/Entziehen, Sperren, Einladungen mit QR-Code.
   - Getestet: Steuer-API mit echten Knoten-Prozessen (erstellen → beitreten → siegeln → Stufe sichtbar → Mitglied
