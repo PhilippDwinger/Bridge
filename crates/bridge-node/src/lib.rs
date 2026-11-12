@@ -18,16 +18,20 @@
 
 pub mod admin;
 mod apps;
+mod appserver;
 mod blobs;
 mod blocklists;
+mod compute;
 mod error;
 pub mod keyfile;
 mod lan;
 mod names;
 mod network;
+pub mod plugins;
 mod reader;
 mod reports;
 mod sessions;
+mod storage;
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -176,6 +180,12 @@ struct Inner {
     reader: reader::Reader,
     /// Name searches running now, all callers together (review 9: at most [`names::MAX_SEARCHES_AT_ONCE`]).
     searches: Arc<tokio::sync::Semaphore>,
+    /// Compute jobs running (docs/09 §11).
+    computes: Arc<tokio::sync::Semaphore>,
+    /// Plugin calls running (docs/09 §12).
+    plugin_calls: Arc<tokio::sync::Semaphore>,
+    /// The node's data folder (plugins live there).
+    data_dir: PathBuf,
 }
 
 /// A node (cheap to clone; all clones are the same node).
@@ -333,6 +343,9 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
             apps,
             reader: reader::Reader::new(config.reader),
             searches: Arc::new(tokio::sync::Semaphore::new(names::MAX_SEARCHES_AT_ONCE)),
+            computes: Arc::new(tokio::sync::Semaphore::new(compute::MAX_AT_ONCE)),
+            plugin_calls: Arc::new(tokio::sync::Semaphore::new(plugins::MAX_CALLS_AT_ONCE)),
+            data_dir: config.data_dir.clone(),
         }),
     };
     let lan_server = match (lan_listener, &tls) {
@@ -594,6 +607,12 @@ impl Node {
             (_, path) if path.starts_with("/v4/app/") => self.route_app(&request, now).await,
             (_, path) if path.starts_with("/v4/names/") => self.route_names(&request, now).await,
             (Method::Post, "/v4/report") => self.report_in(&request, now).await,
+            (Method::Post, path) if path.starts_with("/v4/compute/") => self.route_compute(&request, now).await,
+            (Method::Post, path) if path.starts_with("/v4/plugin/") => self.plugin_call(&request, now).await,
+            (Method::Post, "/v4/storage/probe") => {
+                self.inner.guard.admit_read(request.peer, now)?;
+                self.storage_probe(&request.body, now).await
+            }
             (_, path) if path.starts_with("/v4/admin/") => self.route_admin(&request, now).await,
             _ => Err(NodeError::not_found()),
         }

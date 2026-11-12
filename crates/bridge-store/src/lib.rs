@@ -37,6 +37,7 @@ mod blobs;
 mod blocklists;
 mod net;
 mod reports;
+mod wasm;
 mod watch;
 
 pub use apps::{AppLimits, AppRow, AppState, AppStored, Reservation};
@@ -50,6 +51,7 @@ pub use net::{
     TransitionRow,
 };
 pub use reports::{ReportLimits, ReportRow, ReportStored};
+pub use wasm::{EventRow, MAX_EVENTS_PER_APP, MAX_EVENTS_PER_HOST};
 pub use watch::{Probe, Registration, Standing, WatchNode, WatchRegistered};
 
 /// Name of this compartment (Abteil), used in logs and diagnostics.
@@ -156,6 +158,12 @@ const MIGRATIONS: &[&str] = &[
     "CREATE TABLE blocklists (net TEXT NOT NULL, publisher TEXT NOT NULL, version INTEGER NOT NULL,
                               statement BLOB NOT NULL, received INTEGER NOT NULL,
                               PRIMARY KEY (net, publisher)) WITHOUT ROWID;",
+    // 12: sandboxed code (docs/09 §12, §13): the key-value store of plugins and the event log of apps with server code.
+    "CREATE TABLE plugin_kv (plugin TEXT NOT NULL, key BLOB NOT NULL, value BLOB NOT NULL,
+                             PRIMARY KEY (plugin, key)) WITHOUT ROWID;
+     CREATE TABLE app_events (app TEXT NOT NULL, host TEXT NOT NULL, seq INTEGER NOT NULL, iat INTEGER NOT NULL,
+                              statement BLOB NOT NULL, PRIMARY KEY (app, host, seq)) WITHOUT ROWID;
+     CREATE INDEX app_events_order ON app_events (app, iat, host, seq);",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

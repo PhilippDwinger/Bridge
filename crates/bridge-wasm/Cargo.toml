@@ -1,0 +1,19 @@
+[package]
+name = "bridge-wasm"
+description = "Bridge 4 sandbox: WebAssembly with fixed limits and granted capabilities (docs/09 §10, ADR 0020)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wasmi.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+wat.workspace = true

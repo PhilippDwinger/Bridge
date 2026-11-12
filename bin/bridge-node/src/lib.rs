@@ -3,7 +3,7 @@
 //! ```text
 //! bridge-node --data <folder> [--listen 127.0.0.1:7400] [--name <text>] [--url <public url>]...
 //!             [--trust-proxy <ip>]... [--pow-bits <n>] [--join-net <link>] [--lan <port>|<ip:port>]
-//!             [--standalone-blobs <MiB>] [--probe web|-] [--reader off|local|lan|tailnet]
+//!             [--standalone-blobs <MiB>] [--probe web,storage,compute|-] [--reader off|local|lan|tailnet]
 //!             [--reader-listen 127.0.0.1:<port>]
 //! bridge-node net create --data <folder> --name <text> --url <public url> --contact <text> [--short <name>]
 //!                        [--template open|invite|closed] [--adult allowed|forbidden]
@@ -61,17 +61,19 @@ use tokio::net::TcpListener;
 pub mod apps;
 pub mod blocklist;
 pub mod names;
+pub mod plugin;
 mod secret;
 
 /// The usage text (German, it reaches people through the terminal).
 pub const USAGE: &str = "Aufruf:
   bridge-node --data <ordner> [--listen 127.0.0.1:7400] [--name <text>] [--url <öffentliche adresse>]...
               [--trust-proxy <ip>]... [--pow-bits <0-28>] [--join-net <link> | --join-net-file <datei>]
-              [--lan <port>] [--standalone-blobs <MiB>] [--probe web|-] [--peer-addresses public|tailnet|any]
+              [--lan <port>] [--standalone-blobs <MiB>] [--probe web,storage,compute|-] [--peer-addresses public|tailnet|any]
               [--reader off|local|lan|tailnet] [--reader-listen 127.0.0.1:<port>]
               (--lan 7443: auch im LAN per TLS auf 0.0.0.0:7443, per mDNS angekündigt; oder --lan <ip:port>)
               (--standalone-blobs: Hochladen von Dateien auf einem Knoten ohne Netz erlauben, höchstens so viele MiB)
-              (--probe web: Wächter des Netzes prüfen den Knoten und geben ihm Stufe 1 mit Dienst web; - ohne Dienst)
+              (--probe web,storage,compute: Wächter des Netzes prüfen den Knoten und geben ihm Stufe 1 mit diesen Diensten;
+               - ohne Dienst; docs/06 §11, docs/09 §6)
               (--join-net-file: der Einladungslink steht in dieser Datei - so steht kein Code in der Prozessliste)
               (--peer-addresses: Adressen anderer Knoten, die kein Admin bestätigt hat - public: nur öffentliche
                (Standard), tailnet: dazu Tailscale 100.64.0.0/10 + fd7a:115c:a1e0::/48, any: alle; docs/06 §2)
@@ -111,7 +113,13 @@ pub const USAGE: &str = "Aufruf:
                           (Herausgeber von Sperrlisten, denen das Netz folgt; höchstens 8, docs/08 §9)
   bridge-node blocklist key     --key <datei>   (Herausgeber-Schlüssel anlegen/zeigen)
   bridge-node blocklist publish --key <datei> --net <netz-id> --file <einträge.txt> --version <n> --node <adresse>
-                          [--days 365]   (je Zeile ein Name oder eine ID; # = Kommentar)";
+                          [--days 365]   (je Zeile ein Name oder eine ID; # = Kommentar)
+  bridge-node plugin key     --key <datei>   (Plugin-Schlüssel anlegen/zeigen; seine ID ist die Plugin-ID)
+  bridge-node plugin sign    --key <datei> --name <text> --version <n> --wasm <plugin.wasm> --out <plugin.json>
+                             [--capabilities kv,log,caller] [--fuel 100000000] [--kv-mib 16]
+  bridge-node plugin install --data <ordner> --manifest <plugin.json> --wasm <plugin.wasm> [--allow-new-capabilities yes]
+  bridge-node plugin list    --data <ordner>
+  bridge-node plugin disable|enable --data <ordner> --id <plugin-id>   (Not-Aus; im Netz zusätzlich: net ban)";
 
 /// Flags as `(name, value)` pairs; every flag takes a value.
 fn flags(args: impl Iterator<Item = String>) -> Result<Vec<(String, String)>, String> {
@@ -540,6 +548,63 @@ async fn admin_command(command: &str, flags: &Flags) -> Result<(), String> {
     Ok(())
 }
 
+/// `bridge-node plugin …` (docs/09 §12).
+fn plugin_command(command: &str, flags: &Flags) -> Result<(), String> {
+    match command {
+        "key" => {
+            flags.only(&["--key"])?;
+            println!("Plugin-ID: {}", plugin::key(Path::new(flags.need("--key")?))?);
+        }
+        "sign" => {
+            flags.only(&["--key", "--name", "--version", "--wasm", "--out", "--capabilities", "--fuel", "--kv-mib"])?;
+            let capabilities: Vec<String> = flags
+                .one("--capabilities")
+                .unwrap_or("")
+                .split(',')
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let spec = bridge_node::plugins::PluginSpec {
+                name: flags.need("--name")?.to_owned(),
+                version: flags.number("--version", 0)?,
+                capabilities,
+                fuel: flags.number("--fuel", 100_000_000)?,
+                kv: flags.number::<u64>("--kv-mib", 16)?.saturating_mul(1024 * 1024),
+            };
+            let json = plugin::sign(Path::new(flags.need("--key")?), &spec, flags.need("--wasm")?)?;
+            let out = flags.need("--out")?;
+            std::fs::write(out, &json).map_err(|e| format!("{out}: {e}"))?;
+            println!("Plugin-Aussage geschrieben: {out}");
+        }
+        "install" => {
+            flags.only(&["--data", "--manifest", "--wasm", "--allow-new-capabilities"])?;
+            let allow = flags.one("--allow-new-capabilities") == Some("yes");
+            let data = PathBuf::from(flags.need("--data")?);
+            let done = plugin::install(&data, flags.need("--manifest")?, flags.need("--wasm")?, allow)?;
+            match done.previous {
+                Some(old) => println!("Plugin {} von Version {old} auf {} aktualisiert.", done.plugin, done.version),
+                None => println!("Plugin {} Version {} installiert.", done.plugin, done.version),
+            }
+        }
+        "list" => {
+            flags.only(&["--data"])?;
+            let lines = plugin::list(Path::new(flags.need("--data")?));
+            println!("{} Plugins:", lines.len());
+            for line in lines {
+                println!("  {line}");
+            }
+        }
+        "disable" | "enable" => {
+            flags.only(&["--data", "--id"])?;
+            plugin::set_disabled(Path::new(flags.need("--data")?), flags.need("--id")?, command == "disable")?;
+            println!("Plugin {}.", if command == "disable" { "ausgeschaltet" } else { "eingeschaltet" });
+        }
+        other => return Err(format!("unbekannter Befehl plugin {other}\n{USAGE}")),
+    }
+    Ok(())
+}
+
 /// `bridge-node blocklist …` (docs/08 §9).
 async fn blocklist_command(command: &str, flags: &Flags) -> Result<(), String> {
     match command {
@@ -865,6 +930,13 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
             Ok(flags) => name_command(&command, &Flags(flags)).await,
             Err(message) => Err(message),
         }
+    } else if args.peek().map(String::as_str) == Some("plugin") {
+        args.next();
+        let command = args.next().unwrap_or_default();
+        match flags(args) {
+            Ok(flags) => plugin_command(&command, &Flags(flags)),
+            Err(message) => Err(message),
+        }
     } else if args.peek().map(String::as_str) == Some("blocklist") {
         args.next();
         let command = args.next().unwrap_or_default();
@@ -981,7 +1053,12 @@ mod tests {
         let web = run_args(&args(&["--data", "d", "--probe", "web"])?)?;
         assert_eq!(web.config.probe, Some(Services::of(&[bridge_net::Service::Web])));
         assert_eq!(run_args(&args(&["--data", "d", "--probe", "-"])?)?.config.probe, Some(Services::NONE));
-        for bad in ["gateway", "web,watch", "storage", "", "x"] {
+        let both = run_args(&args(&["--data", "d", "--probe", "storage,compute"])?)?;
+        assert_eq!(
+            both.config.probe,
+            Some(Services::of(&[bridge_net::Service::Storage, bridge_net::Service::Compute]))
+        );
+        for bad in ["gateway", "web,watch", "names", "", "x"] {
             assert!(run_args(&args(&["--data", "d", "--probe", bad])?).is_err(), "{bad}");
         }
         Ok(())

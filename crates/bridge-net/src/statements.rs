@@ -534,7 +534,7 @@ const WATCH_FIELDS: [(&str, u64, u64); 8] = [
 ];
 
 /// The services a watcher may put into a level-1 seal (docs/06 §11.2): a fixed list, the manifest can not widen it.
-pub const WATCH_SERVICES: [Service; 1] = [Service::Web];
+pub const WATCH_SERVICES: [Service; 3] = [Service::Web, Service::Storage, Service::Compute];
 
 impl WatchRules {
     /// Longest lifetime of a watcher's seal in milliseconds.

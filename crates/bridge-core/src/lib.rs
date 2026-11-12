@@ -14,6 +14,7 @@ pub mod content;
 pub mod crypto;
 pub mod encoding;
 pub mod envelope;
+pub mod erasure;
 pub mod error;
 pub mod file;
 pub mod id;

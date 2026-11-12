@@ -213,6 +213,23 @@ freigegeben).
 - Plugin-Host für fremde Plugins (WASM, Fähigkeiten, Limits, signierte Updates, Not-Aus).
 - **Abnahme**: Datei überlebt den Ausfall von 4 von 10 Speicher-Knoten; ein „lügender“ Speicher-Knoten fällt durch die
   Proben und verliert seine Stufe.
+- **Stand (12./13.11.2026): gebaut, Abnahme-Tests grün** (Paddy war weg, „entscheide selber“; Freigabe steht aus).
+  docs/09, ADR 0019 (Speicher), ADR 0020 (wasmi statt wasmtime). Gebaut:
+  - Speicher: `bridge-core::erasure` (Reed-Solomon, Cauchy), SDK `storage` (`store`, `fetch`, `audit`, `repair`,
+    `renew`, Karte beim Besitzer), Verteilung auf verschiedene Knoten und Hosts; Wächter-Proben für `storage`
+    (`/v4/storage/probe`, Proben-Blob) – wer lügt, verliert das Siegel.
+  - Rechnen: neues Abteil `crates/bridge-wasm` (wasmi, Fuel, Speicher-Grenze, keine Gleitkommazahlen bei Rechen-
+    Aufträgen), `/v4/compute/run` mit signiertem Ergebnis, SDK `compute`/`run_checked` (Stichproben), Wächter-Probe
+    für `compute` (`/v4/compute/probe`, eingebaute Prüf-Aufgabe).
+  - Plugins: Aussage `plugin` (Plugin-Schlüssel), Fähigkeiten `kv`/`log`/`caller`, Kontingent, Updates nur höher und
+    mit erlaubten Fähigkeiten, Not-Aus lokal und per `ban`; `bridge-node plugin key|sign|install|list|disable|enable`.
+  - Apps Stufe 2: Feld `server` im App-Manifest (`server.wasm` im Ordner), `POST /app/<id>/api/…` an Hosts, Ereignis-Log
+    je App (signiert je Host, `/v4/app/events`, gleiche Reihenfolge überall). Schema 11/12.
+  - Tests: `tests/e2e/tests/phase5_storage.rs` (4 von 10, Reparatur, lügender Knoten, Stufe weg, Proben nur von
+    Wächtern), `phase5_compute.rs`, `phase5_plugins.rs`, `phase5_appserver.rs`; Einheits-Tests in `erasure`,
+    `bridge-wasm`, `storage`, `blocklist`.
+  - Offen: docs/09 §9; API der App-Server-Code nur direkt an Hosts (nicht über den Leser), Speicher in BridgeControll
+    (Oberfläche) fehlt noch.
 
 ## Phase 6 – SDKs, KI, Wachstum
 - SDKs: Python + JavaScript zuerst, dann Java, Luau (Risiko R1).

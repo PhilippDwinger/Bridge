@@ -34,6 +34,9 @@ const MAX_FOLDER_DEPTH: usize = 16;
 /// Default lifetime of an app version (the maximum: one year).
 pub const APP_LIFETIME_MS: i64 = bridge_core::app::MAX_APP_LIFETIME_MS;
 
+/// The server code of an app version, if it has a file of this name at its top (docs/09 §13).
+pub const SERVER_FILE: &str = "server.wasm";
+
 fn untrusted(what: impl Into<String>) -> SdkError {
     SdkError::Untrusted(what.into())
 }
@@ -72,7 +75,7 @@ impl BlobSource {
         &self.label
     }
 
-    async fn post(&self, path: &str, body: Value) -> SdkResult<serde_json::Map<String, Value>> {
+    pub(crate) async fn post(&self, path: &str, body: Value) -> SdkResult<serde_json::Map<String, Value>> {
         Client::check(self.http.post(path, None, body.to_string().into_bytes()).await?)
     }
 }
@@ -507,6 +510,14 @@ impl Client {
         Err(untrusted("upload did not complete"))
     }
 
+    /// Pins a blob this node has already for `keep_days` (1-30) more days - nothing is uploaded. Returns whether the
+    /// node has it complete (`false`: it does not have it; the caller uploads it again).
+    pub async fn pin_blob(&self, id: &BlobId, size: u64, keep_days: u32) -> SdkResult<bool> {
+        let body = json!({"blob": id.to_text(), "size": size, "keep_days": keep_days.clamp(1, 30)});
+        let answer = self.post_session("/v4/blob/begin", &body).await?;
+        Ok(answer.get("complete").and_then(Value::as_bool) == Some(true))
+    }
+
     async fn post_session(&self, path: &str, body: &Value) -> SdkResult<serde_json::Map<String, Value>> {
         Self::check(self.http.post(path, self.session.as_deref(), body.to_string().into_bytes()).await?)
     }
@@ -522,9 +533,11 @@ impl Client {
         })
     }
 
-    /// Signs a version (app key + this client as owner, valid for one year from now).
+    /// Signs a version (app key + this client as owner, valid for one year from now). A file `server.wasm` at the top
+    /// of the version is its server code (docs/09 §13).
     pub fn sign_app(&self, app: &Identity, draft: &AppDraft, files: Vec<AppFile>) -> SdkResult<Statement> {
         let net = self.net.as_ref().ok_or_else(|| untrusted("not connected"))?;
+        let server = files.iter().any(|file| file.path == SERVER_FILE).then(|| SERVER_FILE.to_owned());
         let manifest = AppManifest {
             app: app.id().clone(),
             owner: self.identity.id().clone(),
@@ -536,6 +549,7 @@ impl Client {
             hosts: draft.hosts.clone(),
             card: app.key_card(Role::App, None, now_ms())?,
             owner_card: self.card.clone(),
+            server,
         };
         let now = now_ms();
         Ok(manifest.sign(net, now, now + APP_LIFETIME_MS, app, &self.identity)?)

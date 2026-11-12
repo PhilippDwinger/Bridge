@@ -173,6 +173,7 @@ async fn manifests_types_signatures_hosts_and_rollback() -> TestResult {
             hosts,
             card: app.key_card(Role::App, None, now_ms()).map_err(e)?,
             owner_card: owner.card().clone(),
+            server: None,
         })
     };
     let raw = |statement: &Statement| statement.canonical_bytes().to_vec();

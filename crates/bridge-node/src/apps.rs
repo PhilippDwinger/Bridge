@@ -335,7 +335,7 @@ impl Apps {
 }
 
 /// Why a version does not hold here (any more).
-enum Invalid {
+pub(crate) enum Invalid {
     /// For good: stop hosting (banned, owner no member, expired, this node not a host).
     Stop(String),
     /// Not now (the network log is still loading).
@@ -382,7 +382,12 @@ pub(crate) async fn run(node: Node) {
         }
         for app in node.inner.apps.ids() {
             if !busy.values().any(|known| known == &app) {
-                let handle = running.spawn(node.clone().sync_app(app.clone()));
+                let (worker, id) = (node.clone(), app.clone());
+                let handle = running.spawn(async move {
+                    worker.clone().sync_app(id.clone()).await;
+                    // Apps with server code: the events of the other hosts (docs/09 §13).
+                    worker.sync_app_events(&id).await;
+                });
                 busy.insert(handle.id(), app);
             }
         }
@@ -416,6 +421,10 @@ impl Node {
         }
         match (request.method, request.path.as_str()) {
             (Method::Post, "/v4/app/publish") => self.app_publish(request, now).await,
+            (Method::Post, "/v4/app/events") => {
+                self.inner.guard.admit_read(request.peer, now)?;
+                self.app_events_out(&request.body, now).await
+            }
             (Method::Post, "/v4/app/manifest") => {
                 self.inner.guard.admit_read(request.peer, now)?;
                 self.app_manifest(&request.body, now)
@@ -871,7 +880,7 @@ impl Node {
 
     /// Whether a version still holds here at `now`: verified once, so only what changes - expiry, the network's
     /// rules, this node a host.
-    fn still_valid(&self, version: &Version, now: i64) -> Result<Hosts, Invalid> {
+    pub(crate) fn still_valid(&self, version: &Version, now: i64) -> Result<Hosts, Invalid> {
         if version.statement.check_time(now).is_err() {
             return Err(Invalid::Stop("the version expired".into()));
         }
@@ -1332,7 +1341,8 @@ impl Node {
     }
 
     async fn app_file(&self, request: &Request) -> NodeResult<Response> {
-        if request.method != Method::Get || self.network().is_none() {
+        let api = request.method == Method::Post;
+        if (request.method != Method::Get && !api) || self.network().is_none() {
             return Err(not_found()); // apps exist only in a network - not even the redirect without one
         }
         let now = self.now();
@@ -1348,12 +1358,19 @@ impl Node {
             return Ok(Response { status: 308, ..Response::ok(Vec::new()) }.with_header("location", format!("{app}/")));
         };
         let Some(version) = self.inner.apps.current(&app) else {
+            if api {
+                return Err(not_found()); // server code runs at hosts only (docs/09 §13)
+            }
             // Not hosted here: maybe as reader for the owner's own browser (docs/08 §8) - else 404 as before.
             return self.reader_file(request, &app, path, now).await;
         };
         if self.still_valid(&version, now).is_err() {
             self.inner.apps.wake(); // the loop stops it for good
             return Err(not_found());
+        }
+        if api {
+            let route = path.strip_prefix("api/").ok_or_else(not_found)?;
+            return self.app_api(request, &app, &version, route).await;
         }
         let path = if path.is_empty() { version.manifest.entry.as_str() } else { path };
         check_path(path).map_err(|_| not_found())?;

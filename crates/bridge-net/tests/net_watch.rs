@@ -167,9 +167,9 @@ fn watcher_never_above_level_one_or_beyond_web() -> NetResult<()> {
         assert!(forbidden(&w.net.skip(&statement)?), "level {level}");
         assert!(w.net.state.validate_candidate(&statement, at).is_err());
     }
-    // Infrastructure and services without probes are for admins.
-    for service in [Service::Gateway, Service::Log, Service::Witness, Service::Watch, Service::Storage, Service::Names]
-    {
+    // Infrastructure and services without probes are for admins (storage and compute have probes since phase 5,
+    // docs/09 §6 - a watcher may give them).
+    for service in [Service::Gateway, Service::Log, Service::Witness, Service::Watch, Service::Names] {
         let statement = signed(&w.net, &node_seal(&w.node, &[Service::Web, service])?, &w.watcher, at)?;
         assert!(forbidden(&w.net.skip(&statement)?), "{service:?}");
     }

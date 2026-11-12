@@ -35,6 +35,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub mod apps;
+pub mod compute;
+pub mod storage;
 
 pub use apps::{
     Announced, AppDraft, AppVersion, BlobSource, DownloadReport, FolderFile, Published, announce_app, download_blob,

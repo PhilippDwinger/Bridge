@@ -201,7 +201,7 @@ async fn watcher_limits_are_enforced_by_the_log_operator() -> TestResult {
     // The watcher can not go above level 1, nor give infrastructure or services without probes.
     let level2 = node_seal(&members[0], 2, &[Service::Web])?;
     refused(submit_as(&net, &watcher, &signed(&net, &level2, &watcher)?).await?, (403, "FORBIDDEN"))?;
-    for service in [Service::Gateway, Service::Watch, Service::Storage] {
+    for service in [Service::Gateway, Service::Watch, Service::Names] {
         let seal = node_seal(&members[0], 1, &[Service::Web, service])?;
         refused(submit_as(&net, &watcher, &signed(&net, &seal, &watcher)?).await?, (403, "FORBIDDEN"))?;
     }
@@ -302,7 +302,7 @@ async fn registration_attacks() -> TestResult {
     let other = Identity::generate(&mut OsRng);
     let foreign = json!({"card": card(&other, Role::Node, &url)?.to_value(), "services": ["web"]});
     assert_eq!(post(request(&member, foreign)?).await?, (401, "BAD_SIGNATURE".into()));
-    for services in [json!(["gateway"]), json!(["web", "web"]), json!(["storage"]), json!("web"), json!([1])] {
+    for services in [json!(["gateway"]), json!(["web", "web"]), json!(["names"]), json!("web"), json!([1])] {
         let body = json!({"card": card(&member, Role::Node, &url)?.to_value(), "services": services});
         assert_eq!(post(request(&member, body)?).await?.0, if services.is_array() { 403 } else { 400 }, "{services}");
     }

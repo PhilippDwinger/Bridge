@@ -7,6 +7,7 @@ members = [
     "crates/bridge-guard",
     "crates/bridge-net",
     "crates/bridge-plugin-api",
+    "crates/bridge-wasm",
     "crates/bridge-node",
     "bin/bridge-node",
     "apps/bridgecontroll",
@@ -41,6 +42,7 @@ bridge-transport = { path = "crates/bridge-transport" }
 bridge-guard = { path = "crates/bridge-guard" }
 bridge-net = { path = "crates/bridge-net" }
 bridge-plugin-api = { path = "crates/bridge-plugin-api" }
+bridge-wasm = { path = "crates/bridge-wasm" }
 bridge-node = { path = "crates/bridge-node" }
 bridge-sdk = { path = "sdk/rust" }
 # The node program as a library (its node runner and commands), for BridgeControll (ADR 0017).
@@ -57,6 +59,9 @@ bip39 = { version = "2", default-features = false, features = ["std", "zeroize"]
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 base64 = "0.22"
+# Sandbox for foreign code (ADR 0020): a pure Rust interpreter with fuel metering; `wat` only for tests.
+wasmi = { version = "2", default-features = false, features = ["std", "validate", "deterministic", "auto-dispatch"] }
+wat = "1"
 serde = "1"
 serde_json = "1"
 thiserror = "2"

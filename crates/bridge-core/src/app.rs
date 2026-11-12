@@ -223,6 +223,8 @@ pub struct AppManifest {
     pub card: KeyCard,
     /// Key card of the owner (role `client` or `node`, ID = `owner`).
     pub owner_card: KeyCard,
+    /// Server code (docs/09 §13): path of a `.wasm` file of this version that hosts run for `/app/<id>/api/…`.
+    pub server: Option<String>,
 }
 
 /// Path rules (docs/07 §3): 1-200 characters, only `a-z A-Z 0-9 . _ - /`, no empty parts (so no leading, trailing or
@@ -286,7 +288,7 @@ impl AppManifest {
         let Value::Object(object) = body else {
             return Err(CoreError::format("app: body is not an object"));
         };
-        if let Some(unknown) = object.keys().find(|key| !FIELDS.contains(&key.as_str())) {
+        if let Some(unknown) = object.keys().find(|key| !FIELDS.contains(&key.as_str()) && key.as_str() != "server") {
             return Err(CoreError::format(format!("app: unknown field {unknown:?}")));
         }
         if let Some(missing) = FIELDS.iter().find(|key| !object.contains_key(**key)) {
@@ -346,6 +348,16 @@ impl AppManifest {
         if owner_card.id() != &owner || !matches!(owner_card.role(), Role::Client | Role::Node) {
             return Err(CoreError::format("owner_card: must be the owner's own card (role client or node)"));
         }
+        let server = match object.get("server") {
+            None => None,
+            Some(value) => {
+                let path = value.as_str().ok_or_else(|| CoreError::format("server: a path"))?;
+                if !path.ends_with(".wasm") || !paths.contains(path) {
+                    return Err(CoreError::format("server: a .wasm file of this version"));
+                }
+                Some(path.to_owned())
+            }
+        };
         Ok(Self {
             app,
             owner,
@@ -357,6 +369,7 @@ impl AppManifest {
             hosts,
             card,
             owner_card,
+            server,
         })
     }
 
@@ -382,6 +395,10 @@ impl AppManifest {
             "card": self.card.to_value(),
             "owner_card": self.owner_card.to_value(),
         });
+        let mut body = body;
+        if let Some(server) = &self.server {
+            body["server"] = json!(server);
+        }
         Self::from_body(&body)?;
         Ok(body)
     }
@@ -485,6 +502,7 @@ mod tests {
             hosts: vec![host.id().clone()],
             card: app.key_card(Role::App, None, T0)?,
             owner_card: owner.key_card(Role::Client, None, T0)?,
+            server: None,
         };
         Ok(Setup { app, owner, net: Identity::generate(&mut OsRng).id().clone(), manifest })
     }

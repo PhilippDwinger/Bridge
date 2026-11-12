@@ -56,6 +56,7 @@ fn manifest(apps: &Apps, hosts: Vec<bridge_core::Id>) -> NetResult<AppManifest> 
         hosts,
         card: apps.app.key_card(Role::App, None, T0)?,
         owner_card: apps.owner.key_card(Role::Client, None, T0)?,
+        server: None,
     })
 }
 

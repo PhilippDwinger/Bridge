@@ -240,6 +240,18 @@ impl TestNet {
         Ok(node)
     }
 
+    /// Like [`TestNet::add_node`], listening on the loopback address `ip` (e.g. `127.0.0.7`): nodes on different
+    /// loopback addresses count as different hosts (storage spreading, docs/09 §4).
+    pub async fn add_node_at(&self, ip: &str, extra: &[String]) -> Result<TestNode, String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let listener = TcpListener::bind(format!("{ip}:0")).await.map_err(|e| e.to_string())?;
+        let url = format!("http://{}", listener.local_addr().map_err(|e| e.to_string())?);
+        let node = bridge_node::start(test_config(dir.path(), Some(self.membership(extra)), &url), listener).await?;
+        let node = TestNode { dir, node, url };
+        self.synced(&node).await?;
+        Ok(node)
+    }
+
     /// Waits until `node` holds as many entries as the owner.
     pub async fn synced(&self, node: &TestNode) -> Result<(), String> {
         wait_for("node synced with the owner", || {

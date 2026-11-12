@@ -18,6 +18,7 @@ bridge-transport.workspace = true
 bridge-guard.workspace = true
 bridge-net.workspace = true
 bridge-plugin-api.workspace = true
+bridge-wasm.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 rand_core.workspace = true

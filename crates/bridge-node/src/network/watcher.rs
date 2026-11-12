@@ -28,12 +28,15 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use bridge_core::blob::HashList;
+use bridge_core::encoding::{b64, b64_var};
 use bridge_core::{CLOCK_SKEW_MS, Id, KeyCard, Puzzle, Role, SignedRequest, Statement};
 use bridge_net::{
     Body, Hash, Revoke, RevokeTarget, Seal, SealInfo, Service, Services, WATCH_SERVICES, WatchRules, WitnessedHead,
     verify_head,
 };
 use bridge_store::{Probe, Registration, Standing, Store, WatchNode, WatchRegistered};
+use rand_core::{OsRng, RngCore};
 use serde_json::{Map, Value, json};
 use tokio::task::JoinSet;
 
@@ -166,6 +169,9 @@ pub(crate) struct WatchMemory {
     new_by_address: BTreeMap<IpAddr, (i64, u32)>,
     /// The first round of this watcher since the node started (for [`LAPSE_GRACE_ROUNDS`]).
     started: Option<i64>,
+    /// Storage probes (docs/09 §6): the probe blob placed at each node, with its hash list (memory only - after a
+    /// restart a new one is placed, which replaces the old one at the node).
+    pub(crate) storage_probes: BTreeMap<Id, HashList>,
 }
 
 impl WatchMemory {
@@ -520,24 +526,24 @@ impl Node {
         let Some(network) = self.network() else { return };
         let now = self.now();
         // The longest waiting first (never probed, then by the last probe): no node starves behind others.
-        let mut due: Vec<(Option<i64>, Id, KeyCard)> = lock(&network.watch)
+        let mut due: Vec<(Option<i64>, Id, KeyCard, Services)> = lock(&network.watch)
             .nodes
             .iter()
             .filter(|(_, watched)| watched.due(now, rules))
-            .map(|(id, watched)| (watched.last_probe, id.clone(), watched.card.clone()))
+            .map(|(id, watched)| (watched.last_probe, id.clone(), watched.card.clone(), watched.services))
             .collect();
-        due.sort_by_key(|(last, _, _)| *last);
-        let due: Vec<(Id, KeyCard)> =
-            due.into_iter().take(MAX_PROBES_PER_ROUND).map(|(_, id, card)| (id, card)).collect();
+        due.sort_by_key(|(last, _, _, _)| *last);
+        let due: Vec<(Id, KeyCard, Services)> =
+            due.into_iter().take(MAX_PROBES_PER_ROUND).map(|(_, id, card, services)| (id, card, services)).collect();
         if due.is_empty() {
             return;
         }
         let mut running = JoinSet::new();
-        for (id, card) in due {
+        for (id, card, services) in due {
             let node = self.clone();
             running.spawn(async move {
                 let started = Instant::now();
-                let ok = node.probe(&id, &card).await;
+                let ok = node.probe(&id, &card, services).await;
                 (id, ok, i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX))
             });
         }
@@ -575,7 +581,7 @@ impl Node {
     }
 
     /// One probe (docs/06 §11.4): `/v4/info` and the head, both within 5 s.
-    async fn probe(&self, id: &Id, card: &KeyCard) -> bool {
+    async fn probe(&self, id: &Id, card: &KeyCard, services: Services) -> bool {
         // The node chose these addresses itself: only public IPs (review 8), its pinned LAN address first.
         let endpoints = self.guarded_endpoints_of(id, card.tls().copied(), card.urls());
         if endpoints.is_empty() {
@@ -587,9 +593,75 @@ impl Node {
                 return None;
             }
             let head = self.peer_get_any(&endpoints, &self.net_path("head")).await.ok()?.ok().ok()?;
-            self.probe_head_ok(head).then_some(())
+            if !self.probe_head_ok(head) {
+                return None;
+            }
+            if services.has(Service::Storage) && !self.probe_storage(id, &endpoints).await {
+                return None;
+            }
+            if services.has(Service::Compute) && !self.probe_compute(id, &endpoints).await {
+                return None;
+            }
+            Some(())
         };
         matches!(tokio::time::timeout(PROBE_LIMIT, work).await, Ok(Some(())))
+    }
+
+    /// Compute probe (docs/09 §6): the built-in probe module with random input, computed here too - the node must give
+    /// the same output.
+    async fn probe_compute(&self, id: &Id, endpoints: &[super::peer::Endpoint]) -> bool {
+        let mut input = [0u8; 32];
+        OsRng.fill_bytes(&mut input);
+        let module = crate::compute::COMPUTE_PROBE;
+        let expected = tokio::task::spawn_blocking(move || {
+            bridge_wasm::run(
+                module,
+                "run",
+                &input,
+                bridge_wasm::Limits::default(),
+                bridge_wasm::Grants::default(),
+                bridge_wasm::NoHost,
+            )
+            .map(|(outcome, _)| outcome.output)
+        })
+        .await;
+        let Ok(Ok(expected)) = expected else { return false };
+        let Ok(body) = self.signed(id, "compute", json!({"module": b64(module), "input": b64(&input)})) else {
+            return false;
+        };
+        let Ok(answer) = self.peer_post_any(endpoints, "/v4/compute/probe", body).await else { return false };
+        let Ok(answer) = answer.ok() else { return false };
+        answer.get("output") == Some(&json!(b64(&expected)))
+    }
+
+    /// Storage probe (docs/09 §6): the first time a probe blob is placed (random data, signed request); every later
+    /// time one random part of it is fetched and checked against the kept hash list.
+    async fn probe_storage(&self, id: &Id, endpoints: &[super::peer::Endpoint]) -> bool {
+        let Some(network) = self.network() else { return false };
+        let held = lock(&network.watch).storage_probes.get(id).cloned();
+        match held {
+            None => {
+                let mut data = vec![0u8; crate::storage::MAX_PROBE_BYTES];
+                OsRng.fill_bytes(&mut data);
+                let Ok(list) = HashList::of(&data) else { return false };
+                let Ok(body) = self.signed(id, "storage-probe", json!({"data": b64(&data)})) else { return false };
+                let placed =
+                    self.peer_post_any(endpoints, "/v4/storage/probe", body).await.ok().and_then(|a| a.ok().ok());
+                let ok = placed.is_some_and(|answer| answer.get("blob") == Some(&json!(list.id().to_text())));
+                if ok {
+                    lock(&network.watch).storage_probes.insert(id.clone(), list);
+                }
+                ok
+            }
+            Some(list) => {
+                let index = OsRng.next_u32() % list.parts().max(1);
+                let body = json!({"blob": list.id().to_text(), "i": index}).to_string().into_bytes();
+                let Ok(answer) = self.peer_post_any(endpoints, "/v4/blob/get", body).await else { return false };
+                let Ok(answer) = answer.ok() else { return false };
+                let data = b64_var(answer.get("data").and_then(Value::as_str).unwrap_or_default(), "data", 65_536);
+                data.is_ok_and(|data| list.verify_part(index, &data).is_ok())
+            }
+        }
     }
 
     /// `/v4/info`: the card has exactly the ID (role node), the info statement is signed by it, of this network, and
@@ -1023,10 +1095,15 @@ mod tests {
     }
 
     #[test]
-    fn only_web_services_and_no_duplicates() {
+    fn only_probed_services_and_no_duplicates() {
         assert_eq!(services_from(["web"].into_iter()), Some(Services::of(&[Service::Web])));
+        assert_eq!(
+            services_from(["storage", "compute"].into_iter()),
+            Some(Services::of(&[Service::Storage, Service::Compute])),
+            "probed since phase 5 (docs/09 §6)"
+        );
         assert_eq!(services_from([].into_iter()), Some(Services::NONE));
-        for bad in [vec!["web", "web"], vec!["gateway"], vec!["watch"], vec!["storage"], vec!["?"]] {
+        for bad in [vec!["web", "web"], vec!["gateway"], vec!["watch"], vec!["names"], vec!["?"]] {
             assert_eq!(services_from(bad.clone().into_iter()), None, "{bad:?}");
         }
         assert_eq!(services_text(Services::of(&[Service::Web])), "web");

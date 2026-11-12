@@ -25,3 +25,6 @@ rand_core.workspace = true
 tempfile.workspace = true
 bridge-store.workspace = true
 reqwest.workspace = true
+
+[dev-dependencies]
+wat.workspace = true
