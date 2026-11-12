@@ -61,7 +61,7 @@ impl TestApp {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// Uses a fresh login link; returns the session cookie (`bc_session=…`).
+    /// Uses a fresh login link; returns the session cookie (`bc_session_<port>=…`).
     pub async fn login(&self) -> Result<String, String> {
         let answer = self.http.get(self.running.login_url()).send().await.map_err(|e| e.to_string())?;
         if answer.status().as_u16() != 200 {

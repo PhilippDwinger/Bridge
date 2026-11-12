@@ -17,7 +17,9 @@ async fn session_is_required_and_login_links_work_once() -> TestResult {
     let app = start().await?;
     let host = format!("127.0.0.1:{}", app.port);
     // No cookie, a wrong one, one for another name: 401 for the API and the screens.
-    for cookie in [None, Some("bc_session=falsch"), Some("bc_sessionx=abc"), Some("other=1")] {
+    let other_port = format!("bc_session_{}=x", app.port + 1);
+    for cookie in [None, Some("bc_session=falsch"), Some("bc_sessionx=abc"), Some("other=1"), Some(other_port.as_str())]
+    {
         for path in ["/api/overview", "/", "/ui/app.js", "/api/nodes/0a1b2c3d/log"] {
             let answer = raw(app.port, &get_request(path, &host, cookie)).await?;
             assert_eq!(status_of(&answer), 401, "{path} {cookie:?}");

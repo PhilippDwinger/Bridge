@@ -175,8 +175,11 @@ impl Auth {
         launch_mac(&self.launch, LAUNCH_ANSWER, &answer_message(nonce, path))
     }
 
-    fn cookie(&self) -> String {
-        format!("{COOKIE}={}; HttpOnly; SameSite=Strict; Path=/", self.session.as_str())
+    /// The session cookie of the app on `port`. Cookies do not tell ports apart, so the name carries the port: two
+    /// apps on this PC (another `--data` folder, e.g. a second node for a test) would overwrite each other's cookie
+    /// and log each other out (Paddy, 12.11.2026).
+    fn cookie(&self, port: u16) -> String {
+        format!("{COOKIE}_{port}={}; HttpOnly; SameSite=Strict; Path=/", self.session.as_str())
     }
 }
 
@@ -357,9 +360,10 @@ fn header<'a>(request: &'a Request<Incoming>, name: &str) -> Option<&'a str> {
     request.headers().get(name).and_then(|value| value.to_str().ok())
 }
 
-/// The value of our cookie in a `Cookie` header.
-fn session_cookie(header: &str) -> Option<&str> {
-    header.split(';').map(str::trim).find_map(|pair| pair.strip_prefix(COOKIE)?.strip_prefix('='))
+/// The value of the cookie of the app on `port` in a `Cookie` header.
+fn session_cookie(header: &str, port: u16) -> Option<&str> {
+    let name = format!("{COOKIE}_{port}=");
+    header.split(';').map(str::trim).find_map(|pair| pair.strip_prefix(name.as_str()))
 }
 
 async fn checked(app: &App, request: Request<Incoming>) -> Answer {
@@ -401,7 +405,9 @@ async fn checked(app: &App, request: Request<Incoming>) -> Answer {
             None => Answer::error(500, "interner Fehler"),
         };
     }
-    let session = header(&request, "cookie").and_then(session_cookie).is_some_and(|token| app.auth.is_session(token));
+    let session = header(&request, "cookie")
+        .and_then(|cookie| session_cookie(cookie, port))
+        .is_some_and(|token| app.auth.is_session(token));
     if !session {
         if method == Method::GET && !path.starts_with("/api/") && assets::get(&path).is_some() {
             return Answer::page(401, unauthorized_page());
@@ -453,7 +459,7 @@ fn login(app: &App, code: &str, now: i64) -> Answer {
     if !app.auth.take_login_code(code, now) {
         return Answer::page(401, unauthorized_page());
     }
-    Answer { headers: vec![("set-cookie", app.auth.cookie())], ..Answer::page(200, LOGIN_DONE_PAGE) }
+    Answer { headers: vec![("set-cookie", app.auth.cookie(app.port))], ..Answer::page(200, LOGIN_DONE_PAGE) }
 }
 
 /// The body, at most [`MAX_BODY_BYTES`], within 10 s.
@@ -534,13 +540,18 @@ mod tests {
     #[test]
     fn session_and_cookie() {
         let auth = Auth::new();
-        let cookie = auth.cookie();
+        let cookie = auth.cookie(7380);
         assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict") && cookie.contains("Path=/"));
-        let token = session_cookie(&cookie).unwrap_or_default();
+        assert!(cookie.starts_with("bc_session_7380="), "{cookie}");
+        let token = session_cookie(&cookie, 7380).unwrap_or_default();
         assert!(auth.is_session(token));
         assert!(!auth.is_session("") && !auth.is_session(&format!("{token}x")));
-        assert_eq!(session_cookie("a=1; bc_session=abc; b=2"), Some("abc"));
-        assert_eq!(session_cookie("bc_sessionx=abc"), None);
+        assert_eq!(session_cookie("a=1; bc_session_7380=abc; b=2", 7380), Some("abc"));
+        assert_eq!(session_cookie("bc_session_7380x=abc", 7380), None);
+        // Two apps on this PC: each finds its own cookie (cookies do not tell ports apart).
+        let both = "bc_session_7381=other; bc_session_7380=mine";
+        assert_eq!((session_cookie(both, 7380), session_cookie(both, 7381)), (Some("mine"), Some("other")));
+        assert_eq!(session_cookie("bc_session_7380=abc", 738), None);
         assert_ne!(token, auth.launch_key(), "independent secrets");
     }
 
