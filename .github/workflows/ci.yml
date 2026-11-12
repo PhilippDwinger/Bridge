@@ -67,7 +67,7 @@ jobs:
         run: |
           set -o pipefail
           if cargo test --workspace --no-fail-fast 2>&1 | tee test.log; then exit 0; fi
-          grep -aE "^---- |panicked at|^test .* FAILED|error\[|assertion" test.log | head -60 | while IFS= read -r line; do
+          grep -aE "^---- |panicked at|^Error: |^test .* FAILED|error\[|assertion" test.log | head -60 | while IFS= read -r line; do
             echo "::error title=Test::${line}"
           done
           exit 1

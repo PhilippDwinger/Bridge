@@ -671,7 +671,8 @@ impl BlobFiles {
     pub fn finish(&self, hex: &str) -> std::io::Result<()> {
         let (done, part) = self.paths(hex)?;
         if part.exists() {
-            fs::File::open(&part)?.sync_all()?;
+            // Windows: FlushFileBuffers needs a handle with write access (a read-only one gives "access denied").
+            fs::OpenOptions::new().write(true).open(&part)?.sync_all()?;
             fs::rename(&part, &done)?;
         }
         Ok(())
