@@ -133,6 +133,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge-ai"
+version = "0.1.0"
+dependencies = [
+ "bridge-core",
+ "bridge-plugin-api",
+ "serde_json",
+]
+
+[[package]]
 name = "bridge-core"
 version = "0.1.0"
 dependencies = [
@@ -195,9 +204,11 @@ dependencies = [
 name = "bridge-node-bin"
 version = "0.1.0"
 dependencies = [
+ "bridge-ai",
  "bridge-core",
  "bridge-net",
  "bridge-node",
+ "bridge-plugin-api",
  "bridge-sdk",
  "bridge-tests",
  "bridge-transport",

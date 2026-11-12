@@ -1,0 +1,17 @@
+[package]
+name = "bridge-ai"
+description = "Bridge 4 AI service logic: tasks for a local language model (docs/10 §4, ADR 0024)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bridge-core.workspace = true
+bridge-plugin-api.workspace = true
+serde_json.workspace = true

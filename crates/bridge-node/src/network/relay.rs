@@ -117,6 +117,17 @@ impl Node {
     async fn relay_one(&self, item: &Outgoing) -> Attempt {
         let now = self.now();
         let Ok(target) = Id::parse(&item.target) else { return Attempt::Refused("bad target".into()) };
+        // A connected network (docs/10 §6.3): its listed gateways, one after the other.
+        if self.with_core(|core| core.state.federation(&target, now).is_some()).unwrap_or(false) {
+            return match self.fed_deliver(&target, &item.envelope, &item.card, now).await {
+                super::federation::FedAttempt::Done => Attempt::Done,
+                super::federation::FedAttempt::Refused(reason) => Attempt::Refused(reason),
+                super::federation::FedAttempt::Retry(reason) if item.attempts < MAX_REFUSED_ATTEMPTS => {
+                    Attempt::Retry(reason)
+                }
+                super::federation::FedAttempt::Retry(reason) => Attempt::Refused(reason),
+            };
+        }
         let endpoints = match self.with_core(|core| core.gateway_card(&target, now)) {
             Ok(Some(card)) => self.endpoints_of(&target, card.tls().copied(), card.urls()),
             _ => Vec::new(),
@@ -125,7 +136,11 @@ impl Node {
             return Attempt::Retry("target is not a gateway with an address right now".into());
         }
         let Ok(card) = KeyCard::parse(&item.card) else { return Attempt::Refused("bad stored card".into()) };
-        let body = json!({"envelope": Self::envelope_hash(&item.envelope), "card": card.to_value()});
+        let mut body = json!({"envelope": Self::envelope_hash(&item.envelope), "card": card.to_value()});
+        // An agent's envelope carries its statement: the receiving gateway checks it instead of a membership.
+        if let Some(statement) = self.agent_statement_of(card.id(), now).await {
+            body["agent"] = statement;
+        }
         let Ok(request) = self.signed(&target, "relay", body) else { return Attempt::Retry("cannot sign".into()) };
         // Canonical order of the two keys: "envelope" < "rq". Both parts are canonical JSON already.
         let mut wire = br#"{"envelope":"#.to_vec();
@@ -203,15 +218,19 @@ impl Node {
             return Err(NodeError::new(401, "BAD_SIGNATURE", "card is not the sender's"));
         }
         let unknown = || NodeError::new(404, "UNKNOWN_IDENTITY", "recipient does not live here");
-        self.with_core(|core| -> NodeResult<()> {
-            core.state.check_login(envelope.from(), now)?;
-            if core.state.level(envelope.to(), now).is_none() {
-                return Err(unknown());
+        match request.body().get("agent") {
+            // The sender is an agent (docs/10 §3.2): its owner's standing instead of its own membership.
+            Some(statement) => self.agent_relayed(statement, &sender, envelope.to(), now).await?,
+            None => {
+                self.with_core(|core| core.state.check_login(envelope.from(), now))??;
             }
-            Ok(())
-        })??;
-        let (net, member) = (self.inner.net.to_string(), envelope.to().to_string());
-        let home = self.blocking(move |store| store.home_get(&net, &member, now)).await?;
+        }
+        let member = self.with_core(|core| core.state.level(envelope.to(), now).is_some())?;
+        if !member && self.agent_home(envelope.to(), now).await?.is_none() {
+            return Err(unknown());
+        }
+        let (net, recipient) = (self.inner.net.to_string(), envelope.to().to_string());
+        let home = self.blocking(move |store| store.home_get(&net, &recipient, now)).await?;
         if home.is_none_or(|home| home.node != me.as_str()) {
             return Err(unknown());
         }

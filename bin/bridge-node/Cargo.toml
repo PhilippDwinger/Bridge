@@ -25,6 +25,8 @@ bridge-net.workspace = true
 bridge-node.workspace = true
 bridge-transport.workspace = true
 bridge-sdk.workspace = true
+bridge-ai.workspace = true
+bridge-plugin-api.workspace = true
 serde_json.workspace = true
 rand_core.workspace = true
 tokio.workspace = true
@@ -34,6 +36,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+bridge-net.workspace = true
 tempfile.workspace = true
 bridge-tests = { path = "../../tests/e2e" }
 

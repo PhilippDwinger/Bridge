@@ -229,6 +229,11 @@ impl Node {
         endpoints
     }
 
+    /// The LAN addresses of `id` (pinned to `tls`), if it was seen in the LAN lately (for other modules).
+    pub(crate) fn lan_endpoints_of(&self, id: &Id, tls: Option<[u8; 32]>) -> Vec<Endpoint> {
+        self.lan_endpoints(id, tls)
+    }
+
     /// The LAN addresses of `id` (pinned to `tls`), if it was seen in the LAN lately.
     fn lan_endpoints(&self, id: &Id, tls: Option<[u8; 32]>) -> Vec<Endpoint> {
         let mut endpoints: Vec<Endpoint> = Vec::new();

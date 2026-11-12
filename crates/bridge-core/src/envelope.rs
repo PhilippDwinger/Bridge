@@ -95,6 +95,8 @@ pub struct Envelope {
     nonce: [u8; 12],
     ciphertext: Vec<u8>,
     signature: [u8; 64],
+    /// Target network in a connected network (docs/10 §6.2), signed like every header field.
+    dnet: Option<Id>,
 }
 
 impl Envelope {
@@ -102,6 +104,27 @@ impl Envelope {
     pub fn seal<R: RngCore + CryptoRng>(
         sender: &Identity,
         address: &Address<'_>,
+        plaintext: &[u8],
+        rng: &mut R,
+    ) -> CoreResult<Self> {
+        Self::seal_inner(sender, address, None, plaintext, rng)
+    }
+
+    /// Like [`Envelope::seal`] for a recipient in the connected network `dnet` (docs/10 §6.2; `dnet` ≠ `address.net`).
+    pub fn seal_for_net<R: RngCore + CryptoRng>(
+        sender: &Identity,
+        address: &Address<'_>,
+        dnet: &Id,
+        plaintext: &[u8],
+        rng: &mut R,
+    ) -> CoreResult<Self> {
+        Self::seal_inner(sender, address, Some(dnet), plaintext, rng)
+    }
+
+    fn seal_inner<R: RngCore + CryptoRng>(
+        sender: &Identity,
+        address: &Address<'_>,
+        dnet: Option<&Id>,
         plaintext: &[u8],
         rng: &mut R,
     ) -> CoreResult<Self> {
@@ -130,6 +153,9 @@ impl Envelope {
         raw.insert("kind".into(), json!(address.kind.as_str()));
         raw.insert("epk".into(), json!(b64(&epk)));
         raw.insert("n".into(), json!(b64(&nonce)));
+        if let Some(dnet) = dnet {
+            raw.insert("dnet".into(), json!(dnet.as_str()));
+        }
         let aad = canonical(&Value::Object(raw.clone()))?;
         let ciphertext = crypto::aead_seal(&key, &nonce, plaintext, &aad)?;
         raw.insert("ct".into(), json!(b64(&ciphertext)));
@@ -163,9 +189,21 @@ impl Envelope {
         if ciphertext.len() < 16 {
             return Err(CoreError::format("ct: too short"));
         }
+        let net = Id::parse(field_str(&raw, "net")?)?;
+        let dnet = match raw.get("dnet") {
+            None => None,
+            Some(_) => {
+                let dnet = Id::parse(field_str(&raw, "dnet")?)?;
+                if dnet == net {
+                    return Err(CoreError::format("dnet: must be another network than net"));
+                }
+                Some(dnet)
+            }
+        };
         Ok(Self {
+            dnet,
             id: b64_fixed::<16>(field_str(&raw, "id")?, "id")?,
-            net: Id::parse(field_str(&raw, "net")?)?,
+            net,
             from: Id::parse(field_str(&raw, "from")?)?,
             to: Id::parse(field_str(&raw, "to")?)?,
             kind: Kind::parse(field_str(&raw, "kind")?)?,
@@ -215,10 +253,15 @@ impl Envelope {
     pub fn id(&self) -> &[u8; 16] {
         &self.id
     }
-    /// Network.
+    /// Network (of the sender).
     #[must_use]
     pub fn net(&self) -> &Id {
         &self.net
+    }
+    /// Target network, if the recipient lives in a connected network (docs/10 §6.2).
+    #[must_use]
+    pub fn dnet(&self) -> Option<&Id> {
+        self.dnet.as_ref()
     }
     /// Sender (claimed until `verify`).
     #[must_use]
@@ -306,6 +349,35 @@ mod tests {
             assert!(nonces.insert(*envelope.nonce()), "nonce repeated");
             assert!(ciphertexts.insert(envelope.to_bytes()?), "same plaintext must give different ciphertext");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn target_network_is_signed_and_authenticated() -> CoreResult<()> {
+        let (alice, alice_card) = party()?;
+        let (bob, bob_card) = party()?;
+        let (net, other) = (alice.id().clone(), bob.id().clone());
+        let address = Address { net: &net, to: &bob_card, kind: Kind::Msg, iat: 1, ttl: 60 };
+        let envelope = Envelope::seal_for_net(&alice, &address, &other, b"hallo", &mut OsRng)?;
+        assert_eq!(envelope.dnet(), Some(&other));
+        let reparsed = Envelope::parse(&envelope.to_bytes()?)?;
+        assert_eq!(reparsed.open(&bob, &alice_card)?, b"hallo");
+        assert_eq!(Envelope::seal(&alice, &address, b"x", &mut OsRng)?.dnet(), None);
+        // Removing or changing `dnet` breaks the signature (and the AAD).
+        let mut value = envelope.to_value_for_tests();
+        value.as_object_mut().map(|object| object.remove("dnet"));
+        assert_eq!(Envelope::from_value(value)?.verify(&alice_card), Err(CoreError::BadSignature));
+        let mut value = envelope.to_value_for_tests();
+        value["dnet"] = json!(Identity::generate(&mut OsRng).id().as_str());
+        assert_eq!(Envelope::from_value(value)?.verify(&alice_card), Err(CoreError::BadSignature));
+        // `dnet` = `net` and bad IDs are refused by the form check.
+        let mut value = envelope.to_value_for_tests();
+        value["dnet"] = json!(net.as_str());
+        assert!(Envelope::from_value(value).is_err());
+        let mut value = envelope.to_value_for_tests();
+        value["dnet"] = json!(7);
+        assert!(Envelope::from_value(value).is_err());
+        assert!(Envelope::seal_for_net(&alice, &address, &net, b"x", &mut OsRng).is_err());
         Ok(())
     }
 

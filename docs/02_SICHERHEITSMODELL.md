@@ -44,7 +44,8 @@ Eine einzige Suite, keine Aushandlung (kein Downgrade). Spätere Suiten kommen n
 
 Bibliotheken: Knoten (Rust) RustCrypto/dalek (`ed25519-dalek`, `x25519-dalek`, `chacha20poly1305`, `hkdf`, `sha2`,
 `argon2`); SDKs: Python `cryptography`, Java JDK (eingebaut), JavaScript geprüfte `noble`-Bibliotheken (eingebettet,
-MIT), Luau reine Luau-Umsetzung (**Risiko R1**, früh prototypen).
+MIT), Luau reine Luau-Umsetzung (**Risiko R1**: Port von TweetNaCl-js, nur über Testvektoren geprüft; docs/10 §2.5,
+ADR 0021).
 
 **Invariante N1 – (Schlüssel, Nonce) wiederholt sich nie.** Die Sicherheit von ChaCha20-Poly1305 hängt daran. Wir
 verlassen uns nicht auf eine einzige Annahme, sondern sichern doppelt:

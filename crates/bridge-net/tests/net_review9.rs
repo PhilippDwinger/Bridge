@@ -292,8 +292,9 @@ fn reserved_words_in_tags_and_descriptions() -> NetResult<()> {
     let found = |query: &str, safe: bool| -> Vec<String> {
         net.state.search_names(query, safe, 10, iat + MIN).0.into_iter().map(|r| r.info.name.name).collect()
     };
-    assert_eq!(found("paypal", false), ["dave"]);
-    assert_eq!(found("paypal", true), ["dave"]);
+    // Since docs/10 §5 also dave's "laden" with the tag "paypa1" (one typo away; reserved in tags needs level 3).
+    assert_eq!(found("paypal", false), ["dave", "laden"]);
+    assert_eq!(found("paypal", true), ["dave", "laden"]);
     assert_eq!(found("bea", true), ["bea"], "her name itself is found");
     // A new manifest version reserves "kasse": alice's name with it stops resolving, a level-3 one stays.
     net.accept(&signed(&net, &member_name("kasse-eins", alice, "")?, alice, None, iat + 4, 30)?)?;

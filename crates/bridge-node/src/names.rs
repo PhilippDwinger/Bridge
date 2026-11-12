@@ -212,6 +212,16 @@ impl Node {
         };
         let max = optional_u64(&body, "max", DEFAULT_RESULTS, bridge_net::state::MAX_SEARCH_RESULTS as u64)?.max(1);
         let max = usize::try_from(max).unwrap_or(1);
+        // Only names of one kind (docs/10 §5).
+        let kind = match body.get("kind") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .and_then(bridge_net::NameKind::parse)
+                    .ok_or_else(|| NodeError::bad_format("kind: app, node or member"))?,
+            ),
+        };
         // The slot travels into the blocking thread: a caller that gives up does not free it before the work is done.
         let slot = Arc::clone(&self.inner.searches).try_acquire_owned().map_err(|_| NodeError {
             retry_after: Some(1),
@@ -220,7 +230,7 @@ impl Node {
         let query = query.to_owned();
         let blocklists = self.blocklists();
         self.on_snapshot(move |state| {
-            let search = state.search(&query, safe, max, now);
+            let search = state.search_kind(&query, safe, max, now, kind);
             let manifest = state.manifest();
             let list: Vec<Value> = search
                 .results

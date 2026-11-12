@@ -474,6 +474,65 @@ impl AdminClient {
         Ok(card)
     }
 
+    /// Connects this network to network `peer` (docs/10 §6, net key only): fetches the cards of the other network's
+    /// gateways at `gateway_urls` (each must prove it belongs to `peer`), signs the `federation` statement with the net
+    /// key and submits it. The other network's owner does the same in its network - only then messages flow.
+    pub async fn federate(
+        &self,
+        master: &Identity,
+        peer: &Id,
+        gateway_urls: &[String],
+        days: u32,
+    ) -> Result<(Statement, Submitted), String> {
+        if master.id() != &self.net {
+            return Err("Das sind nicht die 24 Wörter dieses Netzes.".into());
+        }
+        if gateway_urls.is_empty() || gateway_urls.len() > bridge_net::federation::MAX_FEDERATION_GATEWAYS {
+            return Err("1 bis 8 Empfänger des anderen Netzes angeben (--gateway <adresse>)".into());
+        }
+        let mut gateways = Vec::with_capacity(gateway_urls.len());
+        for url in gateway_urls {
+            let http = HttpClient::new(url, Duration::from_secs(15)).map_err(|e| format!("Adresse {url}: {e}"))?;
+            let answer = http.get("/v4/info").await.map_err(|e| format!("Knoten {url} nicht erreichbar: {e}"))?;
+            let Ok(Value::Object(info)) = parse_strict(&answer.body, 64 * 1024) else {
+                return Err(format!("Knoten {url} antwortet unverständlich"));
+            };
+            let card = KeyCard::from_value(info.get("card").cloned().unwrap_or(Value::Null))
+                .map_err(|e| format!("Karte des Knotens ungültig: {e}"))?;
+            let statement = Statement::from_value(info.get("info").cloned().unwrap_or(Value::Null))
+                .map_err(|e| format!("Info des Knotens ungültig: {e}"))?;
+            statement.verify(&[&card], 1).map_err(|_| "Info des Knotens ist nicht von ihm signiert".to_owned())?;
+            if statement.kind() != "info" || card.role() != Role::Node || statement.net() != peer {
+                return Err(format!("{url} ist kein Knoten des Netzes {peer}"));
+            }
+            if card.urls().is_empty() {
+                return Err(format!("{url}: der Knoten nennt keine öffentliche Adresse auf seiner Karte"));
+            }
+            gateways.push(card);
+        }
+        let body = bridge_net::Federation { peer: peer.clone(), gateways };
+        let now = Self::now();
+        let exp = now.saturating_add(i64::from(days.clamp(1, 730)) * 24 * 3600 * 1000);
+        let statement = body.sign(&self.net, now, exp, master).map_err(|e| e.to_string())?;
+        let submitted = self.submit_as(master, &statement).await?;
+        Ok((statement, submitted))
+    }
+
+    /// Disconnects network `peer` (net key only): revokes the `federation` statement in effect for it.
+    pub async fn unfederate(&self, master: &Identity, peer: &Id) -> Result<(Statement, Submitted), String> {
+        if master.id() != &self.net {
+            return Err("Das sind nicht die 24 Wörter dieses Netzes.".into());
+        }
+        let (_, state) = self.load_state().await?;
+        let info = state.federation(peer, Self::now()).ok_or("Dieses Netz ist nicht verbunden.")?;
+        let statement = Statement::parse(&info.statement).map_err(|e| e.to_string())?;
+        let revoke = Revoke { target: RevokeTarget::Statement(statement.hash_bytes()), reason: "getrennt".into() };
+        let now = Self::now();
+        let statement = revoke.sign(&self.net, now, now.saturating_add(YEAR_MS), master).map_err(|e| e.to_string())?;
+        let submitted = self.submit_as(master, &statement).await?;
+        Ok((statement, submitted))
+    }
+
     /// Log entries `[from, to)` of the owner node (`to`: `None` = up to the size its first answer names), pages
     /// of up to 256, bounded in number and bytes.
     pub async fn fetch_log(&self, from: u64, to: Option<u64>) -> Result<Vec<Vec<u8>>, String> {

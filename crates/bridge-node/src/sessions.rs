@@ -11,6 +11,8 @@ use crate::error::{NodeError, NodeResult};
 struct Session {
     id: Id,
     expires_ms: i64,
+    /// Logged in as an agent (docs/10 §3): only what its statement allows.
+    agent: bool,
 }
 
 /// All sessions of a node (bounded).
@@ -34,7 +36,14 @@ impl Sessions {
     }
 
     /// Creates a session for `id` with `token`; the oldest session of `id` goes if it has too many.
+    #[cfg(test)]
     pub(crate) fn create(&mut self, id: &Id, token: &[u8; 32], now_ms: i64) -> NodeResult<i64> {
+        self.create_as(id, token, now_ms, false)
+    }
+
+    /// Creates a session for `id` (`agent`: logged in as an agent) with `token`; the oldest session of `id` goes if
+    /// it has too many.
+    pub(crate) fn create_as(&mut self, id: &Id, token: &[u8; 32], now_ms: i64, agent: bool) -> NodeResult<i64> {
         if self.by_hash.len() >= self.max_total {
             self.sweep(now_ms);
             if self.by_hash.len() >= self.max_total {
@@ -53,15 +62,21 @@ impl Sessions {
             }
         }
         list.push_back(hash);
-        self.by_hash.insert(hash, Session { id: id.clone(), expires_ms });
+        self.by_hash.insert(hash, Session { id: id.clone(), expires_ms, agent });
         Ok(expires_ms)
     }
 
     /// The identity of a valid session.
+    #[cfg(test)]
     pub(crate) fn lookup(&mut self, token: &[u8; 32], now_ms: i64) -> Option<Id> {
+        self.lookup_as(token, now_ms).map(|(id, _)| id)
+    }
+
+    /// The identity of a valid session and whether it is an agent's.
+    pub(crate) fn lookup_as(&mut self, token: &[u8; 32], now_ms: i64) -> Option<(Id, bool)> {
         let hash = sha256(token);
         match self.by_hash.get(&hash) {
-            Some(session) if session.expires_ms > now_ms => Some(session.id.clone()),
+            Some(session) if session.expires_ms > now_ms => Some((session.id.clone(), session.agent)),
             Some(_) => {
                 self.remove(&hash);
                 None
@@ -77,6 +92,15 @@ impl Sessions {
                 if list.is_empty() {
                     self.per_identity.remove(&session.id);
                 }
+            }
+        }
+    }
+
+    /// Ends every session of `id` (a revoked agent, docs/10 §3.3).
+    pub(crate) fn remove_identity(&mut self, id: &Id) {
+        if let Some(list) = self.per_identity.remove(id) {
+            for hash in list {
+                self.by_hash.remove(&hash);
             }
         }
     }

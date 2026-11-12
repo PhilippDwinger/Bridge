@@ -17,6 +17,7 @@
 //! Layering (docs/03_ARCHITEKTUR.md): uses all crates below it.
 
 pub mod admin;
+mod agents;
 mod apps;
 mod appserver;
 mod blobs;
@@ -43,7 +44,8 @@ use bridge_core::json::parse_strict;
 use bridge_core::{Draft, Envelope, Id, Identity, KeyCard, Puzzle, Role, SignedRequest, Statement};
 use bridge_guard::{Guard, GuardError, Limits};
 use bridge_store::{BlobFiles, Delivered, Delivery, Store};
-use bridge_transport::{Handler, LanAnnouncer, Method, Request, Response, RunningServer, ServerConfig, TlsIdentity};
+pub(crate) use bridge_transport::Request;
+use bridge_transport::{Handler, LanAnnouncer, Method, Response, RunningServer, ServerConfig, TlsIdentity};
 use rand_core::{OsRng, RngCore};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -186,6 +188,8 @@ struct Inner {
     plugin_calls: Arc<tokio::sync::Semaphore>,
     /// The node's data folder (plugins live there).
     data_dir: PathBuf,
+    /// Agents logged in here (docs/10 §3).
+    agents: Mutex<agents::Agents>,
 }
 
 /// A node (cheap to clone; all clones are the same node).
@@ -346,6 +350,7 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
             computes: Arc::new(tokio::sync::Semaphore::new(compute::MAX_AT_ONCE)),
             plugin_calls: Arc::new(tokio::sync::Semaphore::new(plugins::MAX_CALLS_AT_ONCE)),
             data_dir: config.data_dir.clone(),
+            agents: Mutex::new(agents::Agents::default()),
         }),
     };
     let lan_server = match (lan_listener, &tls) {
@@ -607,6 +612,8 @@ impl Node {
             (_, path) if path.starts_with("/v4/app/") => self.route_app(&request, now).await,
             (_, path) if path.starts_with("/v4/names/") => self.route_names(&request, now).await,
             (Method::Post, "/v4/report") => self.report_in(&request, now).await,
+            (Method::Post, "/v4/agent/revoke") => self.agent_revoke(&request, now).await,
+            (_, path) if path.starts_with("/v4/fed/") => self.route_fed(&request, now).await,
             (Method::Post, path) if path.starts_with("/v4/compute/") => self.route_compute(&request, now).await,
             (Method::Post, path) if path.starts_with("/v4/plugin/") => self.plugin_call(&request, now).await,
             (Method::Post, "/v4/storage/probe") => {
@@ -619,9 +626,28 @@ impl Node {
     }
 
     fn session(&self, request: &Request, now: i64) -> NodeResult<Id> {
+        self.session_for(request, agents::Use::Other, now)
+    }
+
+    /// Whether the request's session is an agent's (checked by `session_for` before).
+    fn agent_session(&self, request: &Request, now: i64) -> bool {
+        request
+            .bearer
+            .as_deref()
+            .and_then(|token| b64_fixed::<32>(token, "session").ok())
+            .and_then(|token| lock(&self.inner.sessions).lookup_as(&token, now))
+            .is_some_and(|(_, agent)| agent)
+    }
+
+    /// The identity of the session, checked for `usage`: agents only for what their statement allows (docs/10 §3).
+    fn session_for(&self, request: &Request, usage: agents::Use, now: i64) -> NodeResult<Id> {
         let token = request.bearer.as_deref().ok_or_else(NodeError::no_session)?;
         let token = b64_fixed::<32>(token, "session").map_err(|_| NodeError::no_session())?;
-        let id = lock(&self.inner.sessions).lookup(&token, now).ok_or_else(NodeError::no_session)?;
+        let (id, agent) = lock(&self.inner.sessions).lookup_as(&token, now).ok_or_else(NodeError::no_session)?;
+        if agent {
+            self.agent_session_check(&id, usage, now)?;
+            return Ok(id);
+        }
         // In a network: still a member, not banned, and this node still a gateway (revocations take effect at once).
         self.net_session_check(&id, now)?;
         Ok(id)
@@ -710,8 +736,16 @@ impl Node {
             return Err(NodeError::forbidden("an app key only signs app versions, it never logs in"));
         }
         request.verify(&card)?;
-        if self.network().is_some() {
-            self.net_login(&card, request.body().get("home"), now).await?;
+        match (self.network().is_some(), request.body().get("agent")) {
+            (true, Some(agent)) => {
+                if request.body().get("home").is_some() {
+                    return Err(NodeError::bad_format("an agent's home is its statement"));
+                }
+                self.agent_login(&card, agent, now).await?;
+            }
+            (true, None) => self.net_login(&card, request.body().get("home"), now).await?,
+            (false, Some(_)) => return Err(NodeError::forbidden("agents exist only in networks")),
+            (false, None) => {}
         }
         // No nonce table needed: the challenge above is one-time.
         let (id, bytes, max_cards) =
@@ -721,12 +755,13 @@ impl Node {
         }
         let mut token = [0u8; 32];
         OsRng.fill_bytes(&mut token);
-        let exp = lock(&self.inner.sessions).create(card.id(), &token, now)?;
+        let as_agent = self.network().is_some() && request.body().get("agent").is_some();
+        let exp = lock(&self.inner.sessions).create_as(card.id(), &token, now, as_agent)?;
         Ok(json!({"session": b64(&token), "exp": exp}).to_string().into_bytes())
     }
 
     async fn send(&self, request: &Request, now: i64) -> NodeResult<Vec<u8>> {
-        let caller = self.session(request, now)?;
+        let caller = self.session_for(request, agents::Use::Send, now)?;
         let envelope = Envelope::parse(&request.body)?;
         envelope.check_time(now)?;
         if envelope.from() != &caller {
@@ -736,6 +771,17 @@ impl Node {
             return Err(NodeError::forbidden("wrong network"));
         }
         self.inner.guard.admit_send(&caller, now)?;
+        if self.agent_session(request, now) {
+            self.agent_admit_send(&caller, envelope.to(), envelope.dnet().is_some(), now)?;
+        }
+        if let Some(dnet) = envelope.dnet() {
+            // To a member of a connected network (docs/10 §6.3): through its listed gateways.
+            self.federation_with(dnet, now)?;
+            let sender = self.known_card(&caller).await?.ok_or_else(NodeError::no_session)?;
+            envelope.verify(&sender)?;
+            self.relay_enqueue(&envelope, &sender, dnet, now).await?;
+            return Ok(br#"{"ok":true}"#.to_vec());
+        }
         let route = if self.network().is_some() {
             self.route_recipient(envelope.to(), now).await?
         } else if self.known_card(envelope.to()).await?.is_none() {
@@ -797,7 +843,7 @@ impl Node {
     }
 
     async fn poll(&self, request: &Request) -> NodeResult<Vec<u8>> {
-        let caller = self.session(request, self.now())?;
+        let caller = self.session_for(request, agents::Use::Receive, self.now())?;
         let options = if request.body.is_empty() { serde_json::Map::new() } else { body_object(&request.body, 1024)? };
         let wait = optional_u64(&options, "wait", 0, MAX_POLL_WAIT_S)?;
         let max = u32::try_from(optional_u64(&options, "max", MAX_BATCH as u64, MAX_BATCH as u64)?.max(1)).unwrap_or(1);
@@ -808,22 +854,39 @@ impl Node {
             let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable(); // register before looking, so no delivery in between is missed
-            let (recipient, now) = (caller.to_string(), self.now());
+            let (recipient, now, net) = (caller.to_string(), self.now(), self.inner.net.to_string());
             let batch = self
                 .blocking(move |store| {
                     let items = store.fetch(&recipient, max, POLL_MAX_BYTES, now)?;
                     let senders: BTreeSet<String> = items.iter().map(|item| item.sender.clone()).collect();
                     let mut cards = Vec::with_capacity(senders.len());
+                    let mut agents = Vec::new();
                     for sender in senders {
                         if let Some(card) = store.get_card(&sender)? {
-                            cards.push((sender, card));
+                            cards.push((sender.clone(), card));
+                        }
+                        // Senders that are agents: their statement, for the recipient to check (docs/10 §3.4).
+                        if let Some(row) = store.home_get(&net, &sender, now)? {
+                            if Statement::parse(&row.home).is_ok_and(|statement| statement.kind() == "agent") {
+                                agents.push((sender, row.home));
+                            }
                         }
                     }
-                    Ok((items, cards))
+                    Ok((items, cards, agents))
                 })
                 .await?;
             if !batch.0.is_empty() || tokio::time::Instant::now() >= deadline {
-                return Ok(poll_answer(&batch.0, &batch.1));
+                // Envelopes from connected networks: the proofs for the client (docs/10 §6.3).
+                let mut foreign: Vec<Id> = Vec::new();
+                for item in &batch.0 {
+                    if let Ok(envelope) = Envelope::parse(&item.envelope) {
+                        if envelope.net() != &self.inner.net && !foreign.contains(envelope.net()) {
+                            foreign.push(envelope.net().clone());
+                        }
+                    }
+                }
+                let proofs = self.fed_proofs(&foreign, self.now());
+                return Ok(poll_answer(&batch.0, &batch.1, &batch.2, &proofs));
             }
             tokio::select! {
                 () = &mut notified => {}
@@ -833,7 +896,7 @@ impl Node {
     }
 
     async fn ack(&self, request: &Request, now: i64) -> NodeResult<Vec<u8>> {
-        let caller = self.session(request, now)?;
+        let caller = self.session_for(request, agents::Use::Receive, now)?;
         let signed = SignedRequest::parse(&request.body)?;
         signed.check(self.inner.identity.id(), now)?;
         if signed.op() != "ack" || signed.iss() != &caller {
@@ -861,9 +924,17 @@ impl Node {
     }
 
     async fn card(&self, request: &Request, now: i64) -> NodeResult<Vec<u8>> {
-        self.session(request, now)?;
-        let object = body_object(&request.body, 1024)?;
-        let id = Id::parse(object.get("id").and_then(Value::as_str).unwrap_or_default())?;
+        let caller = self.session_for(request, agents::Use::Card, now)?;
+        let (id, net) = Self::fed_card_request(&request.body)?;
+        if let Some(net) = net.filter(|net| net != &self.inner.net) {
+            // A member of a connected network (docs/10 §6.3): asked from its gateways (agents stay in their network).
+            if self.agent_session(request, now) {
+                return Err(NodeError::forbidden("agents do not write across networks"));
+            }
+            self.inner.guard.admit_send(&caller, now)?;
+            let card = self.fed_card_of(&id, &net, now).await?;
+            return Ok(json!({"card": card.to_value()}).to_string().into_bytes());
+        }
         let card = match self.known_card(&id).await? {
             Some(card) => Some(card),
             // A member homed at another gateway: its card came with the exchanged home entry.
@@ -876,7 +947,12 @@ impl Node {
     }
 }
 
-fn poll_answer(items: &[bridge_store::Stored], cards: &[(String, Vec<u8>)]) -> Vec<u8> {
+fn poll_answer(
+    items: &[bridge_store::Stored],
+    cards: &[(String, Vec<u8>)],
+    agents: &[(String, Vec<u8>)],
+    feds: &(Vec<(String, Vec<u8>)>, Option<Value>),
+) -> Vec<u8> {
     // The stored bytes are canonical JSON written by this node - they are embedded as they are.
     let mut out = br#"{"envelopes":["#.to_vec();
     for (index, item) in items.iter().enumerate() {
@@ -893,7 +969,31 @@ fn poll_answer(items: &[bridge_store::Stored], cards: &[(String, Vec<u8>)]) -> V
         out.extend_from_slice(format!("\"{id}\":").as_bytes());
         out.extend_from_slice(card);
     }
-    out.extend_from_slice(b"}}");
+    out.push(b'}');
+    if !agents.is_empty() {
+        out.extend_from_slice(br#","agents":{"#);
+        for (index, (id, statement)) in agents.iter().enumerate() {
+            if index > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(format!("\"{id}\":").as_bytes());
+            out.extend_from_slice(statement);
+        }
+        out.push(b'}');
+    }
+    if let (false, Some(master)) = (feds.0.is_empty(), &feds.1) {
+        out.extend_from_slice(br#","feds":{"#);
+        for (index, (net, statement)) in feds.0.iter().enumerate() {
+            if index > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(format!("\"{net}\":").as_bytes());
+            out.extend_from_slice(statement);
+        }
+        out.extend_from_slice(br#"},"master":"#);
+        out.extend_from_slice(master.to_string().as_bytes());
+    }
+    out.push(b'}');
     out
 }
 

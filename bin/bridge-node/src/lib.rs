@@ -58,6 +58,8 @@ use bridge_node::admin::{self, AdminClient};
 use bridge_node::{Clock as _, LanConfig, NetConfig, NodeConfig, PeerAddresses, ReaderAccess, SystemClock};
 use tokio::net::TcpListener;
 
+pub mod agent;
+pub mod ai;
 pub mod apps;
 pub mod blocklist;
 pub mod names;
@@ -109,6 +111,9 @@ pub const USAGE: &str = "Aufruf:
                           Dienst web, ohne --host: die der letzten Version, sonst der Owner-Knoten)
   bridge-node app hosts   --data <ordner> --app <id> [--add <knoten-id>]... [--remove <knoten-id>]... [--node <adresse>]
                           (neue Version mit denselben Dateien und geänderten Hosts)
+  bridge-node net federate --data <ordner> --peer <netz-id> --gateway <adresse>... [--days 365] [--node <adresse>]
+                          (Netz verbinden, nur mit den 24 Wörtern; beide Owner müssen es tun, docs/10 §6)
+  bridge-node net unfederate --data <ordner> --peer <netz-id> [--node <adresse>]   (Verbindung trennen, 24 Wörter)
   bridge-node net blocklists --data <ordner> --set <id,…>|none [--node <adresse>]
                           (Herausgeber von Sperrlisten, denen das Netz folgt; höchstens 8, docs/08 §9)
   bridge-node blocklist key     --key <datei>   (Herausgeber-Schlüssel anlegen/zeigen)
@@ -119,7 +124,14 @@ pub const USAGE: &str = "Aufruf:
                              [--capabilities kv,log,caller] [--fuel 100000000] [--kv-mib 16]
   bridge-node plugin install --data <ordner> --manifest <plugin.json> --wasm <plugin.wasm> [--allow-new-capabilities yes]
   bridge-node plugin list    --data <ordner>
-  bridge-node plugin disable|enable --data <ordner> --id <plugin-id>   (Not-Aus; im Netz zusätzlich: net ban)";
+  bridge-node plugin disable|enable --data <ordner> --id <plugin-id>   (Not-Aus; im Netz zusätzlich: net ban)
+  bridge-node agent issue  --owner-key <datei> --agent-key <datei> --node-url <adresse> [--scopes send,receive]
+                           [--to <id,…>] [--rate 60] [--days 7] [--note <text>] [--out <agent.json>]
+                           (eigener, begrenzter Schlüssel für ein Programm/eine KI; docs/10 §3)
+  bridge-node agent revoke --owner-key <datei> --node-url <adresse> --agent <id>
+  bridge-node ai --key <datei> (--join <link> | --node-url <adresse>) --model <name> (--allow-members yes | --allow <id,…>)
+                 [--backend http://127.0.0.1:11434] [--api ollama|openai] [--models a,b] [--allow-agents yes] [--rate 30]
+                 (KI-Dienst mit einem Modell auf diesem PC, z. B. Ollama; --join nur beim ersten Start; docs/10 §4)";
 
 /// Flags as `(name, value)` pairs; every flag takes a value.
 fn flags(args: impl Iterator<Item = String>) -> Result<Vec<(String, String)>, String> {
@@ -480,6 +492,25 @@ async fn admin_command(command: &str, flags: &Flags) -> Result<(), String> {
                 println!("Der Log-Führer hat das cosign angenommen, meldet den Kopf aber noch nicht als bezeugt.");
             }
         }
+        "federate" => {
+            flags.only(&["--data", "--node", "--peer", "--gateway", "--days"])?;
+            let peer = bridge_core::Id::parse(flags.need("--peer")?).map_err(|_| "--peer: eine Netz-ID".to_owned())?;
+            let urls: Vec<String> = flags.all("--gateway").into_iter().map(str::to_owned).collect();
+            let master = read_master().await?;
+            let (_, submitted) = client.federate(&master, &peer, &urls, flags.number("--days", 365)?).await?;
+            println!(
+                "Netz {peer} verbunden (Log-Eintrag {}, Aussage {}). Nachrichten fließen, sobald der Owner des anderen \
+                 Netzes dieses Netz genauso verbindet. Trennen: net revoke --statement {}",
+                submitted.index, submitted.hash, submitted.hash
+            );
+        }
+        "unfederate" => {
+            flags.only(&["--data", "--node", "--peer"])?;
+            let peer = bridge_core::Id::parse(flags.need("--peer")?).map_err(|_| "--peer: eine Netz-ID".to_owned())?;
+            let master = read_master().await?;
+            let (_, submitted) = client.unfederate(&master, &peer).await?;
+            println!("Verbindung zu Netz {peer} getrennt (Log-Eintrag {}).", submitted.index);
+        }
         "label" => {
             flags.only(&["--data", "--node", "--target", "--category", "--reason", "--days"])?;
             let target = bridge_net::LabelTarget::parse(flags.need("--target")?)
@@ -601,6 +632,113 @@ fn plugin_command(command: &str, flags: &Flags) -> Result<(), String> {
             println!("Plugin {}.", if command == "disable" { "ausgeschaltet" } else { "eingeschaltet" });
         }
         other => return Err(format!("unbekannter Befehl plugin {other}\n{USAGE}")),
+    }
+    Ok(())
+}
+
+/// `bridge-node ai …` (docs/10 §4): runs the AI service until Ctrl+C.
+async fn ai_command(flags: &Flags) -> Result<(), String> {
+    flags.only(&[
+        "--key",
+        "--join",
+        "--node-url",
+        "--model",
+        "--allow-members",
+        "--allow",
+        "--backend",
+        "--api",
+        "--models",
+        "--allow-agents",
+        "--rate",
+    ])?;
+    let api = bridge_ai::Api::parse(flags.one("--api").unwrap_or("ollama")).ok_or("--api: ollama oder openai")?;
+    let backend = flags.one("--backend").unwrap_or("http://127.0.0.1:11434").to_owned();
+    bridge_ai::check_backend(&backend)?;
+    let allow = match (flags.one("--allow-members"), flags.one("--allow")) {
+        (Some("yes"), None) => bridge_ai::Allow::Members,
+        (None, Some(list)) => bridge_ai::Allow::List(admin::parse_ids(list)?),
+        _ => return Err(format!("genau eins von --allow-members yes oder --allow <id,…>\n{USAGE}")),
+    };
+    let config = bridge_ai::Config {
+        api,
+        backend,
+        model: flags.need("--model")?.to_owned(),
+        models: flags
+            .one("--models")
+            .map(|list| list.split(',').map(|m| m.trim().to_owned()).collect())
+            .unwrap_or_default(),
+        allow,
+        allow_agents: flags.one("--allow-agents") == Some("yes"),
+        rate: flags.number("--rate", 30)?,
+    };
+    let reach = match (flags.one("--join"), flags.one("--node-url")) {
+        (Some(link), None) => ai::Reach::Join(link.to_owned()),
+        (None, Some(url)) => ai::Reach::Node(url.to_owned()),
+        _ => return Err(format!("genau eins von --join <link> oder --node-url <adresse>\n{USAGE}")),
+    };
+    let client = ai::connect(Path::new(flags.need("--key")?), &reach).await?;
+    println!("KI-Dienst {} läuft (Modell {}). Beenden mit Strg+C.", client.identity().id(), config.model);
+    ai::serve(client, config, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+/// `bridge-node agent …` (docs/10 §3.5).
+async fn agent_command(command: &str, flags: &Flags) -> Result<(), String> {
+    match command {
+        "issue" => {
+            flags.only(&[
+                "--owner-key",
+                "--agent-key",
+                "--node-url",
+                "--scopes",
+                "--to",
+                "--rate",
+                "--days",
+                "--note",
+                "--out",
+            ])?;
+            let (send, receive) = agent::scopes(flags.one("--scopes").unwrap_or("send,receive"))?;
+            let to = match flags.one("--to") {
+                None => None,
+                Some(list) => Some(
+                    list.split(',')
+                        .map(|id| bridge_core::Id::parse(id.trim()).map_err(|_| format!("--to: {id} ist keine ID")))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+            };
+            let rights = bridge_sdk::AgentRights {
+                send,
+                receive,
+                to,
+                rate: flags.number("--rate", 60)?,
+                note: flags.one("--note").map(str::to_owned),
+                days: u32::try_from(flags.number("--days", 7)?).map_err(|_| "--days: 1-30".to_owned())?,
+            };
+            let (id, statement) = agent::issue(
+                flags.need("--owner-key")?,
+                flags.need("--agent-key")?,
+                flags.need("--node-url")?,
+                &rights,
+            )
+            .await?;
+            match flags.one("--out") {
+                Some(out) => {
+                    std::fs::write(out, &statement).map_err(|e| format!("{out}: {e}"))?;
+                    println!("Agent {id} ausgestellt ({} Tage) - Ausweis in {out}.", rights.days);
+                }
+                None => println!("{}", String::from_utf8_lossy(&statement)),
+            }
+        }
+        "revoke" => {
+            flags.only(&["--owner-key", "--node-url", "--agent"])?;
+            let agent =
+                bridge_core::Id::parse(flags.need("--agent")?).map_err(|_| "--agent: eine Agenten-ID".to_owned())?;
+            let ended = agent::revoke(flags.need("--owner-key")?, flags.need("--node-url")?, &agent).await?;
+            println!("Agent {agent} widerrufen{}.", if ended { " - seine Sitzung ist beendet" } else { "" });
+        }
+        other => return Err(format!("unbekannter Befehl agent {other}\n{USAGE}")),
     }
     Ok(())
 }
@@ -935,6 +1073,19 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
         let command = args.next().unwrap_or_default();
         match flags(args) {
             Ok(flags) => plugin_command(&command, &Flags(flags)),
+            Err(message) => Err(message),
+        }
+    } else if args.peek().map(String::as_str) == Some("ai") {
+        args.next();
+        match flags(args) {
+            Ok(flags) => ai_command(&Flags(flags)).await,
+            Err(message) => Err(message),
+        }
+    } else if args.peek().map(String::as_str) == Some("agent") {
+        args.next();
+        let command = args.next().unwrap_or_default();
+        match flags(args) {
+            Ok(flags) => agent_command(&command, &Flags(flags)).await,
             Err(message) => Err(message),
         }
     } else if args.peek().map(String::as_str) == Some("blocklist") {

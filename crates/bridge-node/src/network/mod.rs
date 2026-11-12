@@ -32,6 +32,7 @@
 //! appends - the state is never copied under the lock (docs/06 §5).
 
 pub(crate) mod endpoints;
+mod federation;
 mod gateway;
 mod gossip;
 mod operator;

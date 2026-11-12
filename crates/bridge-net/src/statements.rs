@@ -84,11 +84,15 @@ pub enum Kind {
     Label,
     /// A publisher's blocklist (docs/08 §9; not in the log - nodes keep the newest version).
     Blocklist,
+    /// An agent card issued by a member (docs/10 §3; not in the log - the agent's home entry).
+    Agent,
+    /// A connection to another network (docs/10 §6; log, net key only).
+    Federation,
 }
 
 impl Kind {
     /// The kinds that are entries of the transparency log.
-    pub const LOG_KINDS: [Kind; 9] = [
+    pub const LOG_KINDS: [Kind; 10] = [
         Kind::Manifest,
         Kind::Delegation,
         Kind::Invite,
@@ -98,6 +102,7 @@ impl Kind {
         Kind::Ban,
         Kind::Name,
         Kind::Label,
+        Kind::Federation,
     ];
 
     /// Wire name (`t`).
@@ -118,6 +123,8 @@ impl Kind {
             Self::Name => "name",
             Self::Label => "label",
             Self::Blocklist => "blocklist",
+            Self::Agent => "agent",
+            Self::Federation => "federation",
         }
     }
 
@@ -139,6 +146,8 @@ impl Kind {
             "name" => Self::Name,
             "label" => Self::Label,
             "blocklist" => Self::Blocklist,
+            "agent" => Self::Agent,
+            "federation" => Self::Federation,
             _ => return None,
         })
     }

@@ -32,6 +32,7 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
+mod agents;
 mod apps;
 mod blobs;
 mod blocklists;
@@ -40,6 +41,7 @@ mod reports;
 mod wasm;
 mod watch;
 
+pub use agents::{MAX_AGENT_REVOCATIONS, MAX_AGENT_REVOCATIONS_PER_OWNER};
 pub use apps::{AppLimits, AppRow, AppState, AppStored, Reservation};
 pub use blobs::{
     APP_PIN_PREFIX, BlobFiles, BlobLimits, BlobState, CHARGED_MIN_BYTES, HASHES_PER_ROW, NewBlob, PartStored, Pin,
@@ -164,6 +166,11 @@ const MIGRATIONS: &[&str] = &[
      CREATE TABLE app_events (app TEXT NOT NULL, host TEXT NOT NULL, seq INTEGER NOT NULL, iat INTEGER NOT NULL,
                               statement BLOB NOT NULL, PRIMARY KEY (app, host, seq)) WITHOUT ROWID;
      CREATE INDEX app_events_order ON app_events (app, iat, host, seq);",
+    // 13: agent cards (docs/10 §3.3): revocations at the agent's home node - statements of `owner` for `agent` issued
+    // up to `before` are invalid until `until` (the latest possible expiry).
+    "CREATE TABLE agent_revocations (agent TEXT NOT NULL, owner TEXT NOT NULL, before INTEGER NOT NULL,
+                                     until INTEGER NOT NULL, PRIMARY KEY (agent, owner)) WITHOUT ROWID;
+     CREATE INDEX agent_revocations_owner ON agent_revocations (owner);",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

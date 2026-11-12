@@ -75,11 +75,12 @@ use bridge_core::{CLOCK_SKEW_MS, Id, KeyCard, Statement};
 
 use crate::Cards;
 use crate::error::{NetError, NetResult};
+use crate::federation::{Federation, MAX_FEDERATIONS};
 use crate::log::{Head, MAX_ENTRY_BYTES, WitnessedHead, parse_entry, verify_head};
 use crate::merkle::{Hash, MAX_TREE_SIZE, Tree};
 use crate::names::{
     AdultPolicy, Category, Label, LabelTarget, MAX_NAME_LIFETIME_MS, Name, NameKind, NameRules,
-    description_is_reserved, name_is_reserved, reserved_skeletons, search_words, skeleton, split_address,
+    description_is_reserved, fold, name_is_reserved, reserved_skeletons, search_words, skeleton, split_address,
 };
 use crate::statements::{
     Ban, Body, DAY_MS, Delegation, Invite, JoinMode, Kind, LogRules, Manifest, Member, Revoke, RevokeTarget, Right,
@@ -169,6 +170,7 @@ enum Key {
     Invite(Hash),
     Name(String),
     Label(LabelTarget),
+    Federation(Id),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -199,6 +201,24 @@ enum Data {
         category: Category,
         owner: Option<Id>,
     },
+    /// A connection to another network (docs/10 §6): its gateways and the statement itself (clients check it).
+    Federation(Box<FederationData>),
+}
+
+/// A federation in effect.
+#[derive(Debug, Clone, PartialEq)]
+struct FederationData {
+    body: Federation,
+    statement: Vec<u8>,
+}
+
+/// A federation in effect, as the node needs it (docs/10 §6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FederationInfo {
+    /// The other network's gateways listed by this network.
+    pub gateways: Vec<KeyCard>,
+    /// The `federation` statement (canonical bytes, signatures included) - clients check it themselves.
+    pub statement: Vec<u8>,
 }
 
 /// A name in effect: its body, its confusable skeleton (docs/08 §3, §4) and what the search and the checks need
@@ -262,6 +282,7 @@ struct Grants {
     bans: BTreeMap<(Id, Hash), Grant>,
     invites: BTreeMap<Hash, Grant>,
     names: BTreeMap<String, Grant>,
+    federations: BTreeMap<Id, Grant>,
     /// Labels of names and of IDs (two maps, so a lookup needs no allocation).
     name_labels: BTreeMap<String, Grant>,
     id_labels: BTreeMap<Id, Grant>,
@@ -297,6 +318,7 @@ impl Grants {
             Key::Name(name) => self.names.get(name),
             Key::Label(LabelTarget::Name(name)) => self.name_labels.get(name),
             Key::Label(LabelTarget::Id(id)) => self.id_labels.get(id),
+            Key::Federation(peer) => self.federations.get(peer),
         }
     }
 
@@ -326,6 +348,7 @@ impl Grants {
             Key::Name(name) => self.names.insert(name, grant),
             Key::Label(LabelTarget::Name(name)) => self.name_labels.insert(name, grant),
             Key::Label(LabelTarget::Id(id)) => self.id_labels.insert(id, grant),
+            Key::Federation(peer) => self.federations.insert(peer, grant),
         };
         old
     }
@@ -345,6 +368,7 @@ impl Grants {
             Key::Name(name) => self.names.remove(name),
             Key::Label(LabelTarget::Name(name)) => self.name_labels.remove(name),
             Key::Label(LabelTarget::Id(id)) => self.id_labels.remove(id),
+            Key::Federation(peer) => self.federations.remove(peer),
         }?;
         if let (Key::Name(name), Data::Name(data)) = (key, &grant.data) {
             if self.name_skeletons.get(&data.skeleton) == Some(name) {
@@ -798,7 +822,8 @@ impl NetState {
             Kind::Ban => self.check_ban(statement, &signers, at)?,
             Kind::Name => self.check_name(statement, &signers, at)?,
             Kind::Label => self.check_label(statement, &signers, at)?,
-            Kind::Head | Kind::Cosign | Kind::Home | Kind::App | Kind::Blocklist => {
+            Kind::Federation => self.check_federation(statement, &signers, at)?,
+            Kind::Head | Kind::Cosign | Kind::Home | Kind::App | Kind::Blocklist | Kind::Agent => {
                 return Err(NetError::format("entry: not a log kind"));
             }
         };
@@ -1134,6 +1159,23 @@ impl NetState {
         Ok(Effect::Grant(key, grant))
     }
 
+    /// A connection to another network: the net key alone (docs/10 §6.1), not to itself, at most
+    /// [`MAX_FEDERATIONS`]; a newer statement for the same network replaces the older.
+    fn check_federation(&self, statement: &Statement, signers: &[Id], _at: i64) -> NetResult<Effect> {
+        if one_signer(signers)? != &self.net {
+            return Err(NetError::forbidden("federation: only the net key connects networks"));
+        }
+        let body = Federation::from_body(statement.body())?;
+        if body.peer == self.net {
+            return Err(NetError::format("federation: not with itself"));
+        }
+        let key = Key::Federation(body.peer.clone());
+        let data = Data::Federation(Box::new(FederationData { body, statement: statement.canonical_bytes().to_vec() }));
+        let grant = self.new_grant(statement, signers, data);
+        self.check_replace(&key, &grant, self.grants.federations.len(), MAX_FEDERATIONS)?;
+        Ok(Effect::Grant(key, grant))
+    }
+
     fn check_revoke(&self, statement: &Statement, signers: &[Id], at: i64) -> NetResult<Effect> {
         let issuer = one_signer(signers)?;
         let by_master = issuer == &self.net;
@@ -1152,6 +1194,7 @@ impl NetState {
                     Key::Member(_) | Key::Invite(_) => rights.has(Right::Members),
                     Key::Seal(..) | Key::Name(_) | Key::Label(_) => rights.has(Right::Seals),
                     Key::Ban(..) => rights.has(Right::Bans),
+                    Key::Federation(_) => false, // the net key only
                 };
                 if !(by_master || original || by_right) {
                     return Err(NetError::forbidden("revoke: no right for this statement"));
@@ -2432,18 +2475,26 @@ impl NetState {
         (search.results, search.more)
     }
 
-    /// Searches the names that resolve at `at` (docs/08 §7): rank 0 the name itself, 1 a prefix or the same skeleton,
-    /// 2 a tag, 3 part of the name or a tag prefix, 4 a word of the description that starts with the query (not for a
-    /// description with a reserved word of an owner below level 3); ties by the owner's level (higher first), then the
-    /// name. `safe` leaves out 18+ and owners below level 2. At most `max` (≤ 50) results.
+    /// Searches the names that resolve at `at` (docs/08 §7, docs/10 §5): rank 0 the name itself, 1 a prefix or the
+    /// same skeleton, 2 a tag, 3 part of the name or a tag prefix, 4 a word of the description that starts with the
+    /// query (not for a description with a reserved word of an owner below level 3), 5 the name or a tag with one small
+    /// typo (words of 4 or more letters); ties by the owner's level (higher first), then the name. Several words
+    /// (at most [`MAX_QUERY_WORDS`]): every word must match, the rank is the worst of them. Umlauts and accents do not
+    /// matter ([`fold`]). `safe` leaves out 18+ and owners below level 2. At most `max` (≤ 50) results.
     ///
     /// Bounded work (review 9): one pass of cheap comparisons over the names (no allocation per name), then the
     /// standing of the candidates rank by rank, by name within a rank - at most [`MAX_SEARCH_CHECKS`] of them, and no
     /// lower rank once a better one gave more than `max` results. A cut-off search says `more`.
     #[must_use]
     pub fn search(&self, query: &str, safe: bool, max: usize, at: i64) -> Search {
+        self.search_kind(query, safe, max, at, None)
+    }
+
+    /// [`NetState::search`] for names of one kind only (`app`, `node`, `member`).
+    #[must_use]
+    pub fn search_kind(&self, query: &str, safe: bool, max: usize, at: i64, kind: Option<NameKind>) -> Search {
         let mut search = Search { results: Vec::new(), more: false, scanned: 0, checked: 0 };
-        let mut query = query.trim().to_lowercase();
+        let mut query = fold(query.trim());
         if let Some(short) = &self.manifest.short {
             if let Some(stripped) = query.strip_suffix(&format!(".{short}")) {
                 query = stripped.to_owned();
@@ -2452,17 +2503,20 @@ impl NetState {
         if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
             return search;
         }
-        let query_skeleton = skeleton(&query);
-        // A word of a description consists of letters and digits only: other queries can not start one.
-        let needle = query.chars().all(char::is_alphanumeric).then(|| format!(" {query}"));
-        let mut ranks: [Vec<(&Grant, &NameData)>; 5] = Default::default();
+        let words: Vec<QueryWord> = query.split_whitespace().take(MAX_QUERY_WORDS).map(QueryWord::new).collect();
+        let mut ranks: [Vec<(&Grant, &NameData)>; 6] = Default::default();
         for grant in self.grants.names.values() {
             let Data::Name(data) = &grant.data else { continue };
             search.scanned = search.scanned.saturating_add(1);
             if safe && data.body.category == Category::Adult {
                 continue; // 18+ by its owner: never in the safe search (the most restrictive category wins)
             }
-            if let Some(rank) = match_rank(data, &query, &query_skeleton, needle.as_deref()) {
+            if kind.is_some_and(|kind| data.body.kind != kind) {
+                continue;
+            }
+            // Every word must match; the worst rank counts.
+            let rank = words.iter().try_fold(0usize, |worst, word| word.rank(data).map(|rank| worst.max(rank)));
+            if let Some(rank) = rank {
                 if let Some(list) = ranks.get_mut(rank) {
                     list.push((grant, data));
                 }
@@ -2495,6 +2549,24 @@ impl NetState {
         search.more = cut || hits.len() > max;
         search.results = hits.into_iter().take(max).map(|hit| resolved(hit.grant, hit.data, hit.standing)).collect();
         search
+    }
+
+    /// The connection to network `peer` in effect at `at` (docs/10 §6): the other network's gateways this network
+    /// listed, and the statement.
+    #[must_use]
+    pub fn federation(&self, peer: &Id, at: i64) -> Option<FederationInfo> {
+        match self.grants.federations.get(peer) {
+            Some(grant @ Grant { data: Data::Federation(data), .. }) if grant.active(at) => {
+                Some(FederationInfo { gateways: data.body.gateways.clone(), statement: data.statement.clone() })
+            }
+            _ => None,
+        }
+    }
+
+    /// The networks this network is connected to at `at`.
+    #[must_use]
+    pub fn federations(&self, at: i64) -> Vec<Id> {
+        self.grants.federations.iter().filter(|(_, grant)| grant.active(at)).map(|(peer, _)| peer.clone()).collect()
     }
 
     /// The names of `owner` that resolve at `at` (by name).
@@ -2578,24 +2650,73 @@ pub struct Search {
 
 /// How well a name matches a (lower-case) query, see [`NetState::search`]. `needle`: ` <query>` for the words of the
 /// description (`None`: the query can not start a word). No allocation.
-fn match_rank(data: &NameData, query: &str, query_skeleton: &str, needle: Option<&str>) -> Option<usize> {
-    let body = &data.body;
-    if body.name == query {
-        return Some(0);
+/// Most words of a search query.
+pub const MAX_QUERY_WORDS: usize = 4;
+/// Shortest word that may match with a typo.
+const MIN_TYPO_CHARS: usize = 4;
+
+/// One word of a search query, prepared once per search (no allocation per name).
+struct QueryWord {
+    word: String,
+    skeleton: String,
+    /// ` word`: a word of a description starts with it (only for words of letters and digits).
+    needle: Option<String>,
+    /// Matches with one typo: words of at least 4 letters (no digits - `shop24` is not a typo of `shop25`).
+    typos: bool,
+}
+
+impl QueryWord {
+    fn new(word: &str) -> Self {
+        Self {
+            word: word.to_owned(),
+            skeleton: skeleton(word),
+            needle: word.chars().all(char::is_alphanumeric).then(|| format!(" {word}")),
+            typos: word.len() >= MIN_TYPO_CHARS && word.bytes().all(|b| b.is_ascii_lowercase()),
+        }
     }
-    if body.name.starts_with(query) || data.skeleton == query_skeleton {
-        return Some(1);
+
+    fn rank(&self, data: &NameData) -> Option<usize> {
+        let (body, query) = (&data.body, self.word.as_str());
+        if body.name == query {
+            return Some(0);
+        }
+        if body.name.starts_with(query) || data.skeleton == self.skeleton {
+            return Some(1);
+        }
+        if body.tags.iter().any(|tag| tag == query) {
+            return Some(2);
+        }
+        if body.name.contains(query) || body.tags.iter().any(|tag| tag.starts_with(query)) {
+            return Some(3);
+        }
+        if self.needle.as_deref().is_some_and(|needle| data.words.contains(needle)) {
+            return Some(4);
+        }
+        if self.typos && (one_typo(&body.name, query) || body.tags.iter().any(|tag| one_typo(tag, query))) {
+            return Some(5);
+        }
+        None
     }
-    if body.tags.iter().any(|tag| tag == query) {
-        return Some(2);
+}
+
+/// Whether `a` and `b` differ by exactly one small typo: one character replaced, added or missing, or two
+/// neighbours swapped. Linear time, no table (names and tags are ASCII; other text never matches).
+fn one_typo(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a == b || a.len().abs_diff(b.len()) > 1 {
+        return false;
     }
-    if body.name.contains(query) || body.tags.iter().any(|tag| tag.starts_with(query)) {
-        return Some(3);
+    let common = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let (a_rest, b_rest) = (&a[common..], &b[common..]);
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => {
+            // Replaced, or swapped with the next one.
+            a_rest[1..] == b_rest[1..]
+                || (a_rest.len() >= 2 && a_rest[0] == b_rest[1] && a_rest[1] == b_rest[0] && a_rest[2..] == b_rest[2..])
+        }
+        std::cmp::Ordering::Less => a_rest == &b_rest[1..],
+        std::cmp::Ordering::Greater => &a_rest[1..] == b_rest,
     }
-    if needle.is_some_and(|needle| data.words.contains(needle)) {
-        return Some(4);
-    }
-    None
 }
 
 /// A name statement in effect (docs/08 §3).
@@ -3148,6 +3269,79 @@ mod tests {
     /// Review 9, finding 1: a search once checked the standing of every hit and cloned the name rules and the name for
     /// it (380 ms at 100,000 names, on a worker thread under the core lock). Now: one cheap pass over the names, at
     /// most `MAX_SEARCH_CHECKS` standing checks - whatever the query (counted, so the bound holds in every build).
+    #[test]
+    fn typos_are_one_edit() {
+        for (a, b) in
+            [("laden", "lade"), ("laden", "ladne"), ("laden", "laxen"), ("laden", "lladen"), ("laden", "aden")]
+        {
+            assert!(one_typo(a, b) && one_typo(b, a), "{a} {b}");
+        }
+        for (a, b) in [("laden", "laden"), ("laden", "lad"), ("laden", "ledan"), ("laden", "nedal"), ("ab", "abcd")] {
+            assert!(!one_typo(a, b), "{a} {b}");
+        }
+    }
+
+    #[test]
+    fn search_words_umlauts_typos_and_kinds() -> NetResult<()> {
+        let (_, mut state) = genesis()?;
+        let card = Identity::from_secret_bytes(&[7; 32], &[8; 32]).key_card(Role::Client, None, T0)?;
+        let exp = T0 + 300 * DAY_MS;
+        let owner = Id::of_sign_key(&[1; 32]);
+        let member = Grant { hash: [0xaa; 32], iat: T0, exp, issuers: vec![], data: Data::Member { accepted: T0 } };
+        state.grants.insert(Key::Member(owner.clone()), member);
+        let data = Data::Seal { services: Services::NONE, card: None, by_watcher: false };
+        state
+            .grants
+            .insert(Key::Seal(owner.clone(), 2), Grant { hash: [0xbb; 32], iat: T0, exp, issuers: vec![], data });
+        for (index, (name, kind, description, tags)) in [
+            ("pizzeria", NameKind::App, "Beste Pizza im Kiez – Läden für Feinschmecker", vec!["essen"]),
+            ("baecker", NameKind::Member, "Brötchen und Kuchen", vec!["brot"]),
+            ("werkstatt", NameKind::Node, "Fahrräder reparieren", vec!["fahrrad"]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let body = Name {
+                name: name.into(),
+                kind,
+                target: owner.clone(),
+                owner: owner.clone(),
+                owner_card: card.clone(),
+                card: None,
+                description: description.into(),
+                tags: tags.into_iter().map(str::to_owned).collect(),
+                category: Category::General,
+                hosts: Vec::new(),
+            };
+            let data = Data::Name(Box::new(NameData::new(body, &state.reserved, T0)));
+            let grant = Grant { hash: [index as u8; 32], iat: T0, exp, issuers: vec![owner.clone()], data };
+            state.grants.insert(Key::Name(name.into()), grant);
+        }
+        let at = T0 + DAY_MS;
+        let names = |query: &str, kind: Option<NameKind>| -> Vec<String> {
+            state.search_kind(query, false, 20, at, kind).results.iter().map(|r| r.info.name.name.clone()).collect()
+        };
+        // Several words: every one must match (name, tag or description).
+        assert_eq!(names("pizza kiez", None), vec!["pizzeria"]);
+        assert_eq!(names("pizza brot", None), Vec::<String>::new());
+        // Umlauts and accents: either way.
+        assert_eq!(names("laden", None), vec!["pizzeria"]);
+        assert_eq!(names("BRÖTCHEN", None), vec!["baecker"]);
+        assert_eq!(names("brotchen", None), vec!["baecker"]);
+        assert_eq!(names("fahrräder", None), vec!["werkstatt"]);
+        // One typo in a name or tag.
+        assert_eq!(names("werkstat", None), vec!["werkstatt"]);
+        assert_eq!(names("pizzaria", None), vec!["pizzeria"]);
+        assert_eq!(names("fahrad", None), vec!["werkstatt"]);
+        assert_eq!(names("piz", None), vec!["pizzeria"], "a prefix still works");
+        // By kind.
+        assert_eq!(names("e", Some(NameKind::Member)), vec!["baecker"]);
+        assert_eq!(names("pizza", Some(NameKind::Node)), Vec::<String>::new());
+        // At most four words count.
+        assert_eq!(names("pizza kiez beste im zzzz", None), vec!["pizzeria"]);
+        Ok(())
+    }
+
     #[test]
     fn search_work_is_bounded_at_100k_names() -> NetResult<()> {
         let (_, mut state) = genesis()?;

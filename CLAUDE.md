@@ -7,7 +7,9 @@ Zuerst lesen: `docs/00_GRUNDSAETZE.md` (Zero Trust Z1–Z10, Struktur S1–S6, C
   Obergrenzen, kleinste Rechte, im Zweifel ablehnen. Krypto nur in `bridge-core` (Modul `crypto`), Invariante N1
   (ADR 0008).
 - **Abteile = Crates**: `bridge-core` → `bridge-store` / `bridge-transport` → `bridge-guard` → `bridge-net` →
-  `bridge-node` → `services/*`; `bridge-wasm` (Sandbox, ADR 0020) hängt nur von wasmi ab. Abhängigkeiten nur nach unten; Dienste nur über `bridge-plugin-api`.
+  `bridge-node` → `services/*` (z. B. `services/ai`, nur `bridge-plugin-api` + `bridge-core`); `bridge-wasm` (Sandbox,
+  ADR 0020) hängt nur von wasmi ab. SDKs in `sdk/` (Rust, Python, JavaScript, Java, Luau) müssen die Testvektoren in
+  `sdk/vectors` bestehen (ADR 0021). Abhängigkeiten nur nach unten; Dienste nur über `bridge-plugin-api`.
   Kein globaler Zustand. `#![forbid(unsafe_code)]` überall. `sdk/rust` nutzt nur `bridge-core` + `bridge-transport`;
   `tests/e2e` (Crate `bridge-tests`) testet über alle Abteile.
 - Krypto-Bausteine nur über `bridge-core::crypto`; andere Module rufen die Krypto-Bibliotheken nie direkt auf.

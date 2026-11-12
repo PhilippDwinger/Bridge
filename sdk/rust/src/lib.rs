@@ -26,8 +26,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bridge_core::encoding::{b64, b64_var};
 use bridge_core::json::parse_strict;
 use bridge_core::{
-    Address, Content, CoreError, Draft, Envelope, Id, Identity, JoinLink, KeyCard, Kind, Puzzle, Role, SignedRequest,
-    Statement,
+    Address, Agent, Content, CoreError, Draft, Envelope, Id, Identity, JoinLink, KeyCard, Kind, Puzzle, Role, Scope,
+    SignedRequest, Statement,
 };
 use bridge_transport::{ClientResponse, Discovery, HttpClient, TransportError};
 use rand_core::OsRng;
@@ -77,8 +77,45 @@ pub struct Received {
     pub id: [u8; 16],
     /// Verified sender.
     pub from: Id,
+    /// The sender's network: this client's network, or a connected one (checked, docs/10 §6.3) - answer with
+    /// [`Client::send_to_net`] then.
+    pub net: Id,
     /// The content.
     pub content: Content,
+    /// The sender is an agent acting for this owner (its statement was checked here, docs/10 §3.4).
+    pub agent_of: Option<AgentOf>,
+}
+
+/// Who an agent acts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOf {
+    /// The owner (a member).
+    pub owner: Id,
+    /// Name or purpose from the statement.
+    pub note: Option<String>,
+}
+
+/// What an agent may do (for [`Client::issue_agent`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRights {
+    /// Send messages.
+    pub send: bool,
+    /// Fetch and acknowledge messages.
+    pub receive: bool,
+    /// Only to these recipients (`None`: every member).
+    pub to: Option<Vec<Id>>,
+    /// Sends per hour (1-3600).
+    pub rate: u64,
+    /// Name or purpose (at most 64 characters).
+    pub note: Option<String>,
+    /// Lifetime in days (1-30).
+    pub days: u32,
+}
+
+impl Default for AgentRights {
+    fn default() -> Self {
+        Self { send: true, receive: true, to: None, rate: 60, note: None, days: 7 }
+    }
 }
 
 /// The result of one receive call.
@@ -165,6 +202,10 @@ pub struct Client {
     seen_order: VecDeque<SeenKey>,
     seen_file: Option<PathBuf>,
     pending_acks: Vec<SeenKey>,
+    /// Log in as an agent with this statement of its owner (docs/10 §3).
+    agent: Option<Statement>,
+    /// Messages that arrived while [`Client::request`] waited for its answer (the next `receive` hands them out).
+    stash: VecDeque<Received>,
     /// Max proof-of-work hashes the client is willing to compute for a login.
     pub max_pow_tries: u64,
     /// Lifetime of sent envelopes (s).
@@ -192,6 +233,8 @@ impl Client {
             seen_order: VecDeque::new(),
             seen_file: None,
             pending_acks: Vec::new(),
+            agent: None,
+            stash: VecDeque::new(),
             max_pow_tries: 1 << 30,
             ttl_s: 7 * 24 * 3600,
         })
@@ -293,7 +336,10 @@ impl Client {
         let mut body = json!({"challenge": challenge.get("challenge").cloned().unwrap_or(Value::Null),
                               "card": self.card.to_value()});
         self.solve_puzzle(&challenge, &card, &mut body)?;
-        if &net != card.id() {
+        if let Some(agent) = &self.agent {
+            // An agent's home is its statement (docs/10 §3.2).
+            body["agent"] = agent.to_value();
+        } else if &net != card.id() {
             let now = now_ms();
             let home = Draft {
                 kind: "home",
@@ -312,6 +358,62 @@ impl Client {
         }
         self.session = Some(token.to_owned());
         Ok(())
+    }
+
+    /// Logs in as an agent from now on (docs/10 §3): `statement` is the `agent` statement its owner issued for this
+    /// client's key (see [`Client::issue_agent`]); the client must talk to the home node named in it. The client
+    /// uses the agent card from the statement as its own card (same key; the node compares them exactly).
+    pub fn with_agent(mut self, statement: Statement) -> SdkResult<Self> {
+        let agent = Agent::from_statement(&statement)?;
+        if agent.card.id() != self.identity.id()
+            || agent.card.sign_public() != &self.identity.sign_public()
+            || agent.card.receive_public() != &self.identity.receive_public()
+        {
+            return Err(SdkError::Untrusted("the agent statement is for another key".into()));
+        }
+        self.card = agent.card;
+        self.agent = Some(statement);
+        Ok(self)
+    }
+
+    /// Issues an agent card as this client (the owner, a member): `agent` gets its own key with `rights`, homed at
+    /// this client's node (docs/10 §3.1).
+    pub fn issue_agent(&self, agent: &KeyCard, rights: &AgentRights) -> SdkResult<Statement> {
+        let net = self.net.as_ref().ok_or_else(|| SdkError::Untrusted("not connected".into()))?;
+        let mut scopes = std::collections::BTreeSet::new();
+        if rights.send {
+            scopes.insert(Scope::Send);
+        }
+        if rights.receive {
+            scopes.insert(Scope::Receive);
+        }
+        let body = Agent {
+            agent: agent.id().clone(),
+            card: agent.clone(),
+            owner: self.card.clone(),
+            node: self.node_id()?.clone(),
+            scopes,
+            to: rights.to.clone(),
+            rate: rights.rate,
+            note: rights.note.clone(),
+        };
+        Ok(body.issue(net, &self.identity, now_ms(), rights.days)?)
+    }
+
+    /// Revokes an agent of this client at this node (its home): its session ends and its statements issued until now
+    /// are invalid (docs/10 §3.3). Returns whether a session ended.
+    pub async fn revoke_agent(&self, agent: &Id) -> SdkResult<bool> {
+        let request = SignedRequest::sign(
+            &self.identity,
+            self.node_id()?,
+            "agent-revoke",
+            json!({"agent": agent.as_str()}),
+            now_ms(),
+            &mut OsRng,
+        )?;
+        let answer =
+            Self::check(self.http.post("/v4/agent/revoke", self.session.as_deref(), request.to_bytes()?).await?)?;
+        Ok(answer.get("ended").and_then(Value::as_bool).unwrap_or(false))
     }
 
     /// Joins a network with a join link (docs/06 §7): checks that the gateway belongs to the network of the link
@@ -457,6 +559,31 @@ impl Client {
         Ok(card)
     }
 
+    /// The card of `id` in the connected network `net` (docs/10 §6.3), fetched by this client's node from that
+    /// network's gateways. Cards are self-certifying: the ID is checked here.
+    pub async fn card_of_in(&self, id: &Id, net: &Id) -> SdkResult<KeyCard> {
+        let body = json!({"id": id.as_str(), "net": net.as_str()}).to_string().into_bytes();
+        let answer = Self::check(self.http.post("/v4/card", self.session.as_deref(), body).await?)?;
+        let card = KeyCard::from_value(answer.get("card").cloned().unwrap_or(Value::Null))?;
+        if card.id() != id {
+            return Err(SdkError::Untrusted("node returned a card for another ID".into()));
+        }
+        Ok(card)
+    }
+
+    /// Like [`Client::send`] to a member of the connected network `dnet` (docs/10 §6.2).
+    pub async fn send_to_net(&self, to: &KeyCard, dnet: &Id, content: &Content) -> SdkResult<[u8; 16]> {
+        let net = self.net.as_ref().ok_or_else(|| SdkError::Untrusted("not connected".into()))?;
+        let address = Address { net, to, kind: Kind::Msg, iat: now_ms(), ttl: self.ttl_s };
+        let envelope = if dnet == net {
+            Envelope::seal(&self.identity, &address, &content.to_bytes()?, &mut OsRng)?
+        } else {
+            Envelope::seal_for_net(&self.identity, &address, dnet, &content.to_bytes()?, &mut OsRng)?
+        };
+        self.send_envelope(&envelope).await?;
+        Ok(*envelope.id())
+    }
+
     /// Encrypts `content` for `to` and hands it to the node. Returns the envelope ID.
     pub async fn send(&self, to: &KeyCard, content: &Content) -> SdkResult<[u8; 16]> {
         let net = self.net.as_ref().ok_or_else(|| SdkError::Untrusted("not connected".into()))?;
@@ -464,6 +591,54 @@ impl Client {
         let envelope = Envelope::seal(&self.identity, &address, &content.to_bytes()?, &mut OsRng)?;
         self.send_envelope(&envelope).await?;
         Ok(*envelope.id())
+    }
+
+    /// Sends a task (`application/json`, e.g. to the AI service, docs/10 §4) to `to` - in the connected network `net`,
+    /// if given - and waits up to `wait` for its response (content type `response` naming the task, from `to`).
+    /// Other messages that arrive meanwhile are kept for the next [`Client::receive`]. `None`: no answer in time.
+    pub async fn request(
+        &mut self,
+        to: &KeyCard,
+        net: Option<&Id>,
+        json: &[u8],
+        wait: Duration,
+    ) -> SdkResult<Option<Received>> {
+        let content = Content::data(bridge_core::ContentType::Task, "application/json", json.to_vec());
+        let task = match net {
+            Some(net) => self.send_to_net(to, net, &content).await?,
+            None => self.send(to, &content).await?,
+        };
+        let deadline = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(std::time::Instant::now()).as_secs().clamp(1, 25);
+            let inbox = self.receive_fresh(left).await?;
+            let mut answer = None;
+            for message in inbox.messages {
+                let fits = answer.is_none()
+                    && &message.from == to.id()
+                    && message.content.kind == bridge_core::ContentType::Response
+                    && message.content.reply == Some(task);
+                if fits {
+                    answer = Some(message);
+                } else if self.stash.len() < 1_000 {
+                    self.stash.push_back(message);
+                }
+            }
+            if answer.is_some() {
+                return Ok(answer);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Like [`Client::receive`], but always asks the node (the stash stays for later).
+    async fn receive_fresh(&mut self, wait_s: u64) -> SdkResult<Inbox> {
+        let stash = std::mem::take(&mut self.stash);
+        let result = self.receive(wait_s).await;
+        let mut kept = stash;
+        kept.extend(std::mem::take(&mut self.stash));
+        self.stash = kept;
+        result
     }
 
     /// Hands a prepared envelope to the node.
@@ -510,10 +685,15 @@ impl Client {
     /// acknowledges everything fetched. If acknowledging fails, the messages are returned anyway and the
     /// acknowledgement is repeated with the next call (at-least-once from the node, exactly-once to the caller).
     pub async fn receive(&mut self, wait_s: u64) -> SdkResult<Inbox> {
+        if !self.stash.is_empty() {
+            return Ok(Inbox { messages: self.stash.drain(..).collect(), ..Inbox::default() });
+        }
         let body = json!({"wait": wait_s.min(25), "max": 100}).to_string().into_bytes();
         let answer = Self::check(self.http.post("/v4/poll", self.session.as_deref(), body).await?)?;
         let envelopes = answer.get("envelopes").and_then(Value::as_array).cloned().unwrap_or_default();
         let cards = answer.get("cards").and_then(Value::as_object).cloned().unwrap_or_default();
+        let agents = answer.get("agents").and_then(Value::as_object).cloned().unwrap_or_default();
+        let connected = self.connected_nets(&answer);
         let mut inbox = Inbox::default();
         let mut to_ack: Vec<SeenKey> = std::mem::take(&mut self.pending_acks);
         for value in envelopes.into_iter().take(100) {
@@ -529,7 +709,7 @@ impl Client {
                 inbox.duplicates += 1;
                 continue;
             }
-            match self.open(&envelope, &cards) {
+            match self.open(&envelope, &cards, &agents, &connected) {
                 Some(received) => {
                     if let Err(warning) = self.remember(key, envelope.expires_at()) {
                         inbox.warning = Some(warning);
@@ -549,8 +729,17 @@ impl Client {
         Ok(inbox)
     }
 
-    fn open(&self, envelope: &Envelope, cards: &serde_json::Map<String, Value>) -> Option<Received> {
-        if envelope.to() != self.identity.id() || Some(envelope.net()) != self.net.as_ref() {
+    fn open(
+        &self,
+        envelope: &Envelope,
+        cards: &serde_json::Map<String, Value>,
+        agents: &serde_json::Map<String, Value>,
+        connected: &[Id],
+    ) -> Option<Received> {
+        let own = self.net.as_ref()?;
+        let from_here = envelope.net() == own && envelope.dnet().is_none();
+        let from_connected = envelope.dnet() == Some(own) && connected.contains(envelope.net());
+        if envelope.to() != self.identity.id() || !(from_here || from_connected) {
             return None;
         }
         let card = KeyCard::from_value(cards.get(envelope.from().as_str())?.clone()).ok()?;
@@ -559,7 +748,46 @@ impl Client {
         }
         let plaintext = envelope.open(&self.identity, &card).ok()?;
         let content = Content::parse(&plaintext).ok()?;
-        Some(Received { id: *envelope.id(), from: envelope.from().clone(), content })
+        let agent_of =
+            agents.get(envelope.from().as_str()).and_then(|statement| agent_of(statement, &card, envelope.net()));
+        Some(Received {
+            id: *envelope.id(),
+            from: envelope.from().clone(),
+            net: envelope.net().clone(),
+            content,
+            agent_of,
+        })
+    }
+
+    /// The connected networks proven by a poll answer (docs/10 §6.3): `feds` statements of this network, signed by its
+    /// net key alone (`master`, the card with this network's ID), in effect, for messages.
+    fn connected_nets(&self, answer: &serde_json::Map<String, Value>) -> Vec<Id> {
+        let (Some(own), Some(feds), Some(master)) =
+            (self.net.as_ref(), answer.get("feds").and_then(Value::as_object), answer.get("master"))
+        else {
+            return Vec::new();
+        };
+        let Ok(master) = KeyCard::from_value(master.clone()) else { return Vec::new() };
+        if master.id() != own || master.role() != Role::Net {
+            return Vec::new();
+        }
+        feds.iter()
+            .take(32)
+            .filter_map(|(peer, statement)| {
+                let statement = Statement::from_value(statement.clone()).ok()?;
+                let body = statement.body();
+                let scope = body.get("scope").and_then(Value::as_array)?;
+                let fine = statement.kind() == "federation"
+                    && statement.net() == own
+                    && statement.claimed_signers() == [own]
+                    && body.get("peer").and_then(Value::as_str) == Some(peer.as_str())
+                    && scope.len() == 1
+                    && scope[0].as_str() == Some("messages")
+                    && statement.check_time(now_ms()).is_ok()
+                    && statement.verify(&[&master], 1).is_ok();
+                fine.then(|| Id::parse(peer).ok()).flatten()
+            })
+            .collect()
     }
 
     fn remember(&mut self, key: SeenKey, expires: i64) -> Result<(), String> {
@@ -602,6 +830,15 @@ impl Client {
         }
         Ok(removed)
     }
+}
+
+/// The owner an agent acts for, from its statement - only if it checks out (docs/10 §3.4): a valid agent statement of
+/// this network for exactly this sender and card, signed by the owner in it.
+fn agent_of(statement: &Value, sender: &KeyCard, net: &Id) -> Option<AgentOf> {
+    let statement = Statement::from_value(statement.clone()).ok()?;
+    let agent = Agent::check(&statement, net, now_ms()).ok()?;
+    (&agent.agent == sender.id() && agent.card.to_value() == sender.to_value())
+        .then(|| AgentOf { owner: agent.owner.id().clone(), note: agent.note })
 }
 
 /// What a client checks in a network's log before it joins at the gateway `node` (docs/06 §7): entry 0 is the

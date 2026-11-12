@@ -8,6 +8,7 @@
 //!
 //! Layering (docs/03_ARCHITEKTUR.md): this crate depends on no other Bridge crate.
 
+pub mod agent;
 pub mod app;
 pub mod blob;
 pub mod content;
@@ -27,6 +28,7 @@ pub mod request;
 pub mod statement;
 pub mod stream;
 
+pub use agent::{Agent, Scope};
 pub use app::{AppFile, AppManifest, FileType};
 pub use blob::{BlobId, HashList};
 pub use content::{Content, ContentType, Payload, StreamTicket};

@@ -96,6 +96,14 @@ impl Node {
     pub(crate) async fn route_recipient(&self, to: &Id, now: i64) -> NodeResult<Route> {
         let unknown = || NodeError::new(404, "UNKNOWN_IDENTITY", "recipient unknown here");
         if !self.with_core(|core| core.state.level(to, now).is_some())? {
+            // Not a member: an agent with a valid statement (docs/10 §3.2) goes to its home node.
+            let (agent, _) = self.agent_home(to, now).await?.ok_or_else(unknown)?;
+            if &agent.node == self.inner.identity.id() {
+                return Ok(Route::Local);
+            }
+            if self.with_core(|core| core.is_gateway(&agent.node, now))? {
+                return Ok(Route::Relay(agent.node));
+            }
             return Err(unknown());
         }
         let (net, member) = (self.inner.net.to_string(), to.to_string());
@@ -396,10 +404,20 @@ impl Node {
             KeyCard::from_value(item.get("card").cloned().unwrap_or(Value::Null)).map_err(|e| invalid(e.into()))?;
         let statement =
             Statement::from_value(item.get("home").cloned().unwrap_or(Value::Null)).map_err(|e| invalid(e.into()))?;
-        let home = Home::check(&statement, &self.inner.net, &card, now).map_err(|e| invalid(e.into()))?;
+        // A member's `home`, or an agent's statement naming its home node (docs/10 §3.2).
+        let (node, member_of) = if statement.kind() == "agent" {
+            let agent = bridge_core::Agent::check(&statement, &self.inner.net, now).map_err(|e| invalid(e.into()))?;
+            if &agent.agent != card.id() || agent.card.to_value() != card.to_value() {
+                return Err(invalid(NodeError::bad_format("agent home: other card")));
+            }
+            (agent.node, agent.owner.id().clone())
+        } else {
+            let home = Home::check(&statement, &self.inner.net, &card, now).map_err(|e| invalid(e.into()))?;
+            (home.node, card.id().clone())
+        };
         let max_homes = self
             .with_core(|core| {
-                (core.state.level(card.id(), now).is_some() && core.is_gateway(&home.node, now))
+                (core.state.check_login(&member_of, now).is_ok() && core.is_gateway(&node, now))
                     .then_some(core.state.manifest().limits.members)
             })
             .map_err(invalid)?
@@ -407,7 +425,7 @@ impl Node {
         let (iat, exp) = statement.times();
         let row = HomeRow {
             member: card.id().to_string(),
-            node: home.node.to_string(),
+            node: node.to_string(),
             iat,
             exp,
             seq: 0,

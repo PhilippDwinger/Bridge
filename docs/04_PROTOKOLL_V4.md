@@ -63,6 +63,9 @@ Jede Aussage, die Rechte gibt oder nimmt, gilt nur, wenn sie im **Transparenz-Lo
  "iat":0,"ttl":600,"kind":"msg|req|res|evt|ack","epk":"<x25519 wegwerf>","n":"<12 Byte Zufall>",
  "ct":"<...>","sig":"<ed25519>"}
 ```
+Optional `"dnet":"<ziel-netz>"` (Phase 6, docs/10 §6): Ziel in einem verbundenen Netz; ≠ `net`, signiert und Teil der
+AAD wie jedes Kopf-Feld.
+
 **Verschlüsseln** (Absender):
 1. Wegwerf-Schlüsselpaar `e` (X25519) erzeugen; `epk = e.pub`.
 2. `shared = X25519(e.priv, empfänger.box)`
@@ -140,6 +143,8 @@ signiert sind, dient die Transport-Verschlüsselung nur dem Schutz der Metadaten
 | OPTIONS | `/v4/…` | CORS-Vorabfrage von Browsern (07 §5) |
 | GET/POST | `/v4/names/info` · `/resolve` · `/search` · `/list` · `/submit` | Namen auflösen, suchen, eintragen (Phase 4, 08 §7) |
 | POST | `/v4/report` · `/v4/node/report` · `/v4/admin/reports` · `/v4/admin/report` | Meldungen abgeben, weiterreichen, lesen, erledigen (08 §6) |
+| POST | `/v4/agent/revoke` | Inhaber widerruft einen Agenten an dessen Heim-Knoten (Phase 6, 10 §3) |
+| POST | `/v4/fed/relay` · `/v4/fed/card` | Knoten eines verbundenen Netzes: Umschlag zustellen, Karte holen (Phase 6, 10 §6) |
 
 Die Bridge-API erlaubt Aufrufe aus Apps im Browser (Phase 4a): jede Antwort unter `/v4/` trägt
 `Access-Control-Allow-Origin: *`, nie `Allow-Credentials` (Sitzungen nur per Bearer-Token, keine Cookies).
@@ -162,9 +167,9 @@ Künftige Operationen, die beides nicht sind, merken sich (`iss`, `n`) im Zeitfe
 | `POST /v4/auth/challenge` | `{}` (im Netz für den Beitritt: `{"for":"join"}`, 06 §7) | `{"challenge","exp","pow"}` (`pow` = Rätsel §8 oder `null`) | Limit pro Adresse |
 | `POST /v4/auth/login` | `rq` mit `op:"login"`, `body:{"challenge","card","pow":"<8 Byte>"?,"home":<aussage>?}` (`home` im Netz, 06 §8) | `{"session","exp"}` | Größe → Format → Rätsel offen + einmalig → PoW → Karte (`card.id == iss`, Rolle nicht `net`) → Signatur → im Netz: Knoten ist Empfänger, Mitglied, nicht gesperrt, `home` gültig → Platz für die Identität |
 | `POST /v4/send` | Umschlag | `{"ok":true}` | Sitzung → Größe → Format → Zeit → `from` = Sitzung → Limit → Empfänger bekannt → Kontingent → Signatur → Replay → speichern |
-| `POST /v4/poll` | `{"wait":0–25,"max":1–100}` | `{"envelopes":[…],"cards":{"<id>":<karte>}}` (Umschläge zusammen max. 1 MiB, mindestens einer) | Sitzung → Limit |
+| `POST /v4/poll` | `{"wait":0–25,"max":1–100}` | `{"envelopes":[…],"cards":{"<id>":<karte>}}` (Umschläge zusammen max. 1 MiB, mindestens einer); Phase 6 bei Bedarf dazu `"agents"`, `"feds"`, `"master"` (10 §3.4, §6.3) | Sitzung → Limit |
 | `POST /v4/ack` | `rq` mit `op:"ack"`, `body:{"acks":[{"from":"<id>","id":"<16 Byte>"},…]}` (max. 100) | `{"removed":n}` | Sitzung → `iss` = Sitzung → Signatur |
-| `POST /v4/card` | `{"id":"<id>"}` | `{"card":…}` | Sitzung → Limit |
+| `POST /v4/card` | `{"id":"<id>","net":"<netz>"?}` | `{"card":…}` | Sitzung → Limit (mit `net`: Karte aus einem verbundenen Netz, 10 §6) |
 
 - Sitzungen leben nur im RAM (60 min, max. 8 pro Identität): Nach einem Neustart meldet sich der Client neu an.
 - Das Postfach liegt in SQLite: Nicht bestätigte Umschläge überleben Neustarts und kommen bei jedem `poll` wieder,

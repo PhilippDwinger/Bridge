@@ -198,7 +198,7 @@ antwortet `503 UNAVAILABLE`.
 |---|---|---|
 | `GET /v4/names/info` | – | `{"net","name","short","contact","adult","names":{"min_level","quota","reserved"},"blocklists":[…]}` |
 | `POST /v4/names/resolve` | `{"name":"shop"}` oder `{"name":"shop.meinnetz"}` | siehe unten; sonst `404 NOT_FOUND` |
-| `POST /v4/names/search` | `{"q":"shop","safe":true,"max":20}` | `{"results":[<wie resolve, ohne app>],"more":bool}` |
+| `POST /v4/names/search` | `{"q":"shop","safe":true,"max":20,"kind":"app"?}` | `{"results":[<wie resolve, ohne app>],"more":bool}` (seit Phase 6: mehrere Wörter, Umlaute egal, Tippfehler, `kind`; docs/10 §5) |
 | `POST /v4/names/list` | `{"owner":"<id>"}` | `{"names":[<wie resolve, ohne app>]}` (gültige Namen dieses Inhabers) |
 | `POST /v4/names/submit` | eine `name`-Aussage (Inhaber = Sitzung) oder ein `revoke` eines eigenen Namens (`iss` = Sitzung) | `{"ok":true,"hash","index"}` |
 | `POST /v4/names/blocklist` | `{"publisher":"<id>"}` | `{"statement":<blocklist>}` (die Liste, die der Knoten hält; sonst `404`) |

@@ -133,9 +133,39 @@ pub fn description_is_reserved(description: &str, reserved: &[String]) -> bool {
     })
 }
 
-/// The words of a description in lower case (split at everything that is no letter or digit).
+/// Text as the search compares it (docs/10 §5): lower case, umlauts and accents of Latin letters removed
+/// (`ä→a`, `é→e`, `ß→ss`, `æ→ae` …) - so `Läden`, `laden` and `LADEN` are the same word.
+#[must_use]
+pub fn fold(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars().flat_map(char::to_lowercase) {
+        match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => out.push('a'),
+            'ç' | 'ć' | 'č' => out.push('c'),
+            'ď' | 'đ' => out.push('d'),
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'ě' => out.push('e'),
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'į' | 'ı' => out.push('i'),
+            'ł' | 'ľ' | 'ĺ' => out.push('l'),
+            'ñ' | 'ń' | 'ň' => out.push('n'),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ő' => out.push('o'),
+            'ř' | 'ŕ' => out.push('r'),
+            'ś' | 'š' | 'ş' => out.push('s'),
+            'ť' | 'ţ' => out.push('t'),
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' | 'ų' => out.push('u'),
+            'ý' | 'ÿ' => out.push('y'),
+            'ź' | 'ż' | 'ž' => out.push('z'),
+            'ß' => out.push_str("ss"),
+            'æ' => out.push_str("ae"),
+            'œ' => out.push_str("oe"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The words of a description, folded (split at everything that is no letter or digit).
 fn description_words(description: &str) -> impl Iterator<Item = String> + '_ {
-    description.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_lowercase)
+    description.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(fold)
 }
 
 /// The words of a description as the search compares them: lower case, each after one space (` mein laden`) - so
@@ -606,6 +636,13 @@ mod tests {
         let id = identity(1).id().to_string();
         assert!(check_word(&id, 2, 40, "x").is_ok() && check_name(&id).is_err());
         assert!(check_short("meinnetz").is_ok() && check_short(&"x".repeat(25)).is_err());
+    }
+
+    #[test]
+    fn folding_ignores_case_umlauts_and_accents() {
+        assert_eq!(fold("Läden Café ÉCOLE Straße Ærø Œuvre"), "laden cafe ecole strasse aero oeuvre");
+        assert_eq!(search_words("Größter Laden – für Müller!"), " grosster laden fur muller");
+        assert_eq!(fold("日本 abc"), "日本 abc", "other scripts stay");
     }
 
     #[test]

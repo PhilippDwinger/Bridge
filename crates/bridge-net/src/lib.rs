@@ -29,6 +29,7 @@ use bridge_core::{Id, KeyCard};
 pub mod apps;
 pub mod blocklist;
 pub mod error;
+pub mod federation;
 pub mod log;
 pub mod merkle;
 pub mod names;
@@ -37,7 +38,10 @@ pub mod statements;
 
 pub use apps::{CheckedApp, check_app, check_standing, is_web_host, valid_hosts};
 pub use blocklist::{BlockEntry, Blocklist, Blocklists};
+/// Agent cards live in the core (the SDK checks them too, docs/10 §3).
+pub use bridge_core::agent::{Agent, Scope};
 pub use error::{NetError, NetResult};
+pub use federation::Federation;
 pub use log::{
     Evidence, Head, Log, WitnessedHead, check_new_entries, issue_cosign, issue_head, parse_entry, verify_cosign,
     verify_head,
@@ -45,8 +49,8 @@ pub use log::{
 pub use merkle::{Hash, Tree};
 pub use names::{AdultPolicy, Category, Label, LabelTarget, Name, NameKind, NameRules};
 pub use state::{
-    Ahead, Applied, Endorsement, NameInfo, NetState, ResolvedName, RulesAhead, SealInfo, Search, Transition,
-    Transitions,
+    Ahead, Applied, Endorsement, FederationInfo, NameInfo, NetState, ResolvedName, RulesAhead, SealInfo, Search,
+    Transition, Transitions,
 };
 pub use statements::{
     AppRules, Approvals, Ban, Body, Cosign, Delegation, GatewayEntry, HeadBody, Home, Invite, Join, JoinMode, Kind,
