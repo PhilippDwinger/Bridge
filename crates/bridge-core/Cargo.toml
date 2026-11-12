@@ -11,6 +11,10 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Only for tests/e2e (SDK test vectors): exposes a raw signer. Never enabled by programs.
+test-vectors = []
+
 [dependencies]
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true

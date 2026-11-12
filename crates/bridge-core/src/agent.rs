@@ -32,14 +32,14 @@ pub const MAX_AGENT_NOTE_CHARS: usize = 64;
 /// What an agent may do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Scope {
-    /// Send messages.
-    Send,
     /// Fetch and acknowledge messages.
     Receive,
+    /// Send messages.
+    Send,
 }
 
 impl Scope {
-    /// All scopes in wire order.
+    /// All scopes in wire order (alphabetical - a body lists them so).
     pub const ALL: [Scope; 2] = [Scope::Receive, Scope::Send];
 
     /// Wire name.

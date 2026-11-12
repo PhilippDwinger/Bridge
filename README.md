@@ -114,6 +114,21 @@ Namen stehen im Transparenz-Log: wer zuerst kommt, ab Stufe 1, begrenzt je Stufe
 seinem eigenen Log auf (`/v4/names/resolve`, `/v4/names/search`) und lädt Apps anderer Hosts als **Leser** für den
 Browser seines Besitzers – nur lokal, jeder Teil geprüft (`--reader off|local|lan`). Details: `docs/08_NAMEN_WEB_BROWSER.md`.
 
+## SDKs, KI, Agenten, Netze verbinden (Phase 6, docs/10)
+- **SDKs** für Rust, Python, JavaScript (Node + Browser), Java und Luau (Roblox-Server): [sdk/](sdk/README.md) – alle
+  bestehen dieselben Testvektoren aus dem Rust-Kern.
+```
+bridge-node agent issue --owner-key ich.json --agent-key ki.json --node-url <adresse> --to <id> --days 7 --out ausweis.json
+bridge-node agent revoke --owner-key ich.json --node-url <adresse> --agent <agent-id>      # Agent sofort sperren
+bridge-node ai --key ki.json --join <link> --model llama3.2 --allow-members yes            # KI-Dienst (Ollama auf diesem PC)
+bridge-node net federate   --data netz1 --peer <netz-id> --gateway https://<empfänger des anderen netzes>
+bridge-node net unfederate --data netz1 --peer <netz-id>                                  # beide mit den 24 Wörtern
+```
+Agenten (KIs, Bots) bekommen einen **eigenen** Ausweis mit wenigen Rechten (senden/empfangen, nur an bestimmte
+Empfänger, Rate, höchstens 30 Tage) statt des Schlüssels ihres Besitzers. Der KI-Dienst fragt nur ein Modell **auf
+diesem PC** (Ollama oder OpenAI-kompatibel, nur Loopback) – gratis, die Fragen verlassen den PC nicht. Netze verbinden
+sich nur, wenn **beide** Owner es tun; dann schreiben sich ihre Mitglieder Ende-zu-Ende verschlüsselt.
+
 **Nutzungsregeln** (Entwurf): [NUTZUNGSREGELN.md](NUTZUNGSREGELN.md) – wer ein Netz erstellt, ist dessen Betreiber und
 verantwortlich; Nachrichten bleiben Ende-zu-Ende verschlüsselt und werden nie durchsucht.
 

@@ -1,0 +1,11 @@
+{
+  "name": "bridge4",
+  "version": "0.1.0",
+  "description": "Bridge 4 client for JavaScript: join a network, send and receive end-to-end encrypted (docs/10)",
+  "type": "module",
+  "main": "bridge4.js",
+  "exports": "./bridge4.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test" },
+  "license": "SEE LICENSE IN ../../LICENSE"
+}

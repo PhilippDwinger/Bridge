@@ -76,3 +76,43 @@ jobs:
       - name: Multicast tests (mDNS)
         if: runner.os == 'Linux'
         run: cargo test --workspace -- --ignored
+
+  # SDKs in other languages (docs/10 §2, ADR 0021): shared vectors + live test against the Rust fixture.
+  sdks:
+    name: SDKs (Python, JavaScript, Java, Luau)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Vectors are up to date
+        run: cargo test -p bridge-tests --test sdk_vectors
+      - name: Build sdk-fixture
+        run: cargo build -p bridge-tests --bin sdk-fixture
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python SDK
+        working-directory: sdk/python
+        run: |
+          pip install "cryptography>=41"
+          python -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: JavaScript SDK
+        working-directory: sdk/javascript
+        run: node --test
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Java SDK
+        run: sdk/java/run_tests.sh
+      - name: Luau SDK (Lune 0.8.9)
+        run: |
+          curl -sSL -o lune.zip https://github.com/lune-org/lune/releases/download/v0.8.9/lune-0.8.9-linux-x86_64.zip
+          unzip -q lune.zip -d "$HOME/.lune" && chmod +x "$HOME/.lune/lune"
+          echo "$HOME/.lune" >> "$GITHUB_PATH"
+      - name: Luau tests
+        run: sdk/luau/tests/run_tests.sh

@@ -1,13 +1,18 @@
 # sdk – Client-Bibliotheken
 
-Sie sprechen nur das Protokoll (`docs/04_PROTOKOLL_V4.md`) und dürfen in eigene Projekte eingebaut werden.
+Sie sprechen nur das Protokoll (`docs/04_PROTOKOLL_V4.md`) und dürfen in eigene Projekte eingebaut werden. Alle
+bestehen die gemeinsamen Testvektoren `vectors/vectors.json` (vom Rust-Kern erzeugt, docs/10 §2.2) und einen
+Live-Test gegen einen echten Knoten mit Rust-Echo-Client (`cargo build -p bridge-tests --bin sdk-fixture`).
 
-- `rust/` (Crate `bridge-sdk`, seit Phase 2): anmelden (inkl. Proof-of-Work), Karten holen, senden, empfangen
-  (prüfen, öffnen, Doppelte verwerfen, bestätigen). `Client::with_seen_file` hält den Replay-Schutz über Neustarts.
-  Seit Phase 3: `Client::join(identität, link)` tritt einem Netz per Link bei (prüft Netz und Empfänger, löst PoW,
-  Einladungscode); jedes `connect` meldet den Knoten als Heim-Empfänger (`home`). Senden an Mitglieder anderer
-  Empfänger klappt ohne Zutun – die Empfänger leiten weiter.
-  LAN vor Internet: `Client::connect_auto(identität, NodeAddress { node, tls, url }, ConnectOptions)` und `join` mit
-  einem Link mit `node` + `tls` suchen den Knoten zuerst per mDNS und verbinden sich nur mit dem gepinnten
-  Zertifikat; sonst die Internet-Adresse (`Client::via_lan()` zeigt den Weg, docs/06 §2).
-- Ab Phase 6: Python, JavaScript/TypeScript, Java, Luau.
+| Sprache | Ordner | Krypto | Tests |
+|---|---|---|---|
+| Rust | `rust/` (Crate `bridge-sdk`) | `bridge-core` | `cargo test` |
+| Python ≥ 3.9 | `python/` (Paket `bridge4`) | `cryptography` | `python -m unittest discover -s tests` |
+| JavaScript (Node ≥ 20, Browser) | `javascript/` (`bridge4.js`) | noble, eingebettet mit Prüfsumme | `node --test` |
+| Java ≥ 17 | `java/` (`net.bridge4`) | nur JDK | `./run_tests.sh` |
+| Luau (Roblox-Server, Lune) | `luau/` | Port von TweetNaCl + RFC (Restrisiko R1) | `tests/run_tests.sh` |
+
+Gemeinsam: Identität und Schlüsseldatei, Beitritt per Link (prüft Netz, Gründungs-Manifest, Empfänger im Log, PoW,
+Einladungscode), Karten, Senden, Empfangen (prüfen, öffnen, Doppelte verwerfen, bestätigen), Aufgabe/Antwort
+(`request`, z. B. für den KI-Dienst), Agenten-Ausweise (`issue_agent`, Anmelden als Agent, `agent_of`), verbundene
+Netze (`net`-Parameter). Nur Rust: LAN (mDNS, gepinntes TLS), Ströme, Dateien/Apps/Speicher/Rechnen.

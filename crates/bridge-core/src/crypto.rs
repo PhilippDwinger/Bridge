@@ -53,6 +53,14 @@ pub fn mac(key: &[u8], domain: &str, message: &[u8]) -> CoreResult<[u8; 32]> {
     Ok(out)
 }
 
+/// A domain-separated signature of arbitrary bytes - **only** for building test vectors that a correct signer would
+/// never produce (feature `test-vectors`, enabled by the test crate alone; release programs never have it).
+#[cfg(feature = "test-vectors")]
+#[must_use]
+pub fn sign_for_vectors(identity: &crate::keys::Identity, domain: &str, message: &[u8]) -> [u8; 64] {
+    identity.sign_canonical(domain, message)
+}
+
 /// Compares two codes without an early exit (no timing hint about where they differ).
 #[must_use]
 pub fn mac_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {

@@ -234,6 +234,25 @@ freigegeben).
 ## Phase 6 – SDKs, KI, Wachstum
 - SDKs: Python + JavaScript zuerst, dann Java, Luau (Risiko R1).
 - KI-Dienste (lokal, gratis), KI-Agenten mit begrenzten Ausweisen, Suche verbessern, Netze verbinden (Föderation).
+- **Abnahme** (docs/10 §7): jedes SDK besteht die Testvektoren und den Live-Test gegen Rust; Agenten nur mit ihren
+  Rechten, Widerruf/Sperre wirkt sofort; KI-Dienst nur mit lokalem Modell; Föderation nur beidseitig.
+- **Stand (13.11.2026): gebaut, Abnahme-Tests grün** (Paddy war weg, „entscheide selber“; Freigabe steht aus).
+  docs/10, ADR 0021 (SDKs), 0022 (Agenten-Ausweise), 0023 (Föderation), 0024 (KI-Dienst lokal). Gebaut:
+  - SDKs: `sdk/python` (cryptography), `sdk/javascript` (noble eingebettet, Node + Browser), `sdk/java` (nur JDK),
+    `sdk/luau` (TweetNaCl-Port + RFC, Lune/Roblox) – Testvektoren `sdk/vectors` aus dem Rust-Kern (deterministisch,
+    `tests/e2e/tests/sdk_vectors.rs`), Live-Test gegen `sdk-fixture` (Netz + Rust-Echo-Client + Echo-Agent). CI-Job
+    `sdks`.
+  - Agenten-Ausweise: Aussage `agent` (bridge-core), Login nur am Heim-Knoten, `send`/`receive`, `to`, `rate`,
+    höchstens 30 Tage, 16 je Inhaber und Knoten, Widerruf `/v4/agent/revoke` (Schema 13), Weiterleiten mit Aussage,
+    Empfänger sehen den Inhaber (`agents` im Poll). CLI `agent issue|revoke`.
+  - KI-Dienst: `services/ai` (bridge-ai), `bridge-plugin-api` Task/Reply, `bridge-node ai` (Ollama/OpenAI, nur Loopback,
+    Liste oder Mitglieder, Rate, Warteschlange 16), SDK `request()`.
+  - Suche: mehrere Wörter, Umlaute/Akzente gefaltet, ein Tippfehler (Wörter ab 4 Buchstaben), `kind`-Filter.
+  - Föderation: Log-Aussage `federation` (nur Hauptschlüssel, beidseitig, ≤ 32 Netze), Umschlag-Feld `dnet`,
+    `/v4/fed/relay`, `/v4/fed/card`, Beweise `feds`+`master` beim Abholen; CLI `net federate|unfederate`.
+  - Tests: `tests/e2e/tests/phase6_agents.rs`, `phase6_federation.rs`, `bin/bridge-node/tests/ai.rs`,
+    `crates/bridge-net/tests/net_federation.rs`, SDK-Tests je Sprache.
+  - Offen: docs/10 §8 (SDKs ohne LAN/Ströme/Dateien, Föderation nur Nachrichten, Luau-Krypto ohne fremde Prüfung).
 
 ## Nebenher
 - Bridge 3 läuft weiter (Branch `bridge-3`), bekommt nur noch Fehlerbehebungen.

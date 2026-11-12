@@ -12,6 +12,10 @@ publish = false
 [lints]
 workspace = true
 
+[[bin]]
+name = "sdk-fixture"
+path = "src/bin/sdk_fixture.rs"
+
 [dependencies]
 bridge-core.workspace = true
 bridge-guard.workspace = true
@@ -28,3 +32,4 @@ reqwest.workspace = true
 
 [dev-dependencies]
 wat.workspace = true
+bridge-core = { workspace = true, features = ["test-vectors"] }

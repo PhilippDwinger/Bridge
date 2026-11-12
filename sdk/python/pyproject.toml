@@ -1,0 +1,14 @@
+[project]
+name = "bridge4"
+version = "0.1.0"
+description = "Bridge 4 client for Python: join a network, send and receive end-to-end encrypted (docs/10)"
+requires-python = ">=3.9"
+dependencies = ["cryptography>=41"]
+license = { file = "../../LICENSE" }
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["bridge4"]

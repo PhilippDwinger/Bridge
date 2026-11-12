@@ -3,3 +3,7 @@
 .idea/
 .vscode/
 *.log
+__pycache__/
+*.pyc
+sdk/java/build/
+node_modules/
