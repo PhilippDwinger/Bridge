@@ -64,7 +64,7 @@ impl TestApp {
     /// Uses a fresh login link; returns the session cookie (`bc_session=…`).
     pub async fn login(&self) -> Result<String, String> {
         let answer = self.http.get(self.running.login_url()).send().await.map_err(|e| e.to_string())?;
-        if answer.status().as_u16() != 303 {
+        if answer.status().as_u16() != 200 {
             return Err(format!("login: {}", answer.status()));
         }
         let cookie =

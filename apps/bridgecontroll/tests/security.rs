@@ -30,9 +30,14 @@ async fn session_is_required_and_login_links_work_once() -> TestResult {
     // A login link works once.
     let url = app.running.login_url();
     let first = app.http.get(&url).send().await.map_err(|e| e.to_string())?;
-    assert_eq!(first.status().as_u16(), 303);
+    assert_eq!(first.status().as_u16(), 200);
     let cookie = first.headers().get("set-cookie").and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned();
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"), "{cookie}");
+    // No redirect: the page of this app goes on to `/` itself (a Strict cookie is not sent along a redirect chain
+    // that the file page started).
+    assert!(first.headers().get("location").is_none());
+    let body = first.text().await.map_err(|e| e.to_string())?;
+    assert!(body.contains("http-equiv=\"refresh\" content=\"0;url=/\"") && !body.contains("<script"), "{body}");
     let second = app.http.get(&url).send().await.map_err(|e| e.to_string())?;
     assert_eq!(second.status().as_u16(), 401, "used once");
     let guessed =
@@ -242,7 +247,7 @@ async fn second_start_needs_the_launch_key() -> TestResult {
     let url =
         bridgecontroll::running_instance(&app.dir.path().join("app")).await.ok_or("no login from the instance")?;
     let login = app.http.get(&url).send().await.map_err(|e| e.to_string())?;
-    assert_eq!(login.status().as_u16(), 303);
+    assert_eq!(login.status().as_u16(), 200);
     app.shutdown().await;
     assert!(!instance.exists(), "removed on shutdown");
     Ok(())

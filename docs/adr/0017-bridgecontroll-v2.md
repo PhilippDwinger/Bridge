@@ -35,7 +35,10 @@
      - Nur `127.0.0.1`. Sitzung: 256 Bit Zufall beim Start, übergeben mit einem **Einmal-Link** (`/login/<code>`,
        einmal gültig, 5 Minuten) als Cookie `HttpOnly; SameSite=Strict`. Jede API und jeder Bildschirm braucht sie;
        öffentlich sind nur das Design-System und die Seite „Nicht angemeldet“. Vergleich über SHA-256 (keine
-       Zeit-Hinweise).
+       Zeit-Hinweise). Der gute Einmal-Link antwortet mit einer kleinen Seite (200, Cookie, `meta refresh` auf `/`)
+       statt einer Umleitung: Der Browser öffnet ihn von der Datei-Seite `login.html` aus, und ein Strict-Cookie geht
+       in einer Umleitungs-Kette, die eine fremde Seite begonnen hat, nicht mit („Nicht angemeldet“ beim ersten Start,
+       Paddy 12.11.2026). Den Schritt von der eigenen Seite aus schickt der Browser mit Cookie.
      - **Host-Prüfung** vor allem anderen (`127.0.0.1:<port>` oder `localhost:<port>`, sonst 403) gegen DNS-Rebinding.
      - **CSRF**: jeder `POST` braucht `Origin` dieser App und `Content-Type: application/json`; kein CORS.
      - Kopfzeilen: CSP `default-src 'self'` (keine Inline-Skripte oder -Styles: die Layouts der Entwürfe stehen

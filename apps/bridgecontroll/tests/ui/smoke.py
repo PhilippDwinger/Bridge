@@ -137,7 +137,12 @@ def main():
             assert "Nicht angemeldet" in page.content(), "ohne Sitzung muss die Anmelde-Seite kommen"
 
             console.clear()  # the 401 above is on purpose
-            page.goto(login)
+            # Like the real start: the browser opens the owner-only file page, which forwards to the login link
+            # (a Strict cookie is not sent along a redirect chain started by a file page - Paddy, 12.11.2026).
+            login_page = os.path.join(tempfile.mkdtemp(), "login.html")
+            with open(login_page, "w", encoding="utf-8") as file:
+                file.write(f'<!doctype html><meta http-equiv="refresh" content="0;url={login}">')
+            page.goto("file://" + login_page)
             page.wait_for_selector("text=Noch kein Netz")
             shot("01-netze-leer")
 

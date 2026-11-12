@@ -439,19 +439,21 @@ fn unauthorized_page() -> &'static [u8] {
     assets::get("/ui/login.html").map_or(b"Nicht angemeldet".as_slice(), |asset| asset.bytes)
 }
 
+/// The answer to a good login link: sets the cookie and goes on to the start page from a page of this app. Not a
+/// redirect: the browser opens the login link from the owner-only file page (`file://`), and a `SameSite=Strict`
+/// cookie is not sent along a redirect chain that a foreign page started - the start page would say "not logged
+/// in". A step that this page starts itself is same-site, so the cookie goes along (meta refresh: no inline script,
+/// the CSP stays as it is).
+pub const LOGIN_DONE_PAGE: &[u8] = b"<!doctype html>\n<html lang=\"de\"><head><meta charset=\"utf-8\">\
+<meta name=\"referrer\" content=\"no-referrer\">\n<meta http-equiv=\"refresh\" content=\"0;url=/\">\n\
+<title>BridgeControll</title></head>\n<body><a href=\"/\">BridgeControll \xC3\xB6ffnen</a></body></html>\n";
+
 /// Exchanges a one-time login code for the session cookie and goes to the start page.
 fn login(app: &App, code: &str, now: i64) -> Answer {
     if !app.auth.take_login_code(code, now) {
         return Answer::page(401, unauthorized_page());
     }
-    Answer {
-        status: 303,
-        content_type: "text/plain; charset=utf-8",
-        body: Bytes::from_static(b"Angemeldet"),
-        headers: vec![("location", "/".into()), ("set-cookie", app.auth.cookie())],
-        cacheable: false,
-        page: false,
-    }
+    Answer { headers: vec![("set-cookie", app.auth.cookie())], ..Answer::page(200, LOGIN_DONE_PAGE) }
 }
 
 /// The body, at most [`MAX_BODY_BYTES`], within 10 s.
