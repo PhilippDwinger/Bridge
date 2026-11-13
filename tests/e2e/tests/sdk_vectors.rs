@@ -608,8 +608,10 @@ fn vectors_match_the_file() -> TestResult {
         std::fs::write(&path, &built).map_err(e)?;
         return Ok(());
     }
+    // A Windows checkout may turn `\n` into `\r\n` (core.autocrlf) - the content is what counts.
     let stored = std::fs::read_to_string(&path)
-        .map_err(|error| format!("{}: {error} (BRIDGE_WRITE_VECTORS=1)", path.display()))?;
+        .map_err(|error| format!("{}: {error} (BRIDGE_WRITE_VECTORS=1)", path.display()))?
+        .replace("\r\n", "\n");
     assert!(stored == built, "sdk/vectors/vectors.json is out of date - BRIDGE_WRITE_VECTORS=1 writes it anew");
     Ok(())
 }

@@ -208,6 +208,8 @@ mod tests {
         assert_eq!(decoded, vec![0xFC, 0, b'\'', 0, b'x', 0]);
     }
 
+    // XDG entries exist on Linux only (a Windows path has `\`, which the entry refuses on purpose).
+    #[cfg(not(windows))]
     #[test]
     fn xdg_entry_refuses_shell_specials() -> Result<(), String> {
         let entry = xdg_entry(&abs("opt/bc/bridgecontroll"), &abs("data/icon.svg"))?;
