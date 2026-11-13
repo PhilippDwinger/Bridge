@@ -271,24 +271,38 @@ freigegeben).
   („Was kann mein Netz?“, Bridge Login mit Passkeys an Speicher-Knoten, App-Zeichen für den Server-Code, „Login hier
   einschalten“) gebaut, Tests grün; Paddys Echttest mit Tailscale steht aus.
 
-## Phase 8 – Aufräumen und Komfort (Paddy 13.11.2026)
-- **Apps und Websites löschen** (als Erstes; Paddy: „gerade kann man nur sperren, das ist nervig“): der Inhaber zieht
-  eine App zurück – eine signierte Aussage im Transparenz-Log, alle Hosts hören auf und löschen ihre Dateien, der Name
-  wird frei. Anders als „Sperren“ (Maßnahme des Admins gegen fremde Inhalte, bleibt sichtbar). In BridgeControll
-  „Löschen“ neben „Neue Version“. Spezifikation und ADR vor dem Code.
-- Pro Website im Dashboard der Link „Öffentlich ansehen“ (`…/bridge4/<netz>/web/<name>/`), wenn das Netz öffentlich ist.
-- **Gerät hinzufügen** (Bridge Login, Paddy 13.11.: ein Konto auf mehreren Geräten ohne Fenster für fremde Geräte):
-  mehrere Passkeys je Konto (höchstens 8), jedes Gerät mit eigenem Passkey. Das angemeldete Gerät zeigt einen
-  **Kopplungs-Code** (8 Zeichen ohne Verwechsler wie 0/O und 1/I, z. B. `K7QX-M3PA`, 5 Minuten, einmal, nach
-  5 Fehlversuchen ungültig) und denselben Code als **QR-Code** (für Geräte ohne Kamera reicht der Code). Das neue Gerät
-  gibt ihn ein, legt seinen eigenen Passkey an; beide zeigen dieselbe **Prüfzahl**, das alte Gerät bestätigt mit seinem
-  Passkey (signierter Eintrag `add`, jeder Speicher-Knoten prüft die Unterschrift). „Meine Geräte“ zum Entfernen
-  (`remove`, ebenfalls signiert). Keine Passwörter.
-- Bridge Login ausbauen: auch im Bridge-Browser und unter „Ansehen“ (heute nur über die öffentliche Adresse), angemeldet
-  bleiben, Zahl der Konten im Dashboard, Helfer im JavaScript-SDK.
-- Speicher-Oberfläche in BridgeControll; App-API auch über den Leser (Bridge-Browser).
-- Bridge-3-Server als Name im Netz und auf der Startseite, auch auf anderen PCs des Netzes.
-- Öffentliche Eingänge auf PCs von Mitgliedern (Manifest-Regel), das Tor ohne Neustart neu laden.
+## Phase 8 – Aufräumen und Komfort (Paddy 13.11.2026, in dieser Reihenfolge)
+1. **Apps und Websites löschen** (Paddy: „gerade kann man nur sperren, das ist nervig“): der Inhaber zieht eine App
+   zurück – eine signierte Aussage im Transparenz-Log, alle Hosts hören auf und löschen ihre Dateien, der Name wird
+   frei. Anders als „Sperren“ (Maßnahme des Admins gegen fremde Inhalte, bleibt sichtbar). In BridgeControll „Löschen“
+   neben „Neue Version“; dazu pro Website der Link „Öffentlich ansehen“ (`…/bridge4/<netz>/web/<name>/`).
+   Spezifikation und ADR vor dem Code.
+2. **Öffentliche Eingänge auf PCs von Mitgliedern** (Manifest-Regel, der Owner erlaubt es): erst damit kann ein PC
+   außerhalb des LANs Speicher-Knoten, Empfänger oder zweiter Login-Knoten sein; das Tor ohne Neustart neu laden.
+3. **Gerät hinzufügen** (Bridge Login, Paddy 13.11.: ein Konto auf mehreren Geräten ohne Fenster für fremde Geräte):
+   mehrere Passkeys je Konto (höchstens 8), jedes Gerät mit eigenem Passkey. Das angemeldete Gerät zeigt einen
+   **Kopplungs-Code** (8 Zeichen ohne Verwechsler wie 0/O und 1/I, z. B. `K7QX-M3PA`, 5 Minuten, einmal, nach
+   5 Fehlversuchen ungültig) und denselben Code als **QR-Code** (für Geräte ohne Kamera reicht der Code). Das neue Gerät
+   gibt ihn ein, legt seinen eigenen Passkey an; beide zeigen dieselbe **Prüfzahl**, das alte Gerät bestätigt mit seinem
+   Passkey (signierter Eintrag `add`, jeder Speicher-Knoten prüft die Unterschrift). „Meine Geräte“ zum Entfernen
+   (`remove`, ebenfalls signiert). Keine Passwörter.
+4. **BridgeControll aktualisiert sich selbst**: „Update verfügbar“ lädt die neue Version von GitHub, prüft Paddys
+   Signatur und ersetzt sich (kein ZIP von Hand mehr); Grundlage dafür, dass Knoten anderer nicht veralten.
+5. **Owner-Backup im eigenen Netz**: App-Schlüssel und Einstellungen des Owners, verschlüsselt mit einem Schlüssel aus
+   den 24 Wörtern, liegen auf den Speicher-Knoten; auf einem neuen PC stellen die 24 Wörter alles wieder her.
+6. Danach: Bridge Login auch im Bridge-Browser und unter „Ansehen“ (heute nur über die öffentliche Adresse),
+   angemeldet bleiben, Zahl der Konten im Dashboard, Helfer im JavaScript-SDK; Speicher-Oberfläche in BridgeControll,
+   App-API auch über den Leser; Bridge-3-Server als Name im Netz und auf anderen PCs; öffentliche Status-Seite
+   (`…/bridge4/<netz>/status`) und Windows-Benachrichtigung bei neuer Meldung oder ausgefallenem Knoten.
+
+## Phase 9 – Vorlagen und Design-Plugins (Paddy 13.11.2026)
+- **Viele Vorlagen** (Paddy: „ganz wichtig, dass es da viele gibt“): Bridge soll auf vielen Geräten laufen, auch bei
+  Freunden, die nicht programmieren können. In „Website hochladen“ fertige, **einstellbare** Vorlagen (z. B.
+  Gästebuch, Chat, Umfrage, Terminliste, später viele mehr); der eigene PC hostet sie. Sie nutzen Bridge Login und den
+  Server-Code der Apps.
+- **Design-Plugins** (später): laufen lokal; bei einer Vorlage wählt man als Design ein selbst gemachtes Design-Plugin,
+  das das Aussehen der Website übernimmt.
+- **Bridge Drive**: geteilte Ordner über die Speicher-Knoten, beim Besitzer verschlüsselt, mit anderen Konten teilbar.
 - Danach in Paddys Reihenfolge: Oracle-Dauer-Server, Anbindung an Grove ganz am Ende, eigene Domain nur optional.
 
 ## Nebenher
