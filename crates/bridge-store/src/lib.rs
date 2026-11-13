@@ -36,6 +36,7 @@ mod agents;
 mod apps;
 mod blobs;
 mod blocklists;
+mod login;
 mod net;
 mod reports;
 mod wasm;
@@ -48,6 +49,7 @@ pub use blobs::{
     Pinned, Registered, StagePage, Staged,
 };
 pub use blocklists::MAX_BLOCKLISTS_PER_NET;
+pub use login::{LoginApplied, MAX_LOGIN_ACCOUNTS};
 pub use net::{
     HeadRow, HomeRow, HomeStored, MAX_EVIDENCE_PER_NET, MAX_HEAD_ROWS_PER_NET, Outgoing, RelayItem, RelayLimits,
     TransitionRow,
@@ -171,6 +173,16 @@ const MIGRATIONS: &[&str] = &[
     "CREATE TABLE agent_revocations (agent TEXT NOT NULL, owner TEXT NOT NULL, before INTEGER NOT NULL,
                                      until INTEGER NOT NULL, PRIMARY KEY (agent, owner)) WITHOUT ROWID;
      CREATE INDEX agent_revocations_owner ON agent_revocations (owner);",
+    // 14: Bridge Login (docs/11 §9.3): accounts as their newest state, every entry in arrival order (for the
+    // exchange between storage nodes) and the signature counters this node saw.
+    "CREATE TABLE login_accounts (net TEXT NOT NULL, account TEXT NOT NULL, cred_id BLOB NOT NULL,
+                                  version INTEGER NOT NULL, state TEXT NOT NULL, updated INTEGER NOT NULL,
+                                  PRIMARY KEY (net, account)) WITHOUT ROWID;
+     CREATE UNIQUE INDEX login_accounts_cred ON login_accounts (net, cred_id);
+     CREATE TABLE login_entries (seq INTEGER PRIMARY KEY AUTOINCREMENT, net TEXT NOT NULL, account TEXT NOT NULL,
+                                 version INTEGER NOT NULL, entry BLOB NOT NULL, UNIQUE (net, account, version));
+     CREATE TABLE login_counters (net TEXT NOT NULL, cred_id BLOB NOT NULL, count INTEGER NOT NULL,
+                                  PRIMARY KEY (net, cred_id)) WITHOUT ROWID;",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

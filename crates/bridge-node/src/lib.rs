@@ -26,6 +26,7 @@ mod compute;
 mod error;
 pub mod keyfile;
 mod lan;
+mod login;
 mod names;
 mod network;
 pub mod plugins;
@@ -191,6 +192,8 @@ struct Inner {
     data_dir: PathBuf,
     /// Agents logged in here (docs/10 §3).
     agents: Mutex<agents::Agents>,
+    /// Bridge Login challenges, limits and exchange cursors (docs/11 §9).
+    login: login::LoginState,
 }
 
 /// A node (cheap to clone; all clones are the same node).
@@ -352,6 +355,7 @@ pub async fn start(config: NodeConfig, listener: TcpListener) -> Result<RunningN
             plugin_calls: Arc::new(tokio::sync::Semaphore::new(plugins::MAX_CALLS_AT_ONCE)),
             data_dir: config.data_dir.clone(),
             agents: Mutex::new(agents::Agents::default()),
+            login: login::LoginState::default(),
         }),
     };
     let lan_server = match (lan_listener, &tls) {
@@ -612,6 +616,7 @@ impl Node {
             (_, path) if path.starts_with("/v4/net/") || path.starts_with("/v4/node/") => {
                 self.route_network(&request, now).await
             }
+            (_, path) if path.starts_with("/v4/login/") => self.route_login(&request, now).await,
             (_, path) if path.starts_with("/v4/blob/") => self.route_blob(&request, now).await,
             (_, path) if path.starts_with("/v4/app/") => self.route_app(&request, now).await,
             (_, path) if path.starts_with("/v4/names/") => self.route_names(&request, now).await,

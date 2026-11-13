@@ -13,6 +13,7 @@
 //! | `POST /api/nodes/<id>/name-register` · `name-revoke` · `report-status` · `report-action` · `contact` | names, reports, Meldeweg (owner) |
 //! | `POST /api/nodes/<id>/report` | report a name or ID of the node's network (member key of this PC) |
 //! | `POST /api/nodes/<id>/public` · `public-web` · `public-off` | public through the gate (docs/11 §5) |
+//! | `POST /api/nodes/<id>/login-on` | Bridge Login at the public owner node (docs/11 §9.2) |
 //! | `POST /api/nodes/<id>/bridge3-add` · `/api/bridge3/settings` · `/api/bridge3/<id>/start\|stop\|delete`, `GET /api/bridge3/<id>/log` | Bridge 3 servers (docs/11 §8) |
 //! | `GET /api/browser` · `POST /api/browser/resolve` · `/api/browser/search` | the Bridge-Browser |
 //! | `POST /api/wizard/start` · `short` · `confirm` · `check` · `create` · `cancel` | assistant "Neues BridgeNet" |
@@ -176,6 +177,7 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
             None => Answer::error(400, "on: true oder false"),
         },
         "public-off" => result(crate::public::make_private(app, id).await),
+        "login-on" => result(crate::public::login_on(app, id).await),
         "bridge3-add" => result(crate::bridge3::add(app, id, body).await),
         "site-check" => result(crate::sites::check(app, id, body).await),
         "site-publish" => result(crate::sites::publish(app, id, body).await),

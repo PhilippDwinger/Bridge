@@ -1698,6 +1698,83 @@ impl NetState {
         gateways.into_iter().collect()
     }
 
+    /// All identities with an active seal of at least `min_level` with `service` at `at`, with their newest card -
+    /// banned and revoked ones left out, sorted by ID.
+    #[must_use]
+    pub fn service_nodes(&self, service: Service, min_level: u8, at: i64) -> Vec<(Id, Option<KeyCard>)> {
+        let mut found: BTreeMap<Id, Option<KeyCard>> = BTreeMap::new();
+        for ((id, level), grant) in &self.grants.seals {
+            if let Data::Seal { services, .. } = &grant.data {
+                if *level >= min_level && services.has(service) && grant.active(at) && !self.excluded(id, at) {
+                    found.insert(id.clone(), self.seal_card(id, Some(at)).cloned());
+                }
+            }
+        }
+        found.into_iter().collect()
+    }
+
+    /// The nodes that hold Bridge Login accounts (docs/11 §9): storage nodes with level ≥ 2.
+    #[must_use]
+    pub fn login_nodes(&self, at: i64) -> Vec<(Id, Option<KeyCard>)> {
+        self.service_nodes(Service::Storage, 2, at)
+    }
+
+    /// What this network can do at `at` (docs/11 §9.1, "Was kann mein Netz?").
+    #[must_use]
+    pub fn abilities(&self, at: i64) -> Vec<Ability> {
+        let count = |service: Service, level: u8| self.service_nodes(service, level, at).len();
+        vec![
+            Ability {
+                key: "messages",
+                name: "Nachrichten",
+                needs: "Empfänger (gateway)",
+                have: self.gateways(at).len(),
+                yellow: 1,
+                green: 2,
+            },
+            Ability {
+                key: "web",
+                name: "Websites und Apps",
+                needs: "Web-Hosts (web)",
+                have: count(Service::Web, 1),
+                yellow: 1,
+                green: 2,
+            },
+            Ability {
+                key: "storage",
+                name: "Speicher",
+                needs: "Speicher-Knoten (storage, Stufe 2)",
+                have: count(Service::Storage, 2),
+                yellow: 1,
+                green: 10,
+            },
+            Ability {
+                key: "compute",
+                name: "Rechnen",
+                needs: "Rechen-Knoten (compute, Stufe 2)",
+                have: count(Service::Compute, 2),
+                yellow: 1,
+                green: 2,
+            },
+            Ability {
+                key: "login",
+                name: "Bridge Login (Konten)",
+                needs: "Speicher-Knoten (storage, Stufe 2)",
+                have: self.login_nodes(at).len(),
+                yellow: 1,
+                green: 2,
+            },
+            Ability {
+                key: "watch",
+                name: "Wächter",
+                needs: "Wächter (watch, Stufe 2)",
+                have: self.watchers(at).len(),
+                yellow: 1,
+                green: 1,
+            },
+        ]
+    }
+
     // --- watchers (docs/06 §11) -----------------------------------------------------------------------------------
 
     /// The rules of the watchers (manifest field `watch`, or the defaults).
@@ -2783,6 +2860,36 @@ impl NameInfo {
                 skeleton: data.skeleton.clone(),
             }),
             _ => None,
+        }
+    }
+}
+/// One feature of "Was kann mein Netz?" (docs/11 §9.1): how many nodes it has and needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ability {
+    /// Key (`messages`, `web`, `storage`, `compute`, `login`, `watch`).
+    pub key: &'static str,
+    /// Name for people (German).
+    pub name: &'static str,
+    /// What it needs (German).
+    pub needs: &'static str,
+    /// How many it has.
+    pub have: usize,
+    /// From how many it works (yellow).
+    pub yellow: usize,
+    /// From how many it is strong (green).
+    pub green: usize,
+}
+
+impl Ability {
+    /// `green`, `yellow` or `red`.
+    #[must_use]
+    pub fn status(&self) -> &'static str {
+        if self.have >= self.green {
+            "green"
+        } else if self.have >= self.yellow {
+            "yellow"
+        } else {
+            "red"
         }
     }
 }

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bridge_gate::{Bridge3Route, Route, Routes};
-use bridge_net::AdultPolicy;
+use bridge_net::{AdultPolicy, Service, Services};
 use serde_json::{Value, json};
 
 use crate::config::{self, AppConfig, NodeEntry, NodeRole, check_host};
@@ -429,6 +429,36 @@ async fn reseal(app: &App, entry: &NodeEntry) -> Result<(), String> {
     let level = level.filter(|level| *level >= 1).ok_or("Knoten hat kein Siegel")?;
     patient(|| admin.seal_card(card.clone(), &node, level, services)).await?;
     Ok(())
+}
+
+/// "Login hier einschalten" (docs/11 §9.2): the public owner node also gets the service `storage` - level and its
+/// other services stay - and then holds the network's Bridge Login accounts at its public address.
+pub async fn login_on(app: &App, id: &str) -> Result<Value, String> {
+    let entry = entry_of(app, id).await?;
+    if entry.role != NodeRole::Owner {
+        return Err("Das geht nur beim Owner-Knoten eines Netzes.".into());
+    }
+    if entry.public_key.is_none() {
+        return Err("Bridge Login braucht eine öffentliche Adresse – erst „Öffentlich machen“.".into());
+    }
+    ops::wait_ready(&entry).await?;
+    let admin = admin_client(app, &entry)?;
+    let local = entry.local_url();
+    let card = patient(|| admin.fetch_node_card(&local)).await?;
+    let node = card.id().clone();
+    let (_, state) = patient(|| admin.load_state()).await?;
+    let now = now_ms();
+    let level =
+        state.level(&node, now).filter(|level| *level >= 2).ok_or("Der Knoten braucht ein Siegel ab Stufe 2.")?;
+    let current = state.services(&node, now);
+    if current.has(Service::Storage) {
+        return Ok(json!({"ok": true, "already": true}));
+    }
+    let mut services: Vec<Service> = current.iter().collect();
+    services.push(Service::Storage);
+    let services = Services::of(&services);
+    patient(|| admin.seal_card(card.clone(), &node, level, services)).await?;
+    Ok(json!({"ok": true}))
 }
 
 /// After each status round: a public network that allows 18+ now gets its websites switched off (docs/11 §5).

@@ -398,6 +398,13 @@ pub(crate) async fn run(node: Node) {
     }
 }
 
+/// Whether `path` is `/app/<id>/api/...` (form only).
+fn api_path(path: &str) -> bool {
+    path.strip_prefix("/app/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(app, rest)| Id::parse(app).is_ok() && rest.starts_with("api/"))
+}
+
 fn not_found() -> NodeError {
     NodeError::not_found()
 }
@@ -1341,6 +1348,13 @@ impl Node {
     }
 
     async fn app_file(&self, request: &Request) -> NodeResult<Response> {
+        if request.method == Method::Options && api_path(&request.path) {
+            // CORS preflight of the app's own code (opaque origin) for its server code with a login token.
+            return Ok(Response { status: 204, ..Response::ok(Vec::new()) }
+                .with_header("access-control-allow-methods", "POST")
+                .with_header("access-control-allow-headers", "Content-Type, X-Bridge-Login")
+                .with_header("access-control-max-age", "600"));
+        }
         let api = request.method == Method::Post;
         if (request.method != Method::Get && !api) || self.network().is_none() {
             return Err(not_found()); // apps exist only in a network - not even the redirect without one

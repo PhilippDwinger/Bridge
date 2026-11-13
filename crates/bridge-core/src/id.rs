@@ -21,6 +21,13 @@ impl Id {
         Self(base32(&digest[..20]))
     }
 
+    /// The ID from a SHA-256 digest (its first 20 bytes) - for IDs that are no key's (Bridge Login accounts and
+    /// per-app users, docs/11 §9).
+    #[must_use]
+    pub fn of_digest(digest: &[u8; 32]) -> Self {
+        Self(base32(&digest[..20]))
+    }
+
     /// Checks the form (32 characters of lower-case Base32) - nothing else.
     pub fn parse(text: &str) -> CoreResult<Self> {
         let ok = text.len() == ID_LEN && text.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b));

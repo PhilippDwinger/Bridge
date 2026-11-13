@@ -26,7 +26,7 @@ Friends wie bisher). Websites bekommen später ein **Bridge Login** mit Konten.
 | 1 | **Öffentlich**: das Tor (ein lokaler Eingang für alle Netze), Knopf „Öffentlich machen“ mit Tailscale Funnel, öffentliche Websites mit Hülle und Startseite, Not-Aus | `crates/bridge-gate`, `bridge-node` (Leser `public`, `/`, `/web/`), BridgeControll v2 |
 | 2 | **BridgeControll 3** legt Server unter `/bridge3/<id>` ab (ältere Server: „Pfad umstellen“) | Ordner `BridgeControll` (Bridge 3) |
 | 3 | **Bridge-3-Server im Netz**: echte Bridge-3-Server, von BridgeControll v2 gestartet, unter `/bridge4/<netz>/bridge3/<id>/` | BridgeControll v2, Tor, Netz-Eintrag |
-| 4 | **Was kann mein Netz?** (Fähigkeiten-Ampel) und **Bridge Login** (Konten mit Passkeys, Daten pro Nutzer) | `bridge-net`, Knoten, BridgeControll v2, SDKs |
+| 4 | **Was kann mein Netz?** (Fähigkeiten-Ampel) und **Bridge Login** (Konten mit Passkeys auf den Speicher-Knoten, Nutzer-ID pro App) | `bridge-core::webauthn`, `bridge-net`, Knoten, Hülle, BridgeControll v2 |
 
 ## 2. Adressen
 
@@ -134,7 +134,7 @@ den Knoten-Ports dieses PCs auf `127.0.0.1`.
 
 | Angriff | Abwehr |
 |---|---|
-| Alle Websites haben **dieselbe Herkunft** (`<gerät>.ts.net`) – eine böse Seite liest Cookies/Speicher einer anderen | Jede App läuft in einer eigenen undurchsichtigen Herkunft (CSP `sandbox` ohne `allow-same-origin`, docs/07 §5) – sie hat gar keine Cookies und keinen Speicher der Herkunft; die Hülle hat keine Skripte. Login nur über Bridge (Schritt 4), nie in der App. |
+| Alle Websites haben **dieselbe Herkunft** (`<gerät>.ts.net`) – eine böse Seite liest Cookies/Speicher einer anderen | Jede App läuft in einer eigenen undurchsichtigen Herkunft (CSP `sandbox` ohne `allow-same-origin`, docs/07 §5) – sie hat gar keine Cookies und keinen Speicher der Herkunft; die Hülle hat nur Bridges eigenes Login-Skript (§9.4). Login nur über Bridge, nie in der App. |
 | Tor als **offener Proxy** | Ziele nur aus der Routen-Datei, nur `127.0.0.1`, nur bekannte Netz-Schlüssel |
 | **Gefälschte Kopfzeilen** (`X-Forwarded-For`, `Host`) | werden entfernt und vom Tor neu gesetzt; der Knoten vertraut nur `127.0.0.1` und nur dem letzten Eintrag |
 | **Pfad-Tricks** (`..`, kodierte `/`, `\`, Nullbytes) | im Tor abgelehnt, bevor geroutet wird; der Knoten prüft App-Pfade noch einmal (`check_path`) |
@@ -183,18 +183,112 @@ Restrisiko: Was ein öffentlicher Knoten hostet, sieht die ganze Welt – der Ow
 - Später: Eintrag im Netz (Name) und auf der Startseite; Server auf einem anderen PC des Netzes über den öffentlichen PC;
   Server eines Netzes vertrauen sich automatisch; Bridge-4-SDKs sprechen Bridge-3-Server an.
 
-## 9. Schritt 4: Was kann mein Netz? und Bridge Login
-- **Fähigkeiten-Ampel**: Jedes Feature sagt, was es im Netz braucht (z. B. Bridge Login: 2 Speicher-Knoten mit Siegel
-  auf verschiedenen PCs; KI: ein KI-Knoten; öffentlich: ein öffentlicher Knoten). BridgeControll zeigt grün/rot und
-  was fehlt; ein Feature ohne Rückhalt ist aus.
-- **Bridge Login** (Konten für Websites/Apps): Passkeys (WebAuthn) statt Passwörtern, Passwort nur als Notlösung (stark
-  gehasht); Mitglieder melden sich mit ihrem Bridge-Ausweis an; **eine eigene Nutzer-ID pro App** (keine Verfolgung
-  über Apps hinweg); Wiederherstellungs-Codes (keine E-Mail); Rechen-Rätsel (PoW) gegen Bot-Anmeldungen; Konten
-  verschlüsselt auf den Speicher-Knoten, abgeglichen über das Ereignis-Log (docs/09). Der Login läuft in der Hülle
-  (vertrauenswürdige Seite), nie in der App; die App bekommt nur ein Zeichen „Nutzer X dieser App“.
-- **Speicher für Apps – die App entscheidet**: (a) **lokal auf ihrem Knoten** (schnell, gut für Websites mit einem
-  Host) oder (b) **Bridge-Speicher** im Netz (verteilt, überlebt Ausfälle). Bridge stellt beide Werkzeuge bereit,
-  auch pro Nutzer.
+## 9. Schritt 4: Was kann mein Netz? und Bridge Login (ADR 0027, gebaut 13.11.2026)
+
+### 9.1 Was kann mein Netz? (Fähigkeiten-Ampel)
+Jedes Feature nennt, was es im Netz braucht; BridgeControll rechnet es aus dem Netz-Zustand aus
+(`NetState::abilities`) und zeigt es im Owner-Dashboard als Ampel: grün = bereit, gelb = geht, aber schwach,
+rot = fehlt – mit dem, was fehlt. Gezählt werden Knoten mit gültigem Siegel und dem Dienst (Stufe ≥ 2, nicht
+gebannt):
+
+| Feature | grün ab | gelb ab | rot |
+|---|---|---|---|
+| Nachrichten | 2 Empfänger (`gateway`) | 1 | 0 |
+| Websites und Apps | 2 Web-Hosts (`web`) | 1 | 0 |
+| Speicher | 10 Speicher-Knoten (`storage`, 6+4) | 1 (weniger Ausfallschutz) | 0 |
+| Rechnen | 2 Rechen-Knoten (`compute`) | 1 | 0 |
+| **Bridge Login (Konten)** | 2 Speicher-Knoten | 1 | 0 – Login ist dann aus |
+| Wächter | 1 Wächter (`watch`) | 1 | 0 |
+
+### 9.2 Bridge Login – Grundidee
+- **Konten** für Besucher der Websites/Apps eines Netzes. Sie liegen auf den **Speicher-Knoten** des Netzes (Dienst
+  `storage`, Stufe ≥ 2 – „ein Knoten zum Speichern, der eine Verifizierung hat“, `NetState::login_nodes`). Ohne einen
+  solchen Knoten ist Login aus („das Netz ist dafür nicht stark genug“).
+- **Eingang**: Login läuft an einem Knoten, der selbst Speicher-Knoten ist **und** eine öffentliche `https`-Adresse
+  hat (für Tests `http://localhost:<port>`). In BridgeControll: „Login hier einschalten“ gibt dem öffentlichen
+  Owner-Knoten zusätzlich den Dienst `storage` (Stufe und übrige Dienste bleiben). Andere Knoten sagen bei
+  `GET /v4/login/info`, warum Login bei ihnen aus ist, und lehnen den Rest ab (`403`).
+- **Passkeys** (WebAuthn) statt Passwörtern: ES256 (P-256, fast alle Geräte) und EdDSA (Ed25519), ohne Attestation.
+  Auf dem Netz liegt nur der öffentliche Schlüssel (SPKI aus `getPublicKey()`) – nichts, was man stehlen und benutzen
+  könnte. Ein Passwort gibt es nicht, eine E-Mail auch nicht.
+- **Wiederherstellungs-Code** beim Anlegen: 15 Byte = 120 Bit, gezeigt als 24 Zeichen Base32 in 6 Blöcken, dazu die
+  Konto-ID (32 Zeichen). Nur einmal sichtbar; das Netz kennt nur seinen Hash. Damit bekommt ein Konto einen neuen
+  Passkey (Gerät verloren).
+- **Eine Nutzer-ID pro App** (`H(Konto, App)`): Apps können Nutzer nicht über Apps hinweg verfolgen.
+- **Der Login läuft in der Hülle** (`/web/<name>/`, Bridges eigene Seite), nie in der App: die App fragt per
+  `postMessage`, die Hülle antwortet mit Nutzer-ID, Anzeigename und einem **App-Zeichen** (9.4).
+- **Relying Party** (WebAuthn): der Host der öffentlichen Adresse des Knotens (z. B. `muttchen.tail91b057.ts.net`);
+  erlaubter Ursprung genau `https://<host>[:port]`. Ein Passkey gilt damit für diesen Eingang (Host); weitere PCs als
+  Eingänge brauchen eigene Passkeys oder später eine gemeinsame Domain.
+
+### 9.3 Konten-Einträge (selbst-beglaubigt, abgeglichen zwischen Speicher-Knoten)
+Ein Konto ist eine Folge von Einträgen; **jeder Speicher-Knoten prüft jeden Eintrag selbst** – ein Knoten kann kein
+fremdes Konto übernehmen (`bridge-core::login`):
+- `create` (Version 1): `{account, name, credential:{id, alg, key}, recovery:H(code), at}` mit
+  `account = H("bridge4/login/account" ‖ key ‖ H(code))` (Base32, 20 Byte). Der Anzeigename (1–40 Zeichen, keine
+  Steuerzeichen, Leerzeichen am Rand werden entfernt) ist **nicht** eindeutig.
+- `recover` (Version + 1): neuer Passkey und neuer `H(code)`, belegt mit dem **alten Code im Klartext** – danach ist der
+  alte Code wertlos, der alte Passkey ebenso. Ein Konto hat in v1 **genau einen Passkey** (weitere Passkeys pro Konto
+  später).
+- Ein Passkey gehört zu genau einem Konto. Gültig ist immer die nächste Version; Speicher-Knoten holen alle paar
+  Sekunden bei bis zu 8 anderen Speicher-Knoten die Einträge seit ihrem Stand (`POST /v4/node/accounts`, signierte
+  Knoten-Anfrage, Antwort höchstens 200 Einträge) und prüfen jeden. Grenzen: 100.000 Konten je Netz und Knoten,
+  Einträge ≤ 8 KiB. Gespeichert in der Datenbank des Knotens (Schema 14: Konten, Einträge in Ankunftsreihenfolge,
+  Signatur-Zähler).
+
+### 9.4 Anmelden, Sitzung, App-Zeichen
+- `GET /v4/login/info` → `{enabled, reason, rp_id, origin, login_nodes}`.
+- `POST /v4/login/challenge` → 32 Byte, 2 min gültig, genau einmal (höchstens 10.000 offen, im RAM).
+- `POST /v4/login/register` `{name, credential:{id, alg, key}, client_data, auth_data, recovery}` – prüft `type`
+  (`webauthn.create`), Challenge, Ursprung, `crossOrigin`, `rpIdHash`, Flag „User Present“ → `create` + Sitzung.
+  Höchstens 5 neue Konten je Adresse und Stunde.
+- `POST /v4/login/assert` `{credential_id, client_data, auth_data, signature}` – prüft wie oben (`webauthn.get`) +
+  Signatur + Zähler (zählt der Authenticator, muss der Zähler steigen – sonst Verdacht auf kopierten Passkey) →
+  **Sitzung**: vom Knoten signierte Aussage `t:"session"`, `{account}`, höchstens 12 h.
+- `POST /v4/login/recover` `{account, code, credential, client_data, auth_data, recovery}` (Zeremonie
+  `webauthn.create` für den neuen Passkey) → `recover` + Sitzung.
+- `POST /v4/login/app` `{session, app}` → **App-Zeichen**: vom Knoten signierte Aussage `t:"login"`,
+  `{app, user:H(account,app), name}`, höchstens 1 h. Zeichen gehen als Base64url ihrer kanonischen Bytes über die
+  Leitung.
+- Sitzung und App-Zeichen gelten nur, solange ihr Aussteller ein Speicher-Siegel ab Stufe 2 hat – an jedem Knoten des
+  Netzes (die Sitzung von Knoten A gilt auch an Knoten B).
+- **Server-Code der App** (docs/09 §13): kommt `POST /app/<id>/api/…` mit dem Kopf `X-Bridge-Login: <App-Zeichen>`
+  (höchstens 4 KiB, sonst `400`), prüft der Host das Zeichen (Netz, App, Ablauf, Aussteller mit Speicher-Siegel ab
+  Stufe 2, Signatur) und gibt `user` und `name` an den Handler (`{"path","body","user","name"}`); ein falsches Zeichen
+  ist `401`. Ohne Kopf läuft der Handler wie bisher ohne Nutzer. Der Browser fragt vorher per `OPTIONS` nach
+  (`Access-Control-Allow-Headers: Content-Type, X-Bridge-Login`). Speichern pro Nutzer entscheidet die App selbst
+  (lokal am Host oder Bridge-Speicher).
+- **Die Hülle** hat jetzt ein Skript – nur Bridges eigenes (`/login.js`; CSP `script-src 'self'`,
+  `connect-src 'self'`, keine Inline-Skripte, kein HTML aus Zeichenketten) und `Cross-Origin-Opener-Policy:
+  same-origin`. Die Sitzung liegt **nur im Speicher der Seite** (weg beim Neuladen) – andere Seiten desselben
+  Ursprungs (andere Netze, Bridge-3-Server) können sie nicht aus dem Browser-Speicher lesen.
+- `postMessage` (nur vom eigenen `iframe` angenommen): App → Hülle `{"bridge":"login"}` (wer ist angemeldet?) oder
+  `{"bridge":"login","ask":true}` (Anmelde-Fenster öffnen); Hülle → App
+  `{"bridge":"login","user":…,"name":…,"token":…,"exp":…}` oder `{"bridge":"login","user":null}` (auch beim
+  Abmelden). Die Hülle holt ein neues App-Zeichen 5 Minuten vor Ablauf.
+
+### 9.5 Restrisiken (bewusst)
+- **Gemeinsamer Ursprung**: alle Netze und Bridge-3-Server hinter einem Tor teilen `https://<gerät>.ts.net`. Eine
+  Seite mit Skript auf diesem Ursprung (z. B. eine Bridge-3-Seite) könnte selbst eine Passkey-Anmeldung anstoßen. Die
+  Hülle schützt die Sitzung (nur im Speicher, COOP), Apps laufen ohne `allow-same-origin`. Bridge-3-Server auf dem PC
+  gelten als vertrauenswürdig (eigener Code des PC-Besitzers). Abhilfe später: eigene Domain (§10).
+- Wer einen Wiederherstellungs-Code an einem bösen Speicher-Knoten einlöst, verrät ihn diesem Knoten (er könnte
+  schneller sein) – deshalb nur an einem Eingang des Netzes einlösen, dem man traut.
+- Ein böser Speicher-Knoten kann viele Konten anlegen und die Grenze von 100.000 füllen (neue Konten gehen dann nicht
+  mehr) oder Konten verweigern. Abhilfe: Siegel entziehen (der Owner).
+- Eine App, die sich selbst auf eine fremde Seite umleitet, kann ihr eigenes App-Zeichen dorthin mitnehmen – es gilt
+  nur für diese App und höchstens 1 h.
+- Der Abgleich merkt sich seinen Stand nur im RAM: nach einem Neustart holt ein Speicher-Knoten alle Einträge noch
+  einmal (schon bekannte kosten nur einen Vergleich).
+
+### 9.6 Abnahme Schritt 4
+- e2e (`tests/e2e/tests/phase7_login.rs`, Test-Authenticator ES256): registrieren, anmelden, wiederherstellen, Abgleich
+  zum zweiten Speicher-Knoten; Angriffe (Challenge zweimal, fremder Ursprung/RP, falsche Zeremonie, fremder Passkey,
+  Zähler rückwärts, falsche Signatur, falscher Code, verbrauchter Code, Sitzung eines Fremden, Grenze 5 je Stunde);
+  App-Zeichen für den Server-Code (fremde App, kaputt, zu lang, Aussteller ohne Siegel, Preflight); Hülle mit Skript.
+- In Chromium mit virtuellem Authenticator geprüft (registrieren → Code → abmelden → mit Passkey anmelden → neuer
+  Authenticator → wiederherstellen; die App bekommt Nutzer, Name und Zeichen).
+- BridgeControll: Ampel und „Login hier einschalten“ (auch durch das Tor), Ablehnungen; UI-Rauchtest Bilder 34–35.
 
 ## 10. Später (optional)
 - **Eigene Domain** (eigene Herkunft pro Netz, schönere Adressen) – ganz am Ende und nur optional; Bridge muss ohne

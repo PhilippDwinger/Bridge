@@ -116,6 +116,44 @@ async fn make_a_network_public_switch_websites_off_and_back() -> TestResult {
         Ok(me.filter(|me| me["card_stale"] == false).map(|_| ()))
     })
     .await?;
+    // Was kann mein Netz? Login is red until the owner node holds accounts; "Login hier einschalten" adds `storage`.
+    let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+    let login =
+        |dash: &Value| dash["abilities"].as_array().and_then(|list| list.iter().find(|a| a["key"] == "login").cloned());
+    assert_eq!(login(&dash).map(|a| a["status"].clone()), Some(json!("red")), "{}", dash["abilities"]);
+    assert_eq!(dash["login"], json!({"here": false, "public": true}));
+    let (_, info) = get_page(&format!("{base}/v4/login/info")).await?;
+    assert!(info.contains("\"enabled\":false"), "{info}");
+    app.ok(&format!("/api/nodes/{owner}/login-on"), &json!({})).await?;
+    wait_for(30, "login on", || async {
+        let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+        Ok((dash["login"]["here"] == true && login(&dash).is_some_and(|a| a["status"] == "yellow")).then_some(()))
+    })
+    .await?;
+    let info: Value = wait_for(30, "login through the gate", || async {
+        let (status, info) = try_page(&format!("{base}/v4/login/info")).await?;
+        Ok(serde_json::from_str::<Value>(&info).ok().filter(|info| status == 200 && info["enabled"] == true))
+    })
+    .await?;
+    assert_eq!(
+        (info["rp_id"].clone(), info["origin"].clone()),
+        (json!("pc.tail1234.ts.net"), json!("https://pc.tail1234.ts.net"))
+    );
+    let (status, frame) = get_page(&format!("{base}/web/testseite/")).await?;
+    assert!(status == 200 && frame.contains("id=\"bridge-login\"") && frame.contains("../../login.js"), "{frame}");
+    let (status, script) = get_page(&format!("{base}/login.js")).await?;
+    assert!(status == 200 && script.contains("navigator.credentials"), "{status}");
+    let again = app.ok(&format!("/api/nodes/{owner}/login-on"), &json!({})).await?;
+    assert_eq!(again["already"], json!(true));
+    // The seal kept level and the other services (the website still runs).
+    let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+    let me =
+        dash["nodes"].as_array().and_then(|nodes| nodes.iter().find(|n| n["self"] == true).cloned()).ok_or("me")?;
+    assert_eq!(me["standing"]["level"], json!(3), "{me}");
+    for service in ["web", "storage", "gateway"] {
+        assert!(me["standing"]["services"].as_array().is_some_and(|s| s.contains(&json!(service))), "{service}: {me}");
+    }
+
     // The address is not editable by hand while public.
     let (status, refused) = app
         .post(
@@ -194,12 +232,16 @@ async fn refusals_leave_the_node_as_it_was() -> TestResult {
     assert!(status == 400 && answer.to_string().contains("nicht öffentlich"), "{answer}");
     let (status, _) = app.post(&format!("/api/nodes/{owner}/public-off"), &json!({})).await?;
     assert_eq!(status, 400);
+    let (status, answer) = app.post(&format!("/api/nodes/{owner}/login-on"), &json!({})).await?;
+    assert!(status == 400 && answer.to_string().contains("öffentliche Adresse"), "{status} {answer}");
     // A member's node: only the owner decides whether the network goes public.
     let invite = app.ok(&format!("/api/nodes/{owner}/invite"), &json!({"uses": 5, "days": 30})).await?;
     let link = invite["link"].as_str().ok_or("no link")?.to_owned();
     let member = app.join(&link, "laptop").await?;
     let (status, answer) = app.post(&format!("/api/nodes/{member}/public"), &json!({})).await?;
     assert!(status == 400 && answer.to_string().contains("Nur der Owner"), "{status} {answer}");
+    let (status, answer) = app.post(&format!("/api/nodes/{member}/login-on"), &json!({})).await?;
+    assert!(status == 400 && answer.to_string().contains("Owner-Knoten"), "{status} {answer}");
     app.shutdown().await;
 
     // Tailscale not signed in: a clear message, nothing changed.

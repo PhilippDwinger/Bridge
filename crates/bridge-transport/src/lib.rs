@@ -103,7 +103,12 @@ pub struct Request {
     /// The request came through a proxy: from a trusted proxy, or with any forwarding header (`X-Forwarded-For`,
     /// `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`) - never a local caller then, whatever `peer` says.
     pub forwarded: bool,
+    /// A Bridge Login app token from `X-Bridge-Login` (docs/11 §9.4; at most [`MAX_LOGIN_HEADER`] bytes), if any.
+    pub login: Option<String>,
 }
+
+/// Longest `X-Bridge-Login` header taken.
+pub const MAX_LOGIN_HEADER: usize = 4096;
 
 /// A response: JSON unless `headers` name another `Content-Type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -712,6 +717,11 @@ async fn read_and_handle<H: Handler>(
         || ["x-forwarded-for", "forwarded", "x-real-ip", "x-forwarded-host"]
             .iter()
             .any(|name| headers.contains_key(*name));
+    let login = match headers.get("x-bridge-login").map(|value| value.to_str()) {
+        None => None,
+        Some(Ok(token)) if token.len() <= MAX_LOGIN_HEADER => Some(token.to_owned()),
+        Some(_) => return refuse(400, "BAD_FORMAT", "X-Bridge-Login: too long or not text"),
+    };
     let reading = Limited::new(request.into_body(), config.max_body_bytes).collect();
     let body = match tokio::time::timeout(config.body_timeout, reading).await {
         Ok(Ok(collected)) => collected.to_bytes(),
@@ -721,7 +731,7 @@ async fn read_and_handle<H: Handler>(
         Ok(Err(_)) => return refuse(400, "BAD_FORMAT", "could not read the request body"),
         Err(_) => return refuse(408, "BAD_FORMAT", "request body too slow"),
     };
-    handler.handle(Request { method, path, peer, bearer, body, host, forwarded }).await
+    handler.handle(Request { method, path, peer, bearer, body, host, forwarded, login }).await
 }
 
 /// The body of this request was (partly) not read: the connection cannot be reused, tell the client.

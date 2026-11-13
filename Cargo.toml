@@ -57,6 +57,8 @@ ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
+# ES256 (P-256) only to verify passkeys (Bridge Login, ADR 0027) - inside bridge-core::crypto.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 sha2 = "0.10"
 # BIP-39 recovery words (docs/06 §1): rust-bitcoin's crate, English word list only, secrets wiped on drop.
 bip39 = { version = "2", default-features = false, features = ["std", "zeroize"] }

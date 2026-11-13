@@ -923,6 +923,12 @@ fn standing(state: &NetState, id: &Id, now: i64) -> Value {
     if services.has(Service::Watch) {
         roles.push("Wächter");
     }
+    if services.has(Service::Storage) {
+        roles.push("Speicher");
+    }
+    if services.has(Service::Compute) {
+        roles.push("Rechnen");
+    }
     json!({
         "level": state.level(id, now),
         "member": state.is_member(id, now),
@@ -1218,6 +1224,22 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
         "contact": manifest.contact,
         "adult": manifest.adult_policy().as_str(),
         "join_mode": manifest.join.mode.as_str(),
+    });
+    // Was kann mein Netz? (docs/11 §9.1) and Bridge Login at this node (§9.2).
+    let abilities: Vec<Value> = state
+        .abilities(now)
+        .iter()
+        .map(|ability| {
+            json!({
+                "key": ability.key, "name": ability.name, "needs": ability.needs, "have": ability.have,
+                "yellow": ability.yellow, "green": ability.green, "status": ability.status(),
+            })
+        })
+        .collect();
+    answer["abilities"] = json!(abilities);
+    answer["login"] = json!({
+        "here": state.login_nodes(now).iter().any(|(node, _)| node == &owner_id),
+        "public": entry.public_key.is_some(),
     });
     answer["names"] = names;
     answer["app_keys"] = json!(app_keys);

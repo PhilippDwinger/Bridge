@@ -74,6 +74,23 @@ Bridge-3-Ordner einstellen (Branch `bridge-3`), dann „Bridge-3-Server hinzufü
 öffentlich, ist der Server unter `https://<gerät>.<tailnet>.ts.net/bridge4/<netz>/bridge3/<id>` erreichbar – diese
 Adresse kommt in die Bridge-3-Extensions (Roblox, Minecraft, Python, JS).
 
+**Was kann mein Netz? und Bridge Login** (docs/11 §9): Das Owner-Dashboard zeigt als Ampel, welche Features das Netz
+mit seinen Knoten schafft (Nachrichten, Websites, Speicher, Rechnen, Login, Wächter). **„Login hier einschalten“** macht
+den öffentlichen Owner-Knoten zusätzlich zum Speicher-Knoten: Besucher legen dann in der Leiste jeder Website ein Konto
+mit **Passkey** an (ohne Passwort, ohne E-Mail, Wiederherstellungs-Code zum Aufschreiben). Mit einem zweiten
+Speicher-Knoten (anderer PC, beim Siegeln „Speicher“ ankreuzen) wird die Ampel grün und die Konten liegen doppelt.
+Eine App fragt die Leiste per `postMessage` und bekommt eine Nutzer-ID nur für sich plus ein Zeichen für ihren
+Server-Code:
+
+```js
+parent.postMessage({ bridge: "login", ask: true }, "*"); // ask: true öffnet das Anmelde-Fenster
+window.addEventListener("message", (event) => {
+  if (event.data && event.data.bridge === "login" && event.data.user) {
+    // event.data.user, .name; für den Server-Code: fetch("api/…", { headers: { "X-Bridge-Login": event.data.token } })
+  }
+});
+```
+
 ## Knoten starten
 ```
 bridge-node --data <ordner> --listen 127.0.0.1:7400 --name "Mein Knoten"

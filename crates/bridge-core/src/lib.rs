@@ -22,11 +22,13 @@ pub mod id;
 pub mod json;
 pub mod keys;
 pub mod link;
+pub mod login;
 pub mod mnemonic;
 pub mod pow;
 pub mod request;
 pub mod statement;
 pub mod stream;
+pub mod webauthn;
 
 pub use agent::{Agent, Scope};
 pub use app::{AppFile, AppManifest, FileType};

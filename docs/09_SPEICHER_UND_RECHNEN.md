@@ -111,7 +111,8 @@ Alles andere sind die Blob-Endpunkte von 07 §7.
 ## 13. Apps Stufe 2: Server-Code und Ereignis-Log
 - Das App-Manifest bekommt das optionale Feld `server`: Pfad einer `.wasm`-Datei der Version. Jeder Host führt sie für
   `POST /app/<id>/api/<pfad>` aus (Sandbox, Einstieg `handle`, Eingabe `{"path","body"}`, Ausgabe
-  `{"status","type","body"}`), mit den Fähigkeiten `events` und `log`.
+  `{"status","type","body"}`), mit den Fähigkeiten `events` und `log`. Mit einem gültigen Bridge-Login-App-Zeichen im
+  Kopf `X-Bridge-Login` kommen `"user"` (Nutzer-ID nur für diese App) und `"name"` dazu (docs/11 §9.4).
 - **Ereignis-Log pro App** (07 §6): Der Server-Code hängt Ereignisse an (`event_append`, höchstens 4 KiB); jedes
   Ereignis wird vom Host signiert (`appevent` `{"app","host","seq","data"}`). Hosts holen die Ereignisse der anderen gültigen
   Hosts der App je App-Runde (`POST /v4/app/events {"app","host","after"}`, höchstens 256 je Antwort), prüfen jede

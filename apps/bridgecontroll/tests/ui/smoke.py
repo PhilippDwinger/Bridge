@@ -438,6 +438,26 @@ def main():
             public.frame_locator("iframe").locator("h1:has-text('Hallo von der Testseite')").wait_for(timeout=30000)
             assert "Problem melden" in public.locator(".bar").inner_text(), public.locator(".bar").inner_text()
             shot_page("29-oeffentlich-huelle")
+            # Was kann mein Netz? and Bridge Login (docs/11 §9): the owner node becomes a storage node, the frame gets
+            # Bridge's login script.
+            page.wait_for_selector("#abilities button:has-text('Login hier einschalten')")
+            page.locator("#abilities").scroll_into_view_if_needed()
+            page.click("#abilities button:has-text('Login hier einschalten')")
+            page.wait_for_selector("text=Bridge Login läuft", timeout=30000)
+            page.locator("#abilities").scroll_into_view_if_needed()
+            shot("34-dashboard-login", dialog=True)
+            deadline = time.time() + 30
+            while True:
+                public.reload()
+                if public.locator("#bridge-login button:has-text('Anmelden')").count():
+                    break
+                if time.time() > deadline:
+                    raise AssertionError("no login in the frame")
+                time.sleep(0.5)
+            public.click("#bridge-login button:has-text('Anmelden')")
+            public.wait_for_selector(".bl-box")
+            shot_page("35-huelle-anmelden")
+            public.click(".bl-box button:has-text('Schließen')")
             page.click("button:has-text('Websites aus')")
             page.wait_for_selector("text=Websites aus (Not-Aus)", timeout=30000)
             shot("30-dashboard-not-aus")

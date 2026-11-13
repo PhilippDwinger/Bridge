@@ -49,8 +49,8 @@ pub use log::{
 pub use merkle::{Hash, Tree};
 pub use names::{AdultPolicy, Category, Label, LabelTarget, Name, NameKind, NameRules};
 pub use state::{
-    Ahead, Applied, Endorsement, FederationInfo, NameInfo, NetState, ResolvedName, RulesAhead, SealInfo, Search,
-    Transition, Transitions,
+    Ability, Ahead, Applied, Endorsement, FederationInfo, NameInfo, NetState, ResolvedName, RulesAhead, SealInfo,
+    Search, Transition, Transitions,
 };
 pub use statements::{
     AppRules, Approvals, Ban, Body, Cosign, Delegation, GatewayEntry, HeadBody, Home, Invite, Join, JoinMode, Kind,

@@ -1104,6 +1104,7 @@
           namesSection(data, id)),
         h('aside', { class: 'bc-cols__side', 'aria-label': 'Mitglieder und Einladungen' },
           publicSection(data, id),
+          abilitiesSection(data, id),
           invite,
           h('div', { class: 'bc-stack--tight' }, h('h2', { class: 'bc-h2', text: 'Mitglieder' }), field('member-search', 'Suchen', searchInput), members),
           rules, logBox, watch)));
@@ -1291,6 +1292,33 @@
     return h('div', { class: 'bc-stack--tight' }, parts);
   }
 
+  // ---------- Was kann mein Netz? (docs/11 §9) ----------
+
+  function abilitiesSection(data, id) {
+    const list = data.abilities;
+    if (!list || !list.length) return null;
+    const looks = { green: ['ok', 'Bereit'], yellow: ['warn', 'Geht, aber schwach'], red: ['err', 'Fehlt'] };
+    const rows = list.map((a) => {
+      const [kind, text] = looks[a.status] || looks.red;
+      return h('div', { class: 'bc-stack--tight', 'data-ability': a.key },
+        h('div', { class: 'bc-row bc-row--between' }, h('b', { text: a.name }), pill(kind, text)),
+        h('p', { class: 'bc-muted bc-p0', text: a.have + ' von ' + a.green + ' · braucht ' + a.needs }));
+    });
+    const login = data.login || {};
+    let action = null;
+    if (login.here) {
+      action = h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login läuft an der öffentlichen Adresse dieses Knotens: Besucher legen dort Konten mit Passkey an (ohne Passwort, ohne E-Mail).' });
+    } else if (login.public) {
+      action = h('div', { class: 'bc-stack--tight' },
+        h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login: der Owner-Knoten wird zusätzlich Speicher-Knoten und hält die Konten der Besucher. Mit einem zweiten Speicher-Knoten (anderer PC) gehen sie nicht verloren.' }),
+        h('div', { class: 'bc-row' }, h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Login hier einschalten',
+          onclick: (event) => act(event.currentTarget, () => api('POST', '/api/nodes/' + id + '/login-on', {}), 'Bridge Login ist an').then(refresh) })));
+    } else {
+      action = h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login braucht eine öffentliche Adresse – erst „Öffentlich machen“.' });
+    }
+    return h('div', { class: 'bc-stack--tight', id: 'abilities' }, h('h2', { class: 'bc-h2', text: 'Was kann mein Netz?' }), rows, action);
+  }
+
   function publicDialog(id, summary) {
     const ports = summary.ports || [443, 8443, 10000];
     const select = h('select', { class: 'b-input', id: 'pub-port', 'aria-label': 'Port' },
@@ -1317,7 +1345,7 @@
     const levels = h('div', { class: 'b-seg b-seg--sm', role: 'radiogroup', 'aria-label': 'Stufe' },
       [1, 2, 3].map((n) => h('label', {}, h('input', { type: 'radio', name: 'seal-level', value: String(n), checked: n === level, onchange: () => { level = n; } }), h('span', { text: 'Stufe ' + n }))));
     const given = target && target.services ? target.services : ['gateway'];
-    const serviceList = [['gateway', 'Empfänger'], ['web', 'Apps (web)'], ['watch', 'Wächter'], ['witness', 'Zeuge'], ['log', 'Log-Führer']];
+    const serviceList = [['gateway', 'Empfänger'], ['web', 'Apps (web)'], ['storage', 'Speicher (auch Bridge Login)'], ['compute', 'Rechnen'], ['watch', 'Wächter'], ['witness', 'Zeuge'], ['log', 'Log-Führer']];
     const boxes = serviceList.map(([value, label]) => checkBox(label, { value, checked: given.includes(value) }));
     const body = [];
     if (local) {

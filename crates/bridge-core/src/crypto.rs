@@ -4,6 +4,9 @@
 //! - Signatures: Ed25519 with domain separation (`"bridge4/<domain>\n" + canonical bytes`), strict verification.
 //! - Key agreement: X25519, only contributory results are accepted (no all-zero shared secret).
 //! - Key derivation: HKDF-SHA256. Encryption: ChaCha20-Poly1305. Hash: SHA-256.
+//! - Passkeys (Bridge Login, ADR 0027): only *verifying* WebAuthn signatures - ES256 (ECDSA P-256 + SHA-256, key as
+//!   SPKI DER, signature as DER) and EdDSA (Ed25519, key as SPKI DER, strict) without a Bridge domain (the format is
+//!   WebAuthn's).
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -113,6 +116,69 @@ pub(crate) fn verify(public_key: &[u8; 32], domain: &str, canonical: &[u8], sign
     }
     key.verify_strict(&domain_message(domain, canonical), &Signature::from_bytes(signature))
         .map_err(|_| CoreError::BadSignature)
+}
+
+/// The SPKI DER prefix of an Ed25519 public key (RFC 8410): `SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING }`.
+const ED25519_SPKI_PREFIX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+
+/// Whether `spki` is a usable ES256 (P-256) public key in SPKI DER.
+#[must_use]
+pub fn es256_key_ok(spki: &[u8]) -> bool {
+    use p256::pkcs8::DecodePublicKey as _;
+    p256::ecdsa::VerifyingKey::from_public_key_der(spki).is_ok()
+}
+
+/// Verifies an ES256 signature (DER) of a passkey over `message` (SHA-256 is applied here, as WebAuthn defines). A
+/// high-S signature is accepted like its low-S twin (authenticators produce both).
+pub fn verify_es256(spki: &[u8], message: &[u8], signature_der: &[u8]) -> CoreResult<()> {
+    use p256::ecdsa::signature::Verifier as _;
+    use p256::pkcs8::DecodePublicKey as _;
+    let key = p256::ecdsa::VerifyingKey::from_public_key_der(spki).map_err(|_| CoreError::BadSignature)?;
+    let signature = p256::ecdsa::Signature::from_der(signature_der).map_err(|_| CoreError::BadSignature)?;
+    let signature = signature.normalize_s().unwrap_or(signature);
+    key.verify(message, &signature).map_err(|_| CoreError::BadSignature)
+}
+
+/// The raw Ed25519 key of an SPKI DER - or `None` (wrong form, weak key).
+#[must_use]
+pub fn ed25519_spki_key(spki: &[u8]) -> Option<[u8; 32]> {
+    let raw: [u8; 32] = spki.strip_prefix(&ED25519_SPKI_PREFIX[..])?.try_into().ok()?;
+    let key = VerifyingKey::from_bytes(&raw).ok()?;
+    (!key.is_weak()).then_some(raw)
+}
+
+/// Verifies an EdDSA (Ed25519) signature of a passkey over `message` - strict, no domain (WebAuthn's format).
+pub fn verify_ed25519_spki(spki: &[u8], message: &[u8], signature: &[u8]) -> CoreResult<()> {
+    let raw = ed25519_spki_key(spki).ok_or(CoreError::BadSignature)?;
+    let signature: [u8; 64] = signature.try_into().map_err(|_| CoreError::BadSignature)?;
+    let key = VerifyingKey::from_bytes(&raw).map_err(|_| CoreError::BadSignature)?;
+    key.verify_strict(message, &Signature::from_bytes(&signature)).map_err(|_| CoreError::BadSignature)
+}
+
+/// The SPKI DER prefix of a P-256 public key: `SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING }`.
+const P256_SPKI_PREFIX: [u8; 26] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce,
+    0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+];
+
+/// The SPKI DER of an uncompressed P-256 point (`04 ‖ x ‖ y`) - not checked here ([`es256_key_ok`] does).
+#[must_use]
+pub fn es256_spki(point: &[u8]) -> Vec<u8> {
+    let mut spki = P256_SPKI_PREFIX.to_vec();
+    spki.extend_from_slice(point);
+    spki
+}
+
+/// Test authenticator (feature `test-vectors`): the SPKI DER of the ES256 key of `secret` and a DER signature over
+/// `message` - for tests of Bridge Login without a browser.
+#[cfg(feature = "test-vectors")]
+#[must_use]
+pub fn es256_test_sign(secret: &[u8; 32], message: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    use p256::ecdsa::signature::Signer as _;
+    let Ok(key) = p256::ecdsa::SigningKey::from_slice(secret) else { return (Vec::new(), Vec::new()) };
+    let spki = es256_spki(key.verifying_key().to_encoded_point(false).as_bytes());
+    let signature: p256::ecdsa::Signature = key.sign(message);
+    (spki, signature.to_der().as_bytes().to_vec())
 }
 
 pub(crate) fn generate_box_secret<R: RngCore + CryptoRng>(rng: &mut R) -> StaticSecret {

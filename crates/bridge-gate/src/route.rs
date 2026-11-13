@@ -245,9 +245,15 @@ fn bridge3(route: &Route, rest: &str, query: Option<&str>) -> Decision {
     Decision::Forward { port: server.port, target }
 }
 
-/// Paths of websites and apps (switched off by the Not-Aus): the start page, `/web/…`, `/app/…`.
+/// Paths of websites and apps (switched off by the Not-Aus): the start page, `/web/…`, `/app/…` and the frame's
+/// login script.
 fn web_path(path: &str) -> bool {
-    path == "/" || path == "/web" || path == "/app" || path.starts_with("/web/") || path.starts_with("/app/")
+    path == "/"
+        || path == "/web"
+        || path == "/app"
+        || path == "/login.js"
+        || path.starts_with("/web/")
+        || path.starts_with("/app/")
 }
 
 /// A path the gate forwards: starts with `/`; only RFC 3986 path characters and valid `%XX`; no empty segment
@@ -351,6 +357,7 @@ mod tests {
             assert_eq!(d("/zu/web/shop/"), Decision::Off);
             assert_eq!(d("/zu/app/abc/"), Decision::Off);
             assert_eq!(d("/zu/app"), Decision::Off);
+            assert_eq!(d("/zu/login.js"), Decision::Off);
             assert_eq!(d("/zu/v4/poll"), forward(7402, "/v4/poll"));
             // Bridge 3 servers of a network (also with its websites off).
             assert_eq!(d("/testnetz/bridge3/spiel/client/login?x=1"), forward(7801, "/client/login?x=1"));

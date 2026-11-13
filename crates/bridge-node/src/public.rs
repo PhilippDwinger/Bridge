@@ -7,6 +7,9 @@
 //!   `iframe` (`../../app/<app-id>/`); `/web/<name>` → `308` to `<name>/`.
 //! - Both are static HTML without scripts (CSP `default-src 'none'`), `no-store`, never framed by others; every text
 //!   from the network is HTML-escaped, the contact becomes a link only as a plain e-mail address or `https://` URL.
+//! - With Bridge Login on at this node (docs/11 §9.4) the frame has one script: Bridge's own `/login.js` (CSP
+//!   `script-src 'self'`, `connect-src 'self'`, no inline code) and is isolated from other windows of the origin
+//!   (`Cross-Origin-Opener-Policy: same-origin`).
 //! - Visitors from the Internet (requests through the trusted proxy) see apps only of owners with level ≥ 2 in a
 //!   network that forbids 18+ ([`Node::public_visible`]) - for the frame, the start page and `/app/…` alike.
 
@@ -25,6 +28,13 @@ const MAX_WEB_NAME: usize = 64;
 const PAGE_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'; \
                         form-action 'none'; frame-ancestors 'none'";
 
+/// CSP of the frame with Bridge Login: as [`PAGE_CSP`] plus Bridge's own script and its calls to this origin.
+const LOGIN_CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; \
+                         frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// The shell's login script (docs/11 §9.4).
+const LOGIN_JS: &str = include_str!("login.js");
+
 /// The sandbox of the `iframe` - the same rights as the app's own CSP `sandbox` (docs/07 §5).
 const FRAME_SANDBOX: &str = "allow-scripts allow-forms allow-popups";
 
@@ -33,7 +43,18 @@ color:#1d2433;background:#f6f7fb}main{max-width:44rem;margin:0 auto;padding:2rem
 .25rem}h2{font-size:1.1rem;margin:2rem 0 .5rem}ul{padding-left:1.2rem}li{margin:.35rem 0}a{color:#2448c8}.muted{color:\
 #5b6475}footer{margin-top:2.5rem;font-size:.9rem;color:#5b6475}.frame{display:flex;flex-direction:column;height:100%}\
 .bar{display:flex;flex-wrap:wrap;gap:.25rem 1rem;align-items:center;padding:.4rem .8rem;background:#1d2433;color:#fff;\
-font-size:.85rem}.bar a{color:#cfd8ff}.bar .end{margin-left:auto}iframe{flex:1;border:0;width:100%;background:#fff}";
+font-size:.85rem}.bar a{color:#cfd8ff}.bar .end{margin-left:auto}iframe{flex:1;border:0;width:100%;background:#fff}.bl{display:inline-flex;gap:.5rem;\
+align-items:center}.bl-link{background:none;border:0;padding:0;color:#cfd8ff;font:inherit;cursor:pointer;\
+text-decoration:underline}.bl-shade{position:fixed;inset:0;background:rgba(10,14,25,.55);display:flex;align-items:\
+center;justify-content:center;padding:1rem}.bl-box{background:#fff;color:#1d2433;border-radius:10px;padding:1.2rem;\
+width:100%;max-width:24rem;max-height:90vh;overflow:auto}.bl-box h2{margin:0 0 .5rem;font-size:1.2rem}.bl-box h3{\
+margin:1rem 0 .3rem;font-size:1rem}.bl-field{display:block;margin:.4rem 0;font-size:.9rem}.bl-field input{display:\
+block;width:100%;box-sizing:border-box;margin-top:.2rem;padding:.45rem;font:inherit;border:1px solid #c4c9d6;\
+border-radius:6px}.bl-btn{display:block;width:100%;margin:.5rem 0;padding:.55rem;font:inherit;color:#fff;background:\
+#2448c8;border:0;border-radius:6px;cursor:pointer}.bl-btn:disabled{opacity:.6}.bl-err{color:#b3261e;min-height:1.2em;\
+margin:.4rem 0}.bl-muted{color:#5b6475;font-size:.9rem;margin:.3rem 0}.bl-code{font:600 1.05rem ui-monospace,monospace;\
+word-break:break-all;background:#f0f2f7;padding:.4rem;border-radius:6px;margin:.2rem 0 .6rem}.bl-more{margin-top:1rem}\
+.bl-close{color:#2448c8;margin-top:.5rem}";
 
 impl Node {
     /// Whether the app of `owner` may go to this request (docs/11 §4): always for callers on this PC and in the
@@ -45,7 +66,8 @@ impl Node {
 
     /// Whether `path` is one of the public pages (only with the reader `public`).
     pub(crate) fn is_public_page(&self, path: &str) -> bool {
-        self.inner.reader.access() == ReaderAccess::Public && (path == "/" || path.starts_with("/web/"))
+        self.inner.reader.access() == ReaderAccess::Public
+            && (path == "/" || path == "/login.js" || path.starts_with("/web/"))
     }
 
     /// `GET /` and `GET /web/<name>[/]` (see module docs).
@@ -59,6 +81,12 @@ impl Node {
         }
         if request.path == "/" {
             return self.start_page(now);
+        }
+        if request.path == "/login.js" {
+            return Response::ok(LOGIN_JS.as_bytes().to_vec())
+                .with_header("content-type", "text/javascript; charset=utf-8")
+                .with_header("x-content-type-options", "nosniff")
+                .with_header("cache-control", "no-cache");
         }
         let rest = request.path.strip_prefix("/web/").unwrap_or_default();
         match rest.split_once('/') {
@@ -132,14 +160,31 @@ impl Node {
             return not_found_page();
         }
         let (name, net) = (escape(&name), escape(&net));
+        let login = self.login_blocker(now).is_none();
+        let (slot, script) = if login {
+            (
+                format!("<span id=\"bridge-login\" class=\"bl\" data-app=\"{app}\"></span> · "),
+                "<script src=\"../../login.js\"></script>",
+            )
+        } else {
+            (String::new(), "")
+        };
         let content = format!(
             "<div class=\"frame\"><div class=\"bar\"><strong>{net}</strong><span>{name}</span><span class=\"end\">\
-             <a href=\"../../app/{app}/\" target=\"_top\" rel=\"noreferrer\">Nur die Seite</a> · Problem melden: {}</span>\
-             </div><iframe src=\"../../app/{app}/\" sandbox=\"{FRAME_SANDBOX}\" referrerpolicy=\"no-referrer\" \
-             title=\"{name}\"></iframe></div>",
+             {slot}<a href=\"../../app/{app}/\" target=\"_top\" rel=\"noreferrer\">Nur die Seite</a> · Problem melden: {}\
+             </span></div><iframe src=\"../../app/{app}/\" sandbox=\"{FRAME_SANDBOX}\" referrerpolicy=\"no-referrer\" \
+             title=\"{name}\"></iframe></div>{script}",
             contact_html(contact.as_deref())
         );
-        page(200, &format!("{name} – {net}"), &content)
+        let response = page(200, &format!("{name} – {net}"), &content);
+        if !login {
+            return response;
+        }
+        let mut response = response;
+        response.headers.retain(|(header, _)| header != "content-security-policy");
+        response
+            .with_header("content-security-policy", LOGIN_CSP)
+            .with_header("cross-origin-opener-policy", "same-origin")
     }
 }
 

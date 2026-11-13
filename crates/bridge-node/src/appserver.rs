@@ -2,6 +2,7 @@
 //!
 //! - **Server code**: an app version may name a `.wasm` file (`server`). Every host runs it for
 //!   `POST /app/<id>/api/<path>` in the sandbox (entry `handle`, input `{"path","body"}` with the body as Base64url,
+//!   plus `"user","name"` when the request carries a valid Bridge Login app token in `X-Bridge-Login`,
 //!   output `{"status","type","body"}`), with the capabilities `log` and `events` - nothing else. The answer goes out
 //!   with the app's sandbox headers like every file of the app.
 //! - **Event log**: the server code appends events (`event_append`, at most [`MAX_EVENT_BYTES`], 16 per call); each
@@ -133,7 +134,14 @@ impl Node {
         for index in 0..parts {
             module.extend(self.read_part(&file.blob, index).await?.ok_or_else(NodeError::unavailable)?);
         }
-        let input = json!({"path": path, "body": b64(&request.body)}).to_string().into_bytes();
+        // Bridge Login (docs/11 §9.4): a token that does not hold is refused before the code runs.
+        let login = self.app_login(request, app, now)?;
+        let mut input = json!({"path": path, "body": b64(&request.body)});
+        if let (Some((user, name)), Some(object)) = (login, input.as_object_mut()) {
+            object.insert("user".into(), Value::String(user.to_string()));
+            object.insert("name".into(), Value::String(name));
+        }
+        let input = input.to_string().into_bytes();
         let (sign, receive) = self.inner.identity.secret_bytes();
         let host = AppHost {
             store: Arc::clone(&self.inner.store),

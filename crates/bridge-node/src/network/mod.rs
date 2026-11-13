@@ -854,6 +854,7 @@ pub(crate) fn spawn(node: &Node) -> Vec<JoinHandle<()>> {
         tokio::spawn(duty(node.clone(), timing.cosign, Duty::Witness)),
         tokio::spawn(duty(node.clone(), timing.relay_retry, Duty::Relay)),
         tokio::spawn(duty(node.clone(), timing.homes, Duty::Homes)),
+        tokio::spawn(duty(node.clone(), timing.homes, Duty::Accounts)),
         tokio::spawn(duty(node.clone(), timing.watch, Duty::Watch)),
         tokio::spawn(duty(node.clone(), timing.relay_retry, Duty::Reports)),
         tokio::spawn(duty(node.clone(), timing.blocklists, Duty::Blocklists)),
@@ -872,6 +873,7 @@ enum Duty {
     Witness,
     Relay,
     Homes,
+    Accounts,
     Watch,
     Register,
     Reports,
@@ -890,6 +892,7 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Witness => node.witness_round().await,
             Duty::Relay => node.relay_round().await,
             Duty::Homes => node.homes_round().await,
+            Duty::Accounts => node.accounts_round().await,
             Duty::Watch => node.watch_round().await,
             Duty::Register => node.register_round().await,
             Duty::Reports => node.reports_round().await,
@@ -901,7 +904,13 @@ async fn duty(node: Node, interval: Duration, duty: Duty) {
             Duty::Head => Some(&network.wake_head),
             Duty::Witness => Some(&network.wake_witness),
             Duty::Relay => Some(&network.wake_relay),
-            Duty::Gossip | Duty::Homes | Duty::Watch | Duty::Register | Duty::Reports | Duty::Blocklists => None,
+            Duty::Gossip
+            | Duty::Homes
+            | Duty::Accounts
+            | Duty::Watch
+            | Duty::Register
+            | Duty::Reports
+            | Duty::Blocklists => None,
         };
         match wake {
             Some(wake) => {
