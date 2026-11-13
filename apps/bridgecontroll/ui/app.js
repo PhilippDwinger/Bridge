@@ -1102,6 +1102,7 @@
           reportsSection(data, id),
           namesSection(data, id)),
         h('aside', { class: 'bc-cols__side', 'aria-label': 'Mitglieder und Einladungen' },
+          publicSection(data, id),
           invite,
           h('div', { class: 'bc-stack--tight' }, h('h2', { class: 'bc-h2', text: 'Mitglieder' }), field('member-search', 'Suchen', searchInput), members),
           rules, logBox, watch)));
@@ -1157,11 +1158,65 @@
           h('div', { class: 'b-field' }, h('span', { class: 'b-flabel', text: 'Knoten-ID' }),
             node.node_id ? h('span', { class: 'bc-mono', id: 'node-id', text: node.node_id }) : h('span', { class: 'bc-muted', text: '–' }))),
         h('aside', { class: 'bc-cols__side' },
+          node.public ? publicSection(data, node.id) : null,
           h('div', { class: 'bc-stack--tight' }, h('h2', { class: 'bc-h2', text: 'Erreichbarkeit' }),
             h('div', { class: 'bc-row' }, nodeChips(node))),
           node.net ? h('div', { class: 'bc-stack--tight' }, h('h2', { class: 'bc-h2', text: 'Netz' }),
             h('p', { class: 'bc-text', text: node.net.name + ' · ' + node.net.mode + ' · ' + (node.net.witnessed ? 'Log bezeugt' : 'Log wird bezeugt') }),
             h('p', { class: 'bc-mono', text: node.net.id })) : null)));
+  }
+
+  // ---------- Öffentlich (docs/11 §5) ----------
+
+  function publicSection(data, id) {
+    const node = data.node;
+    const pub = node.public;
+    const summary = data.public || {};
+    const title = h('h2', { class: 'bc-h2', text: 'Öffentlich' });
+    if (!pub) {
+      const adult = node.net && node.net.adult === 'allowed';
+      return h('div', { class: 'bc-stack--tight' }, title,
+        h('p', { class: 'bc-text', text: 'Websites und Apps dieses Netzes für alle im Internet erreichbar machen – über Tailscale Funnel, kostenlos. Mehrere Netze teilen sich einen Port.' }),
+        adult ? h('p', { class: 'bc-muted bc-p0', text: 'Dieses Netz erlaubt 18+-Inhalte – solche Netze werden nie öffentlich.' })
+          : h('div', { class: 'bc-row' }, h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Öffentlich machen', onclick: () => publicDialog(id, summary) })));
+    }
+    const base = pub.url + '/';
+    const parts = [title,
+      h('div', { class: 'bc-row' }, pub.web ? pill('ok', 'Websites öffentlich', 'live') : pill('warn', 'Websites aus (Not-Aus)')),
+      copyField(base, 'Öffentliche Adresse'),
+      h('p', { class: 'bc-muted bc-p0' }, h('a', { href: base, target: '_blank', rel: 'noopener noreferrer', text: 'Startseite öffnen' }),
+        summary.funnel_port && summary.funnel_port !== 443 ? ' · Port ' + summary.funnel_port : '')];
+    if (node.role !== 'owner') {
+      parts.push(h('p', { class: 'bc-muted bc-p0', text: 'Damit das Netz diese Adresse kennt, siegelt der Owner diesen Knoten neu („Karte veraltet“ → „Neu siegeln“).' }));
+    }
+    parts.push(h('div', { class: 'bc-row' },
+      pub.web
+        ? h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Websites aus',
+          onclick: (event) => act(event.currentTarget, () => api('POST', '/api/nodes/' + id + '/public-web', { on: false }), 'Websites sind aus').then(refresh) })
+        : h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Websites an',
+          onclick: (event) => act(event.currentTarget, () => api('POST', '/api/nodes/' + id + '/public-web', { on: true }), 'Websites sind wieder öffentlich').then(refresh) }),
+      h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Nicht mehr öffentlich',
+        onclick: () => confirmDialog('Nicht mehr öffentlich?', 'Das Netz ist dann nur noch auf diesem PC und im Netz selbst erreichbar. Der Knoten startet kurz neu.', 'Beenden',
+          () => api('POST', '/api/nodes/' + id + '/public-off', {}).then((r) => { if (r && r.warning) toast('warn', 'Hinweis', r.warning); refresh(); })) })));
+    return h('div', { class: 'bc-stack--tight' }, parts);
+  }
+
+  function publicDialog(id, summary) {
+    const ports = summary.ports || [443, 8443, 10000];
+    const select = h('select', { class: 'b-input', id: 'pub-port', 'aria-label': 'Port' },
+      ports.map((port) => h('option', { value: String(port), text: port === 443 ? '443 (ohne Port in der Adresse)' : String(port), selected: port === summary.funnel_port })));
+    const body = [
+      h('p', { class: 'bc-text', text: 'Jeder im Internet kann dann die Websites und Apps dieses Netzes öffnen (Inhaber ab Stufe 2). Du bist für das verantwortlich, was dein PC zeigt (Nutzungsregeln). Mit „Websites aus“ schaltest du jederzeit sofort ab.' }),
+      h('p', { class: 'bc-muted bc-p0', text: 'Voraussetzung: Tailscale ist installiert und angemeldet, Funnel ist im Tailnet erlaubt. BridgeControll setzt nur den Pfad /bridge4 – Einträge von BridgeControll 3 bleiben unberührt.' }),
+      summary.funnel_on ? h('p', { class: 'bc-muted bc-p0', text: 'Port ' + summary.funnel_port + ' (wie die anderen öffentlichen Netze).' })
+        : field('pub-port', 'Tailscale-Port', h('div', { class: 'b-selectwrap' }, select, icon('chevron')))];
+    formDialog('Öffentlich machen', null, body, 'Öffentlich machen', async () => {
+      const port = summary.funnel_on ? null : Number(select.value);
+      const result = await api('POST', '/api/nodes/' + id + '/public', { funnel_port: port });
+      toast('ok', 'Öffentlich', result.url + '/' + (result.sealed ? '' : ' – der Owner muss den Knoten neu siegeln'));
+      refresh();
+      return true;
+    });
   }
 
   function sealDialog(ownerId, target) {

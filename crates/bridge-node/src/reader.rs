@@ -37,7 +37,7 @@ use crate::apps::{Hosts, Version};
 use crate::network::Endpoint;
 use crate::{Node, NodeError, NodeResult, lock};
 
-/// Who may use the reader (`--reader off|local|lan|tailnet`).
+/// Who may use the reader (`--reader off|local|lan|tailnet|public`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReaderAccess {
     /// No reader: apps this node does not host are `404`.
@@ -50,10 +50,14 @@ pub enum ReaderAccess {
     /// Also the own tailnet: Tailscale's ranges 100.64.0.0/10 and fd7a:115c:a1e0::/48 (the same as
     /// `--peer-addresses tailnet` adds), with an IP address as `Host` (review 9).
     Tailnet,
+    /// Everybody, also through the trusted proxy (docs/11 §4): only for a node behind the gate of a public network.
+    /// Visitors from the Internet see the apps of owners with level ≥ 2 in a network that forbids 18+, the start
+    /// page `/` and the frame `/web/<name>/`.
+    Public,
 }
 
 impl ReaderAccess {
-    /// `off`, `local`, `lan` or `tailnet`.
+    /// `off`, `local`, `lan`, `tailnet` or `public`.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         match text {
@@ -61,6 +65,7 @@ impl ReaderAccess {
             "local" => Some(Self::Local),
             "lan" => Some(Self::Lan),
             "tailnet" => Some(Self::Tailnet),
+            "public" => Some(Self::Public),
             _ => None,
         }
     }
@@ -73,6 +78,7 @@ impl ReaderAccess {
             Self::Local => "local",
             Self::Lan => "lan",
             Self::Tailnet => "tailnet",
+            Self::Public => "public",
         }
     }
 }
@@ -184,6 +190,11 @@ pub(crate) struct Reader {
 }
 
 impl Reader {
+    /// Who may use the reader.
+    pub(crate) fn access(&self) -> ReaderAccess {
+        self.config.access
+    }
+
     pub(crate) fn new(config: ReaderConfig) -> Self {
         let lru = Lru { entries: HashMap::new(), order: BTreeMap::new(), bytes: 0, stamp: 0, cap: config.cache_bytes };
         Self { config, memory: Mutex::new(Memory { versions: BTreeMap::new(), misses: BTreeMap::new(), lru }) }
@@ -240,6 +251,9 @@ fn private(ip: IpAddr) -> bool {
 impl Node {
     /// Whether `request` may use the reader (see module docs).
     pub(crate) fn reader_allows(&self, request: &Request) -> bool {
+        if self.inner.reader.config.access == ReaderAccess::Public {
+            return true; // everybody (docs/11 §4) - what visitors see is limited in `public_visible`
+        }
         if request.forwarded {
             return false;
         }
@@ -251,6 +265,7 @@ impl Node {
             ReaderAccess::Local => local,
             ReaderAccess::Lan => local || (private(peer) && literal),
             ReaderAccess::Tailnet => local || (bridge_transport::is_tailnet_ip(peer) && literal),
+            ReaderAccess::Public => true,
         }
     }
 
@@ -383,6 +398,9 @@ impl Node {
         }
         // A version that does not hold (banned, labeled, expired, nowhere) is `404` like at a host.
         let (version, hosts) = self.reader_version(app, now).await.map_err(|_| NodeError::not_found())?;
+        if !self.public_visible(request, &version.manifest.owner, now) {
+            return Err(NodeError::not_found());
+        }
         let path = if path.is_empty() { version.manifest.entry.as_str() } else { path };
         check_path(path).map_err(|_| NodeError::not_found())?;
         let file = version.manifest.file(path).ok_or_else(NodeError::not_found)?;
@@ -574,7 +592,7 @@ mod tests {
             assert!(!private(ip(tailscale)), "{tailscale} is no home network");
             assert!(bridge_transport::is_tailnet_ip(ip(tailscale)), "{tailscale}");
         }
-        for name in ["off", "local", "lan", "tailnet"] {
+        for name in ["off", "local", "lan", "tailnet", "public"] {
             assert_eq!(ReaderAccess::parse(name).map(ReaderAccess::as_str), Some(name));
         }
         assert!(local_reader_path(Method::Post, "/v4/names/search"));

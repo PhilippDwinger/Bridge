@@ -29,6 +29,7 @@ mod lan;
 mod names;
 mod network;
 pub mod plugins;
+mod public;
 mod reader;
 mod reports;
 mod sessions;
@@ -490,6 +491,9 @@ impl Handler for Node {
     }
 
     async fn handle(&self, request: Request) -> Response {
+        if self.is_public_page(&request.path) {
+            return self.public_page(&request);
+        }
         if request.path.starts_with("/app/") {
             return self.serve_app(&request).await;
         }

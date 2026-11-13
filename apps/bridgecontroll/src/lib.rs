@@ -24,6 +24,7 @@ pub mod http;
 pub mod logfile;
 pub mod moderation;
 pub mod ops;
+pub mod public;
 pub mod qr;
 pub mod sites;
 pub mod startmenu;
@@ -104,6 +105,8 @@ pub struct Options {
     /// Where the start menu entry "BridgeControll" goes (`None`: none - the program sets the system's place, tests do
     /// not touch the system).
     pub menu_dir: Option<PathBuf>,
+    /// The `tailscale` command line (docs/11 §5; tests put a stand-in here).
+    pub tailscale: public::SharedTailscale,
 }
 
 impl Options {
@@ -120,6 +123,7 @@ impl Options {
             autostart_dir: autostart::system_dir(),
             custom_app_dir: false,
             menu_dir: None,
+            tailscale: Arc::new(public::SystemTailscale::find()),
         }
     }
 }
@@ -168,6 +172,7 @@ impl App {
         }
         self.supervisor.start(Launch {
             id: entry.id.clone(),
+            mode: "node",
             args: ops::node_args(entry, &self.node_dir(entry)),
             log: self.node_log(&entry.id),
         });
@@ -305,6 +310,13 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
         for entry in config.nodes.iter().filter(|entry| entry.autostart) {
             app.start_node(entry);
         }
+        let public = config.nodes.iter().any(|entry| entry.public_key.is_some());
+        drop(config);
+        if public {
+            if let Err(error) = public::apply_gate(&app).await {
+                tracing::warn!(%error, "Tor");
+            }
+        }
     }
     let tasks = vec![http::serve(listener, Arc::clone(&app)), tokio::spawn(status_rounds(Arc::clone(&app)))];
     tracing::info!(port = addr.port(), "BridgeControll bereit");
@@ -346,6 +358,7 @@ async fn status_rounds(app: Arc<App>) {
             tokio::time::timeout(Duration::from_secs(10), async { while round.join_next().await.is_some() {} }).await;
         round.abort_all();
         ops::housekeeping(&app).await;
+        public::housekeeping(&app).await;
         remove_old_login_page(&app.options.app_dir);
     }
 }

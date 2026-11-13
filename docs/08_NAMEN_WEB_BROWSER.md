@@ -258,8 +258,10 @@ seines Besitzers:
    (10/8, 172.16/12, 192.168/16, IPv6-ULA fc00::/7 **ohne** Tailscales fd7a:115c:a1e0::/48, Link-Local), `tailnet`
    stattdessen das **eigene Tailnet** (100.64.0.0/10 und fd7a:115c:a1e0::/48 – dieselben Bereiche wie
    `--peer-addresses tailnet`, 06 §2), beide mit `Host` = eine IP-Adresse (Prüfung 9: vorher galt Tailscales IPv6 als
-   Heimnetz, sein IPv4 nicht); `off` schaltet den Leser ab. Für alle anderen Aufrufer ist eine nicht gehostete App wie
-   bisher `404` – **nie ein offener Proxy**.
+   Heimnetz, sein IPv4 nicht); `off` schaltet den Leser ab. `public` (Phase 7, docs/11 §4) erlaubt **jedem**
+   Aufrufer den Leser, auch über den vertrauten Proxy – nur für einen Knoten hinter dem Tor eines öffentlichen Netzes;
+   dazu gehören die Startseite `GET /` und die Hülle `GET /web/<name>/`. Für alle anderen Aufrufer ist eine nicht
+   gehostete App wie bisher `404` – **nie ein offener Proxy**.
    **Zugang nur für diesen PC** (Prüfung 9, `NodeConfig::reader_listen`, `--reader-listen 127.0.0.1:<port>`): ein
    zweiter Listener des Knotens, nur an eine Loopback-Adresse gebunden (eine andere lehnt der Start ab), der **keinem
    Proxy** vertraut und nur den Leser (`GET /app/…`, auch gehostete Apps) und die lesenden Namens-Endpunkte
@@ -319,7 +321,7 @@ seines Besitzers:
 - `bridge-node net label --data <ordner> --target <name|id> --category adult|general [--reason <text>] [--days 365]`.
 - `bridge-node net reports --data <ordner> [--status open|done|all] [--done <id>] [--open <id>]` (die neuesten
   100).
-- `bridge-node … --reader off|local|lan|tailnet [--reader-listen 127.0.0.1:<port>]` (Leser, §8; `--reader-listen 7500`
+- `bridge-node … --reader off|local|lan|tailnet|public [--reader-listen 127.0.0.1:<port>]` (Leser, §8; `--reader-listen 7500`
   heißt 127.0.0.1:7500).
 
 *Beim Bau festgelegt*:

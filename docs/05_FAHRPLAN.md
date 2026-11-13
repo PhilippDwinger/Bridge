@@ -254,6 +254,19 @@ freigegeben).
     `crates/bridge-net/tests/net_federation.rs`, SDK-Tests je Sprache.
   - Offen: docs/10 §8 (SDKs ohne LAN/Ströme/Dateien, Föderation nur Nachrichten, Luau-Krypto ohne fremde Prüfung).
 
+## Phase 7 – Öffentlich, Bridge 3 im Netz, Bridge Login (docs/11, Paddy 13.11.2026)
+- Grundsätze: kostenlos ohne Abos (eigene PCs + Tailscale, keine fremden Cloud-Dienste), Bridge 4 ohne eigene Realms
+  (ADR 0026), das Netz nutzt sich selbst (Features nur mit passenden Knoten), Bridge gibt Werkzeuge – die App
+  entscheidet (z. B. Speicher lokal am Knoten oder im Bridge-Speicher).
+- Schritt 1: **Öffentlich** – das Tor (ADR 0025, ein Funnel-Port für alle Netze unter `/bridge4/<netz>/`), „Öffentlich
+  machen“ in BridgeControll v2, öffentliche Websites in der Hülle, Startseite, Not-Aus, 18+-Netze nie öffentlich.
+- Schritt 2: BridgeControll 3 legt Server unter `/bridge3/<id>` ab (alter Pfad bleibt zum Umstellen).
+- Schritt 3: Bridge-3-Server im Netz (`/bridge4/<netz>/bridge3/<id>/`).
+- Schritt 4: „Was kann mein Netz?“ (Fähigkeiten-Ampel) und Bridge Login (Passkeys, Nutzer-ID pro App, Daten pro Nutzer).
+- Später, optional: eigene Domain.
+- **Abnahme** (docs/11 §11): eine Website von Paddys PC ist in einem fremden Browser über die Tailscale-Adresse
+  erreichbar, zwei Netze teilen sich einen Port, Not-Aus wirkt sofort, BridgeControll 3 läuft daneben weiter.
+
 ## Nebenher
 - Bridge 3 läuft weiter (Branch `bridge-3`), bekommt nur noch Fehlerbehebungen.
 - Jede größere Entscheidung als ADR in `docs/adr/`.

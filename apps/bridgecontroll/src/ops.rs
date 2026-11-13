@@ -72,7 +72,7 @@ pub fn node_args(entry: &NodeEntry, dir: &Path) -> Vec<String> {
         args.extend(["--probe".to_owned(), probe.clone()]);
     }
     args.extend(["--peer-addresses".to_owned(), entry.peer_addresses.as_str().to_owned()]);
-    args.extend(["--reader".to_owned(), entry.reader.as_str().to_owned()]);
+    args.extend(["--reader".to_owned(), entry.effective_reader().as_str().to_owned()]);
     if let (Some(_), Some(port), true) =
         (&entry.public_url, entry.reader_port, entry.reader != bridge_node::ReaderAccess::Off)
     {
@@ -314,7 +314,7 @@ pub(crate) async fn entry_of(app: &App, id: &str) -> Result<NodeEntry, String> {
     app.config.lock().await.node(id).cloned().ok_or_else(|| "Diesen Knoten gibt es nicht (mehr).".to_owned())
 }
 
-async fn save(app: &App, change: impl FnOnce(&mut AppConfig) -> Result<(), String>) -> Result<(), String> {
+pub(crate) async fn save(app: &App, change: impl FnOnce(&mut AppConfig) -> Result<(), String>) -> Result<(), String> {
     let mut config = app.config.lock().await;
     let mut next = config.clone();
     change(&mut next)?;
@@ -369,6 +369,8 @@ pub async fn create_net(app: &App, wizard: &Wizard, reach: &Reach, uses: u32) ->
             peer_addresses: bridge_transport::PeerAddresses::Tailnet,
             reader: bridge_node::ReaderAccess::Local,
             reader_port: None,
+            public_key: None,
+            public_web: true,
             created: now_ms(),
         };
         entry.check()?;
@@ -418,7 +420,7 @@ pub async fn create_net(app: &App, wizard: &Wizard, reach: &Reach, uses: u32) ->
 }
 
 /// Waits until a new owner node serves its network as log operator (or gives up after [`READY_WAIT`]).
-async fn wait_ready(entry: &NodeEntry) -> Result<(), String> {
+pub(crate) async fn wait_ready(entry: &NodeEntry) -> Result<(), String> {
     let http = HttpClient::new(&entry.local_url(), Duration::from_secs(3)).map_err(|e| e.to_string())?;
     let deadline = tokio::time::Instant::now() + READY_WAIT;
     loop {
@@ -573,6 +575,8 @@ pub async fn join(app: &App, request: JoinRequest) -> Result<Value, String> {
             peer_addresses: bridge_transport::PeerAddresses::Tailnet,
             reader: bridge_node::ReaderAccess::Local,
             reader_port: None,
+            public_key: None,
+            public_web: true,
             created: now_ms(),
         }
     };
@@ -736,6 +740,9 @@ pub async fn settings(app: &App, id: &str, body: &serde_json::Map<String, Value>
     };
     let name = body.get("name").and_then(Value::as_str).map_or_else(|| entry.name.clone(), |n| n.trim().to_owned());
     config::check_name(&name, "Name des Knotens")?;
+    if entry.public_key.is_some() && reach.public_url != entry.public_url {
+        return Err("Die öffentliche Adresse kommt von „Öffentlich machen“ – erst „Nicht mehr öffentlich“.".into());
+    }
     let running = app.supervisor.status(id).state == RunState::Running;
     {
         let config = app.config.lock().await;
@@ -772,6 +779,9 @@ pub async fn delete(app: &App, id: &str, confirm: &str) -> Result<Value, String>
     let entry = entry_of(app, id).await?;
     if confirm.trim() != entry.name {
         return Err(format!("Tippe {} zum Bestätigen.", entry.name));
+    }
+    if entry.public_key.is_some() {
+        crate::public::make_private(app, id).await?; // route, Funnel (if the last) and address first
     }
     app.supervisor.stop(id).await;
     let dir = app.node_dir(&entry);
@@ -940,6 +950,7 @@ async fn overview_row(app: &App, entry: &NodeEntry) -> Value {
         "offer_gateway": entry.offer_gateway,
         "probe": entry.probe,
         "joining": entry.join_link.is_some(),
+        "public": crate::public::node_view(entry),
         "run": run_view(app, entry, &cache),
         "node_id": cache.info.as_ref().map(|info| info.card.id().as_str().to_owned()),
         "error": cache.error,
@@ -1008,6 +1019,7 @@ pub async fn overview(app: &App) -> Value {
             "supported": app.options.menu_dir.is_some(),
             "exists": app.options.menu_dir.as_deref().is_some_and(crate::startmenu::exists),
         },
+        "public": crate::public::summary(app).await,
     })
 }
 
@@ -1015,7 +1027,7 @@ pub async fn overview(app: &App) -> Value {
 /// watcher, names, Meldeweg), for a member node its own standing.
 pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String> {
     let entry = entry_of(app, id).await?;
-    let mut answer = json!({"node": overview_row(app, &entry).await});
+    let mut answer = json!({"node": overview_row(app, &entry).await, "public": crate::public::summary(app).await});
     if entry.role != NodeRole::Owner {
         return Ok(answer);
     }
@@ -1312,6 +1324,8 @@ mod tests {
             peer_addresses: bridge_transport::PeerAddresses::Tailnet,
             reader: bridge_node::ReaderAccess::Local,
             reader_port: None,
+            public_key: None,
+            public_web: true,
             created: 0,
         }
     }
@@ -1453,7 +1467,7 @@ mod tests {
         assert!(Reach::from_json(&body(json!({"listen_port": "x"}))).is_err());
         assert!(Reach::from_json(&body(json!({"listen_port": 70000}))).is_err());
         assert!(Reach::from_json(&body(json!({"listen_port": 7401, "public_url": 5}))).is_err());
-        let config = AppConfig { nodes: vec![entry()] };
+        let config = AppConfig { nodes: vec![entry()], ..AppConfig::default() };
         let taken = Reach { listen_port: 7401, lan_port: Some(7401), public_url: Some("ftp://x".into()) };
         let fields: Vec<&str> = taken.check(&config, None, false).iter().map(|(field, _)| *field).collect();
         assert_eq!(fields, vec!["listen_port", "lan_port", "public_url"]);

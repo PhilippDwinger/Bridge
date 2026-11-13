@@ -45,9 +45,24 @@ def free_port():
         return sock.getsockname()[1]
 
 
+FAKE_TAILSCALE = """#!/bin/sh
+# Stand-in for tailscale (docs/11 §5): the PC's name, Funnel always works.
+case "$1" in
+  status) echo '{"BackendState":"Running","Self":{"DNSName":"pc.tail1234.ts.net."}}' ;;
+  funnel) exit 0 ;;
+  *) exit 1 ;;
+esac
+"""
+
+
 def start_app(exe, data, port):
-    # The start menu entry goes into a temporary place, not into this machine's menu.
-    env = dict(os.environ, XDG_DATA_HOME=os.path.join(data, "xdg-data"))
+    # The start menu entry goes into a temporary place, not into this machine's menu; Tailscale is a stand-in.
+    fake = os.path.join(data, "fake-tailscale.sh")
+    os.makedirs(data, exist_ok=True)
+    with open(fake, "w", encoding="utf-8") as script:
+        script.write(FAKE_TAILSCALE)
+    os.chmod(fake, 0o755)
+    env = dict(os.environ, XDG_DATA_HOME=os.path.join(data, "xdg-data"), BRIDGECONTROLL_TAILSCALE=fake)
     process = subprocess.Popen(
         [exe, "--data", data, "--port", str(port), "--no-browser"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
@@ -371,6 +386,39 @@ def main():
             other.goto(view)
             other.wait_for_selector("h1:has-text('Hallo von der Testseite')", timeout=30000)
             other.close()
+
+            # "Öffentlich machen" (docs/11 §5): the gate on one Tailscale port, the website public in the frame.
+            page.goto(base + "/" + owner_hash)
+            page.wait_for_selector("button:has-text('Öffentlich machen')")
+            page.click("button:has-text('Öffentlich machen')")
+            page.wait_for_selector("#pub-port")
+            shot("26-oeffentlich-machen", dialog=True)
+            page.click(".b-form button[type=submit]")
+            page.wait_for_selector("text=Websites öffentlich", timeout=90000)
+            page.wait_for_selector("text=https://pc.tail1234.ts.net/bridge4/testnetz/")
+            shot("27-dashboard-oeffentlich")
+            gate = page.evaluate("fetch('/api/overview').then((r) => r.json()).then((o) => o.public.gate_port)")
+            public = browser.new_page(viewport=VIEWPORT)
+            public.goto(f"http://127.0.0.1:{gate}/bridge4/testnetz/")
+            public.wait_for_selector("a:has-text('meine-testseite')", timeout=60000)
+            shot_page = lambda name: public.screenshot(path=os.path.join(args.shots, name + ".png"), full_page=True)
+            shot_page("28-oeffentlich-startseite")
+            public.click("a:has-text('meine-testseite')")
+            public.frame_locator("iframe").locator("h1:has-text('Hallo von der Testseite')").wait_for(timeout=30000)
+            assert "Problem melden" in public.locator(".bar").inner_text(), public.locator(".bar").inner_text()
+            shot_page("29-oeffentlich-huelle")
+            page.click("button:has-text('Websites aus')")
+            page.wait_for_selector("text=Websites aus (Not-Aus)", timeout=30000)
+            shot("30-dashboard-not-aus")
+            deadline = time.time() + 20
+            while True:
+                answer = public.goto(f"http://127.0.0.1:{gate}/bridge4/testnetz/web/meine-testseite/")
+                if answer is not None and answer.status == 503:
+                    break
+                if time.time() > deadline:
+                    raise AssertionError("Not-Aus wirkt nicht")
+                time.sleep(0.5)
+            public.close()
 
             page.evaluate("fetch('/api/quit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})")
             browser.close()

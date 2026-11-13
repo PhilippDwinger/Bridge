@@ -1,0 +1,24 @@
+[package]
+name = "bridge-gate"
+description = "The gate (docs/11 §3, ADR 0025): one local entrance for the public networks of a PC, behind Tailscale Funnel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true

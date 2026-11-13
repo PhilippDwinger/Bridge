@@ -11,6 +11,7 @@ use common::{TestResult, free_port, node_exe, wait_for};
 fn launch(dir: &std::path::Path, port: u16) -> Launch {
     Launch {
         id: "0a1b2c3d".into(),
+        mode: "node",
         args: vec![
             "--data".into(),
             dir.join("node").display().to_string(),

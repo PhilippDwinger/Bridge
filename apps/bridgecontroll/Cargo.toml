@@ -20,6 +20,7 @@ base64.workspace = true
 bridge-core.workspace = true
 bridge-net.workspace = true
 bridge-node.workspace = true
+bridge-gate.workspace = true
 bridge-node-cli.workspace = true
 bridge-transport.workspace = true
 bridge-sdk.workspace = true

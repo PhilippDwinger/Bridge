@@ -1368,6 +1368,9 @@ impl Node {
             self.inner.apps.wake(); // the loop stops it for good
             return Err(not_found());
         }
+        if !self.public_visible(request, &version.manifest.owner, now) {
+            return Err(not_found());
+        }
         if api {
             let route = path.strip_prefix("api/").ok_or_else(not_found)?;
             return self.app_api(request, &app, &version, route).await;

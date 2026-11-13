@@ -12,6 +12,7 @@
 //! | `POST /api/nodes/<id>/invite` · `seal` · `unseal` · `ban` · `unban` | admin actions of an owner node |
 //! | `POST /api/nodes/<id>/name-register` · `name-revoke` · `report-status` · `report-action` · `contact` | names, reports, Meldeweg (owner) |
 //! | `POST /api/nodes/<id>/report` | report a name or ID of the node's network (member key of this PC) |
+//! | `POST /api/nodes/<id>/public` · `public-web` · `public-off` | public through the gate (docs/11 §5) |
 //! | `GET /api/browser` · `POST /api/browser/resolve` · `/api/browser/search` | the Bridge-Browser |
 //! | `POST /api/wizard/start` · `short` · `confirm` · `check` · `create` · `cancel` | assistant "Neues BridgeNet" |
 //! | `POST /api/join/check` · `/api/join` | "Netz beitreten" |
@@ -150,9 +151,31 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
         "report-status" => result(moderation::report_status(app, id, body).await),
         "report-action" => result(moderation::report_action(app, id, body).await),
         "contact" => result(moderation::set_contact(app, id, body).await),
+        "public" => match optional_port(body) {
+            Ok(port) => result(crate::public::make_public(app, id, port).await),
+            Err(error) => Answer::error(400, &error),
+        },
+        "public-web" => match body.get("on").and_then(Value::as_bool) {
+            Some(on) => result(crate::public::set_web(app, id, on).await),
+            None => Answer::error(400, "on: true oder false"),
+        },
+        "public-off" => result(crate::public::make_private(app, id).await),
         "site-check" => result(crate::sites::check(app, id, body).await),
         "site-publish" => result(crate::sites::publish(app, id, body).await),
         _ => Answer::error(404, "Nicht gefunden"),
+    }
+}
+
+/// `funnel_port` of a body: absent or `null` → none, else 443, 8443 or 10000.
+fn optional_port(body: &Map<String, Value>) -> Result<Option<u16>, String> {
+    match body.get("funnel_port") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| config::FUNNEL_PORTS.contains(port))
+            .map(Some)
+            .ok_or_else(|| "Funnel-Port: 443, 8443 oder 10000".to_owned()),
     }
 }
 

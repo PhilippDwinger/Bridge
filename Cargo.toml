@@ -9,6 +9,7 @@ members = [
     "crates/bridge-plugin-api",
     "crates/bridge-wasm",
     "crates/bridge-node",
+    "crates/bridge-gate",
     "services/ai",
     "bin/bridge-node",
     "apps/bridgecontroll",
@@ -45,6 +46,7 @@ bridge-net = { path = "crates/bridge-net" }
 bridge-plugin-api = { path = "crates/bridge-plugin-api" }
 bridge-wasm = { path = "crates/bridge-wasm" }
 bridge-node = { path = "crates/bridge-node" }
+bridge-gate = { path = "crates/bridge-gate" }
 bridge-sdk = { path = "sdk/rust" }
 bridge-ai = { path = "services/ai" }
 # The node program as a library (its node runner and commands), for BridgeControll (ADR 0017).

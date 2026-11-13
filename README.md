@@ -51,6 +51,23 @@ App-Ordner: `%APPDATA%\BridgeControll2` (Windows) bzw. `~/.local/share/bridgecon
 Knoten (Schlüssel, Datenbank; der Owner-Ordner hat `admin-key.json`), `logs/`, `backup/` (gelöschte Knoten). Die alte
 BridgeControll (Python) bleibt für Bridge-3-Server. UI-Rauchtest: `python3 apps/bridgecontroll/tests/ui/smoke.py`.
 
+## Öffentlich machen (Phase 7, docs/11)
+
+Im Netz-Dashboard von BridgeControll v2 unter **„Öffentlich“** → **„Öffentlich machen“**: Websites und Apps des Netzes
+sind dann für alle im Internet erreichbar – über Tailscale Funnel, kostenlos. Alle Netze eines PCs teilen sich **einen**
+Funnel-Port (Standard 443) über das **Tor**:
+
+```text
+https://<gerät>.<tailnet>.ts.net/bridge4/<netz>/                 Startseite des Netzes (öffentliche Websites)
+https://<gerät>.<tailnet>.ts.net/bridge4/<netz>/web/<name>/      eine Website (mit Leiste: Netz, Name, Melden)
+https://<gerät>.<tailnet>.ts.net/bridge4/<netz>/v4/…             der Knoten (Beitritt, SDKs, andere Knoten)
+```
+
+Voraussetzung: Tailscale installiert und angemeldet, Funnel im Tailnet erlaubt. BridgeControll setzt nur den Pfad
+`/bridge4` (Einträge von BridgeControll 3 bleiben). **„Websites aus“** ist der Not-Aus (sofort), **„Nicht mehr
+öffentlich“** nimmt alles zurück. Netze, die 18+ erlauben, werden nie öffentlich; öffentlich sind nur Apps von Inhabern
+ab Stufe 2.
+
 ## Knoten starten
 ```
 bridge-node --data <ordner> --listen 127.0.0.1:7400 --name "Mein Knoten"

@@ -160,6 +160,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge-gate"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bridge-guard"
 version = "0.1.0"
 dependencies = [
@@ -308,6 +322,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bridge-core",
+ "bridge-gate",
  "bridge-net",
  "bridge-node",
  "bridge-node-bin",

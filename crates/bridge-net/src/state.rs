@@ -131,6 +131,8 @@ pub const MAX_QUERY_CHARS: usize = 64;
 /// Most names whose standing one search checks (review 9): the work of a search is bounded whatever the query - one
 /// pass of cheap string comparisons over the names, then at most this many standing checks, best rank first.
 pub const MAX_SEARCH_CHECKS: usize = 2_000;
+/// Most names on a public start page (docs/11 §4).
+pub const MAX_PUBLIC_NAMES: usize = 100;
 /// Name entries one owner may make per day (replay time) on top of the quota of its level (review 9): new names,
 /// renewals and changes together.
 pub const NAME_ENTRIES_EXTRA_PER_DAY: u64 = 2;
@@ -2549,6 +2551,42 @@ impl NetState {
         search.more = cut || hits.len() > max;
         search.results = hits.into_iter().take(max).map(|hit| resolved(hit.grant, hit.data, hit.standing)).collect();
         search
+    }
+
+    /// The app names a public network shows on its start page (docs/11 §4): names of kind `app` that resolve at `at`
+    /// with the safe search's rules (no 18+, owner level ≥ 2), in name order, at most `max` (≤ 100); at most
+    /// [`MAX_SEARCH_CHECKS`] names are checked. None in a network that allows 18+.
+    #[must_use]
+    pub fn public_app_names(&self, max: usize, at: i64) -> Vec<ResolvedName> {
+        let max = max.min(MAX_PUBLIC_NAMES);
+        let mut list = Vec::new();
+        if self.manifest.adult_policy() != AdultPolicy::Forbidden {
+            return list; // a network that allows 18+ shows nothing to the Internet (docs/11 §5)
+        }
+        let mut checked = 0usize;
+        for grant in self.grants.names.values() {
+            if list.len() >= max || checked >= MAX_SEARCH_CHECKS {
+                break;
+            }
+            let Data::Name(data) = &grant.data else { continue };
+            if data.body.kind != NameKind::App || data.body.category == Category::Adult {
+                continue;
+            }
+            checked = checked.saturating_add(1);
+            let Ok(standing) = self.standing(grant, data, at) else { continue };
+            if standing.category == Category::Adult || standing.owner_level < 2 {
+                continue;
+            }
+            list.push(resolved(grant, data, standing));
+        }
+        list
+    }
+
+    /// Whether a visitor from the Internet may see the apps of `owner` at `at` (docs/11 §4): the network forbids 18+
+    /// and the owner is a member with level ≥ 2 (the safe search's rule).
+    #[must_use]
+    pub fn public_owner(&self, owner: &Id, at: i64) -> bool {
+        self.manifest.adult_policy() == AdultPolicy::Forbidden && self.level(owner, at).is_some_and(|level| level >= 2)
     }
 
     /// The connection to network `peer` in effect at `at` (docs/10 §6): the other network's gateways this network

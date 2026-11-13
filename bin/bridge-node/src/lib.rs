@@ -3,7 +3,7 @@
 //! ```text
 //! bridge-node --data <folder> [--listen 127.0.0.1:7400] [--name <text>] [--url <public url>]...
 //!             [--trust-proxy <ip>]... [--pow-bits <n>] [--join-net <link>] [--lan <port>|<ip:port>]
-//!             [--standalone-blobs <MiB>] [--probe web,storage,compute|-] [--reader off|local|lan|tailnet]
+//!             [--standalone-blobs <MiB>] [--probe web,storage,compute|-] [--reader off|local|lan|tailnet|public]
 //!             [--reader-listen 127.0.0.1:<port>]
 //! bridge-node net create --data <folder> --name <text> --url <public url> --contact <text> [--short <name>]
 //!                        [--template open|invite|closed] [--adult allowed|forbidden]
@@ -71,7 +71,7 @@ pub const USAGE: &str = "Aufruf:
   bridge-node --data <ordner> [--listen 127.0.0.1:7400] [--name <text>] [--url <öffentliche adresse>]...
               [--trust-proxy <ip>]... [--pow-bits <0-28>] [--join-net <link> | --join-net-file <datei>]
               [--lan <port>] [--standalone-blobs <MiB>] [--probe web,storage,compute|-] [--peer-addresses public|tailnet|any]
-              [--reader off|local|lan|tailnet] [--reader-listen 127.0.0.1:<port>]
+              [--reader off|local|lan|tailnet|public] [--reader-listen 127.0.0.1:<port>]
               (--lan 7443: auch im LAN per TLS auf 0.0.0.0:7443, per mDNS angekündigt; oder --lan <ip:port>)
               (--standalone-blobs: Hochladen von Dateien auf einem Knoten ohne Netz erlauben, höchstens so viele MiB)
               (--probe web,storage,compute: Wächter des Netzes prüfen den Knoten und geben ihm Stufe 1 mit diesen Diensten;
@@ -251,7 +251,7 @@ fn run_args(flags: &Flags) -> Result<Run, String> {
         config.probe = Some(probe_services(probe)?);
     }
     if let Some(reader) = flags.one("--reader") {
-        config.reader.access = ReaderAccess::parse(reader).ok_or("--reader: off, local, lan oder tailnet")?;
+        config.reader.access = ReaderAccess::parse(reader).ok_or("--reader: off, local, lan, tailnet oder public")?;
     }
     if let Some(text) = flags.one("--reader-listen") {
         config.reader_listen = Some(reader_listen(text)?);

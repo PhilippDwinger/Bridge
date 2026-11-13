@@ -119,9 +119,11 @@ impl ProcStatus {
 /// How to start one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launch {
-    /// The node's local ID (key of the supervisor).
+    /// The node's local ID (key of the supervisor); `gate` for the gate.
     pub id: String,
-    /// Arguments after `node --supervised`.
+    /// The program's mode: `node` or `gate` (docs/11 §3).
+    pub mode: &'static str,
+    /// Arguments after `<mode> --supervised`.
     pub args: Vec<String>,
     /// Its log file.
     pub log: PathBuf,
@@ -227,7 +229,7 @@ async fn supervise(
             set(&|s| s.state = RunState::Off);
             return;
         }
-        let mut child = match command(&exe, &launch.args).spawn() {
+        let mut child = match command(&exe, launch.mode, &launch.args).spawn() {
             Ok(child) => child,
             Err(error) => {
                 let text = format!("Programm nicht startbar: {error}");
@@ -319,12 +321,12 @@ async fn supervise(
     }
 }
 
-/// The command for one node process: `<exe> node --supervised <args>`, pipes for all three streams, killed if the
-/// supervisor goes away; no console window on Windows.
-fn command(exe: &Path, args: &[String]) -> Command {
+/// The command for one process: `<exe> <mode> --supervised <args>` (`node` or `gate`), pipes for all three streams,
+/// killed if the supervisor goes away; no console window on Windows.
+fn command(exe: &Path, mode: &str, args: &[String]) -> Command {
     let mut command = Command::new(exe);
     command
-        .arg("node")
+        .arg(mode)
         .arg("--supervised")
         .args(args)
         .stdin(Stdio::piped())

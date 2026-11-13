@@ -92,6 +92,11 @@ pub struct NodeEntry {
     /// The port of the node's loopback reader on 127.0.0.1 (`--reader-listen`, review 9): only for a node with a public
     /// address, whose main port trusts the local proxy (Tailscale Funnel) - the Bridge-Browser of this PC uses this one.
     pub reader_port: Option<u16>,
+    /// The network key under which this node is public through the gate (`/bridge4/<key>/`, docs/11 §2) - set by
+    /// "Öffentlich machen", fixed from then on; `public_url` is the gate's address then.
+    pub public_key: Option<String>,
+    /// Websites and apps of the public node are public (`false`: the Not-Aus).
+    pub public_web: bool,
     /// Created (ms since 1970).
     pub created: i64,
 }
@@ -125,6 +130,8 @@ impl NodeEntry {
             "peer_addresses": self.peer_addresses.as_str(),
             "reader": self.reader.as_str(),
             "reader_port": self.reader_port,
+            "public_key": self.public_key,
+            "public_web": self.public_web,
             "created": self.created,
         })
     }
@@ -146,10 +153,22 @@ impl NodeEntry {
             None | Some(Value::Null) => None,
             other => Some(port(other).ok_or("Knoten: reader_port")?),
         };
+        // `public_key`/`public_web` came with the gate (phase 7): a file without them means not public.
+        let public_key = match object.get("public_key") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(key)) => Some(key.clone()),
+            _ => return Err("Knoten: public_key".into()),
+        };
+        let public_web = match object.get("public_web") {
+            None => true,
+            Some(value) => value.as_bool().ok_or("Knoten: public_web")?,
+        };
         let mut object = object.clone();
         object.remove("peer_addresses");
         object.remove("reader");
         object.remove("reader_port");
+        object.remove("public_key");
+        object.remove("public_web");
         let object = &object;
         exact(
             object,
@@ -193,6 +212,8 @@ impl NodeEntry {
             peer_addresses,
             reader,
             reader_port,
+            public_key,
+            public_web,
             created: object.get("created").and_then(Value::as_i64).ok_or("Knoten: created")?,
         };
         entry.check()?;
@@ -226,8 +247,115 @@ impl NodeEntry {
         if self.probe.as_deref().is_some_and(|probe| probe != "web" && probe != "-") {
             return Err("probe: web oder -".into());
         }
+        if self.reader == ReaderAccess::Public {
+            return Err("Leser public gibt es nur über „Öffentlich machen“".into());
+        }
+        if let Some(key) = &self.public_key {
+            if !bridge_gate::route::valid_key(key) {
+                return Err("Netz-Schlüssel: a-z, 0-9, - (höchstens 64), nicht bridge3/bridge4".into());
+            }
+            if self.public_url.is_none() {
+                return Err("öffentlich ohne Adresse".into());
+            }
+        }
         Ok(())
     }
+
+    /// The reader the node runs with: `public` while it is public through the gate, else the chosen one.
+    #[must_use]
+    pub fn effective_reader(&self) -> ReaderAccess {
+        if self.public_key.is_some() && self.reader != ReaderAccess::Off { ReaderAccess::Public } else { self.reader }
+    }
+}
+
+/// The ports Tailscale Funnel offers (docs/11 §2).
+pub const FUNNEL_PORTS: [u16; 3] = [443, 8443, 10000];
+
+/// Settings of the gate and Tailscale Funnel (docs/11 §5) - `public` in the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicConfig {
+    /// The gate's port on 127.0.0.1 (given when a node goes public first).
+    pub gate_port: Option<u16>,
+    /// The Funnel port (443, 8443 or 10000).
+    pub funnel_port: u16,
+    /// Whether this app set `/bridge4` on that port (it removes only what it set).
+    pub funnel_on: bool,
+    /// The PC's Tailscale name when it was last asked (`pc.tail1234.ts.net`).
+    pub host: Option<String>,
+}
+
+impl Default for PublicConfig {
+    fn default() -> Self {
+        Self { gate_port: None, funnel_port: 443, funnel_on: false, host: None }
+    }
+}
+
+impl PublicConfig {
+    fn to_value(&self) -> Value {
+        json!({"gate_port": self.gate_port, "funnel_port": self.funnel_port, "funnel_on": self.funnel_on, "host": self.host})
+    }
+
+    fn from_value(value: &Value) -> Result<Self, String> {
+        let object = value.as_object().ok_or("public: kein Objekt")?;
+        exact(object, &["gate_port", "funnel_port", "funnel_on", "host"])?;
+        let config = Self {
+            gate_port: match object.get("gate_port") {
+                Some(Value::Null) => None,
+                other => Some(port(other).ok_or("public: gate_port")?),
+            },
+            funnel_port: object
+                .get("funnel_port")
+                .and_then(Value::as_u64)
+                .and_then(|p| u16::try_from(p).ok())
+                .ok_or("public: funnel_port")?,
+            funnel_on: object.get("funnel_on").and_then(Value::as_bool).ok_or("public: funnel_on")?,
+            host: match object.get("host") {
+                Some(Value::Null) => None,
+                Some(Value::String(host)) => Some(host.clone()),
+                _ => return Err("public: host".into()),
+            },
+        };
+        config.check()?;
+        Ok(config)
+    }
+
+    /// Funnel port one of [`FUNNEL_PORTS`], gate port not privileged, host a DNS name.
+    pub fn check(&self) -> Result<(), String> {
+        if !FUNNEL_PORTS.contains(&self.funnel_port) {
+            return Err("Funnel-Port: 443, 8443 oder 10000".into());
+        }
+        if self.gate_port.is_some_and(|port| port < MIN_PORT) {
+            return Err(format!("Tor-Port ab {MIN_PORT}"));
+        }
+        if let Some(host) = &self.host {
+            check_host(host)?;
+        }
+        Ok(())
+    }
+
+    /// The public address of a network key: `https://<host>[:<port>]/bridge4/<key>` (no `:443`).
+    #[must_use]
+    pub fn url_of(&self, host: &str, key: &str) -> String {
+        if self.funnel_port == 443 {
+            format!("https://{host}/bridge4/{key}")
+        } else {
+            format!("https://{host}:{}/bridge4/{key}", self.funnel_port)
+        }
+    }
+}
+
+/// A DNS name as Tailscale gives it (`pc.tail1234.ts.net`): labels of `a-z 0-9 -`, at most 253 characters.
+pub fn check_host(host: &str) -> Result<(), String> {
+    let ok = !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+    if ok { Ok(()) } else { Err(format!("Tailscale-Name {host:?} ist ungültig")) }
 }
 
 /// All settings of the app.
@@ -235,6 +363,8 @@ impl NodeEntry {
 pub struct AppConfig {
     /// The nodes of this PC (at most [`MAX_NODES`]).
     pub nodes: Vec<NodeEntry>,
+    /// The gate and Tailscale Funnel (phase 7).
+    pub public: PublicConfig,
 }
 
 /// The settings as loaded, with what was wrong in the file (German, for the start page).
@@ -280,12 +410,20 @@ impl AppConfig {
     fn parse_lenient(bytes: &[u8]) -> Result<(Self, Vec<String>), String> {
         let value = parse_strict(bytes, MAX_CONFIG_BYTES).map_err(|e| e.to_string())?;
         let object = value.as_object().ok_or("kein Objekt")?;
+        // `public` came with the gate (phase 7): a file without it means the defaults.
+        let public = match object.get("public") {
+            None => PublicConfig::default(),
+            Some(value) => PublicConfig::from_value(value)?,
+        };
+        let mut object = object.clone();
+        object.remove("public");
+        let object = &object;
         exact(object, &["v", "nodes"])?;
         if object.get("v") != Some(&json!(1)) {
             return Err("unbekannte Version".into());
         }
         let list = object.get("nodes").and_then(Value::as_array).ok_or("nodes ist keine Liste")?;
-        let mut config = Self::default();
+        let mut config = Self { public, ..Self::default() };
         let mut warnings = Vec::new();
         for (index, item) in list.iter().enumerate() {
             let label = item
@@ -312,8 +450,10 @@ impl AppConfig {
 
     /// Every entry is good, and no two nodes share an ID or a port.
     pub fn check(&self) -> Result<(), String> {
+        self.public.check()?;
         let mut ids = std::collections::BTreeSet::new();
-        let mut ports = std::collections::BTreeSet::new();
+        let mut ports: std::collections::BTreeSet<u16> = self.public.gate_port.into_iter().collect();
+        let mut keys = std::collections::BTreeSet::new();
         for node in &self.nodes {
             node.check().map_err(|e| format!("Knoten {}: {e}", node.id))?;
             if !ids.insert(node.id.as_str()) {
@@ -324,6 +464,11 @@ impl AppConfig {
                     return Err(format!("Port {port} doppelt vergeben"));
                 }
             }
+            if let Some(key) = &node.public_key {
+                if !keys.insert(key.as_str()) {
+                    return Err(format!("Netz-Schlüssel {key} doppelt"));
+                }
+            }
         }
         Ok(())
     }
@@ -332,7 +477,8 @@ impl AppConfig {
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let nodes: Vec<Value> = self.nodes.iter().map(NodeEntry::to_value).collect();
-        let mut text = serde_json::to_string_pretty(&json!({"v": 1, "nodes": nodes})).unwrap_or_default();
+        let mut text = serde_json::to_string_pretty(&json!({"v": 1, "nodes": nodes, "public": self.public.to_value()}))
+            .unwrap_or_default();
         text.push('\n');
         text.into_bytes()
     }
@@ -365,6 +511,7 @@ impl AppConfig {
             .iter()
             .filter(|node| Some(node.id.as_str()) != except)
             .any(|node| node.listen_port == port || node.lan_port == Some(port) || node.reader_port == Some(port))
+            || self.public.gate_port == Some(port)
     }
 }
 
@@ -441,6 +588,8 @@ mod tests {
             peer_addresses: PeerAddresses::Tailnet,
             reader: ReaderAccess::Local,
             reader_port: None,
+            public_key: None,
+            public_web: true,
             created: 1,
         }
     }
@@ -449,7 +598,8 @@ mod tests {
     fn round_trip_and_save() -> Result<(), String> {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         assert_eq!(AppConfig::load(dir.path())?, Loaded::default(), "no file yet: empty");
-        let config = AppConfig { nodes: vec![entry("0a1b2c3d", 7401), entry("ffffffff", 7402)] };
+        let config =
+            AppConfig { nodes: vec![entry("0a1b2c3d", 7401), entry("ffffffff", 7402)], ..AppConfig::default() };
         config.save(dir.path())?;
         assert_eq!(AppConfig::load(dir.path())?, Loaded { config: config.clone(), warnings: Vec::new() });
         #[cfg(unix)]
@@ -466,7 +616,7 @@ mod tests {
 
     #[test]
     fn damaged_files_are_refused() {
-        let good = AppConfig { nodes: vec![entry("0a1b2c3d", 7401)] }.to_bytes();
+        let good = AppConfig { nodes: vec![entry("0a1b2c3d", 7401)], ..AppConfig::default() }.to_bytes();
         assert!(AppConfig::parse(&good).is_ok());
         let text = String::from_utf8_lossy(&good).to_string();
         for (from, to) in [
@@ -488,9 +638,11 @@ mod tests {
         }
         assert!(AppConfig::parse(b"[]").is_err());
         assert!(AppConfig::parse(&vec![b' '; MAX_CONFIG_BYTES + 1]).is_err(), "too large");
-        let doubled = AppConfig { nodes: vec![entry("0a1b2c3d", 7401), entry("0a1b2c3d", 7402)] };
+        let doubled =
+            AppConfig { nodes: vec![entry("0a1b2c3d", 7401), entry("0a1b2c3d", 7402)], ..AppConfig::default() };
         assert!(AppConfig::parse(&doubled.to_bytes()).is_err(), "same ID twice");
-        let same_port = AppConfig { nodes: vec![entry("0a1b2c3d", 7401), entry("0a1b2c3e", 7401)] };
+        let same_port =
+            AppConfig { nodes: vec![entry("0a1b2c3d", 7401), entry("0a1b2c3e", 7401)], ..AppConfig::default() };
         assert!(same_port.check().is_err(), "same port twice");
     }
 
@@ -502,7 +654,7 @@ mod tests {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let mut bad = entry("ffffffff", 7402);
         bad.net_name = " ".into();
-        let config = AppConfig { nodes: vec![entry("0a1b2c3d", 7401), bad.clone()] };
+        let config = AppConfig { nodes: vec![entry("0a1b2c3d", 7401), bad.clone()], ..AppConfig::default() };
         assert!(config.save(dir.path()).is_err(), "an invalid entry is never written");
         assert!(!dir.path().join(CONFIG_FILE).exists());
         // A file with such an entry (written by an older version): the good entry loads, the bad one is reported.
@@ -518,9 +670,11 @@ mod tests {
         assert_eq!(backups.len(), 1);
         assert_eq!(std::fs::read(backups[0].path()).map_err(|e| e.to_string())?, bytes, "the old file, unchanged");
         // Duplicates and garbage entries are skipped the same way; the next save writes a good file.
-        let text = String::from_utf8_lossy(&AppConfig { nodes: vec![entry("0a1b2c3d", 7401)] }.to_bytes())
-            .replacen("\"nodes\": [", "\"nodes\": [7, {\"id\": \"x\"},", 1)
-            .replacen("}\n  ]", "},\n    {\"id\": \"0a1b2c3d\"}\n  ]", 1);
+        let text = String::from_utf8_lossy(
+            &AppConfig { nodes: vec![entry("0a1b2c3d", 7401)], ..AppConfig::default() }.to_bytes(),
+        )
+        .replacen("\"nodes\": [", "\"nodes\": [7, {\"id\": \"x\"},", 1)
+        .replacen("}\n  ]", "},\n    {\"id\": \"0a1b2c3d\"}\n  ]", 1);
         let (lenient, warnings) = AppConfig::parse_lenient(text.as_bytes())?;
         assert_eq!((lenient.nodes.len(), warnings.len()), (1, 3), "{warnings:?}");
         lenient.save(dir.path())?;
@@ -539,9 +693,12 @@ mod tests {
         public.peer_addresses = PeerAddresses::Public;
         let mut any = entry("0a1b2c3e", 7402);
         any.peer_addresses = PeerAddresses::Any;
-        let config = AppConfig { nodes: vec![public, any, entry("0a1b2c3f", 7403)] };
+        let config = AppConfig { nodes: vec![public, any, entry("0a1b2c3f", 7403)], ..AppConfig::default() };
         assert_eq!(AppConfig::parse(&config.to_bytes())?, config);
-        let text = String::from_utf8_lossy(&AppConfig { nodes: vec![entry("0a1b2c3d", 7401)] }.to_bytes()).to_string();
+        let text = String::from_utf8_lossy(
+            &AppConfig { nodes: vec![entry("0a1b2c3d", 7401)], ..AppConfig::default() }.to_bytes(),
+        )
+        .to_string();
         let old = text.replacen("      \"peer_addresses\": \"tailnet\",\n", "", 1);
         assert_ne!(old, text);
         assert_eq!(AppConfig::parse(old.as_bytes())?.nodes[0].peer_addresses, PeerAddresses::Tailnet, "old file");
@@ -558,9 +715,12 @@ mod tests {
         off.reader = ReaderAccess::Off;
         let mut lan = entry("0a1b2c3e", 7402);
         lan.reader = ReaderAccess::Lan;
-        let config = AppConfig { nodes: vec![off, lan, entry("0a1b2c3f", 7403)] };
+        let config = AppConfig { nodes: vec![off, lan, entry("0a1b2c3f", 7403)], ..AppConfig::default() };
         assert_eq!(AppConfig::parse(&config.to_bytes())?, config);
-        let text = String::from_utf8_lossy(&AppConfig { nodes: vec![entry("0a1b2c3d", 7401)] }.to_bytes()).to_string();
+        let text = String::from_utf8_lossy(
+            &AppConfig { nodes: vec![entry("0a1b2c3d", 7401)], ..AppConfig::default() }.to_bytes(),
+        )
+        .to_string();
         let old = text.replacen("      \"reader\": \"local\",\n", "", 1);
         assert_ne!(old, text);
         assert_eq!(AppConfig::parse(old.as_bytes())?.nodes[0].reader, ReaderAccess::Local, "old file");
@@ -578,7 +738,7 @@ mod tests {
         let mut node = entry("0a1b2c3d", 7401);
         node.reader = ReaderAccess::Tailnet;
         node.reader_port = Some(7601);
-        let config = AppConfig { nodes: vec![node.clone(), entry("0a1b2c3e", 7402)] };
+        let config = AppConfig { nodes: vec![node.clone(), entry("0a1b2c3e", 7402)], ..AppConfig::default() };
         assert_eq!(AppConfig::parse(&config.to_bytes())?, config);
         let text = String::from_utf8_lossy(&config.to_bytes()).to_string();
         let old = text.replacen("      \"reader_port\": 7601,\n", "", 1);
@@ -591,7 +751,10 @@ mod tests {
         }
         let mut clash = entry("0a1b2c3e", 7402);
         clash.reader_port = Some(7601);
-        assert!(AppConfig { nodes: vec![node, clash] }.check().is_err(), "the same reader port twice");
+        assert!(
+            AppConfig { nodes: vec![node, clash], ..AppConfig::default() }.check().is_err(),
+            "the same reader port twice"
+        );
         Ok(())
     }
 
@@ -606,5 +769,67 @@ mod tests {
         for bad in ["", "   ", "a\nb", &"x".repeat(65)] {
             assert!(check_name(bad, "x").is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn public_settings() -> Result<(), String> {
+        // Old files without `public` / `public_key`: not public, defaults.
+        let old = AppConfig { nodes: vec![entry("0a1b2c3d", 7401)], ..AppConfig::default() };
+        let text = String::from_utf8_lossy(&old.to_bytes()).to_string();
+        let stripped = text.replace("\"public_key\": null,", "").replace("\"public_web\": true,", "");
+        let without = serde_json::from_str::<Value>(&stripped).map_err(|e| e.to_string())?;
+        let mut without = without.as_object().cloned().unwrap_or_default();
+        without.remove("public");
+        let parsed = AppConfig::parse(Value::Object(without).to_string().as_bytes())?;
+        assert_eq!((parsed.public.clone(), parsed.nodes[0].public_key.clone()), (PublicConfig::default(), None));
+        // A public node and the gate round-trip.
+        let mut config = old.clone();
+        config.public = PublicConfig {
+            gate_port: Some(7390),
+            funnel_port: 8443,
+            funnel_on: true,
+            host: Some("pc.tail1.ts.net".into()),
+        };
+        config.nodes[0].public_key = Some("testnetz".into());
+        config.nodes[0].public_web = false;
+        assert_eq!(AppConfig::parse(&config.to_bytes())?, config);
+        assert_eq!(
+            config.public.url_of("pc.tail1.ts.net", "testnetz"),
+            "https://pc.tail1.ts.net:8443/bridge4/testnetz"
+        );
+        let standard = PublicConfig::default();
+        assert_eq!(standard.url_of("pc.tail1.ts.net", "n"), "https://pc.tail1.ts.net/bridge4/n");
+        assert_eq!(config.nodes[0].effective_reader(), ReaderAccess::Public);
+        assert!(config.port_taken(7390, None), "the gate's port");
+        // Refused: public without address, bad keys, the same key twice, the gate on a node's port, odd Funnel ports
+        // and names, the reader `public` chosen by hand.
+        let mut bad = config.clone();
+        bad.nodes[0].public_url = None;
+        assert!(bad.check().is_err());
+        for key in ["Testnetz", "bridge4", "bridge3", "", "a/b"] {
+            let mut bad = config.clone();
+            bad.nodes[0].public_key = Some(key.into());
+            assert!(bad.check().is_err(), "{key:?}");
+        }
+        let mut twice = config.clone();
+        let mut second = entry("0a1b2c3e", 7402);
+        second.public_key = Some("testnetz".into());
+        twice.nodes.push(second);
+        assert!(twice.check().is_err());
+        let mut clash = config.clone();
+        clash.public.gate_port = Some(7401);
+        assert!(clash.check().is_err());
+        for port in [80, 444, 9000] {
+            let mut bad = config.clone();
+            bad.public.funnel_port = port;
+            assert!(bad.check().is_err(), "{port}");
+        }
+        for host in ["", "PC.tail.ts.net", "a..b", "-a.b", "a b.c", "a_b.c"] {
+            assert!(check_host(host).is_err(), "{host:?}");
+        }
+        let mut chosen = config.clone();
+        chosen.nodes[0].reader = ReaderAccess::Public;
+        assert!(chosen.check().is_err());
+        Ok(())
     }
 }

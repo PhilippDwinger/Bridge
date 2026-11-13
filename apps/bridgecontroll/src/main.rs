@@ -3,6 +3,7 @@
 //! ```text
 //! bridgecontroll [--data <app folder>] [--port 7380] [--no-browser] [--autostart]
 //! bridgecontroll node [--supervised] --data <node folder> [bridge-node flags]
+//! bridgecontroll gate [--supervised] --listen 127.0.0.1:<port> --routes <file>
 //! ```
 //! Without a command it runs the app: the UI on 127.0.0.1, the browser opens with a one-time login link (also printed),
 //! the nodes marked for autostart start. One app per app folder (an exclusive lock, held while it runs): a second start
@@ -11,6 +12,9 @@
 //!
 //! `node`: runs one node exactly like `bridge-node` would (same flags); with `--supervised` it also stops cleanly when
 //! its standard input closes - that is how the app stops the nodes it watches.
+//!
+//! `gate`: the gate of the public networks (docs/11 §3, ADR 0025) - its own process without keys; the app starts and
+//! watches it like a node.
 //!
 //! On Windows the program has no console window (`windows_subsystem = "windows"`): it is a background app; its log
 //! goes to `bridgecontroll.log` in the app folder.
@@ -24,7 +28,8 @@ use bridgecontroll::{InstanceLock, Options, default_app_dir, delegate, open_logi
 
 const USAGE: &str = "Aufruf:
   bridgecontroll [--data <app-ordner>] [--port 7380] [--no-browser] [--autostart]
-  bridgecontroll node [--supervised] --data <knoten-ordner> [Optionen von bridge-node]";
+  bridgecontroll node [--supervised] --data <knoten-ordner> [Optionen von bridge-node]
+  bridgecontroll gate [--supervised] --listen 127.0.0.1:<port> --routes <datei>";
 
 struct AppArgs {
     data: Option<PathBuf>,
@@ -196,7 +201,39 @@ async fn main() -> ExitCode {
         args.remove(0);
         return node(args).await;
     }
+    if args.first().map(String::as_str) == Some("gate") {
+        args.remove(0);
+        return gate(args).await;
+    }
     app(&args).await
+}
+
+/// The gate (docs/11 §3): like a node, it stops cleanly when its standard input closes (`--supervised`).
+async fn gate(args: Vec<String>) -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+    let supervised = args.iter().any(|arg| arg == "--supervised");
+    let args: Vec<String> = args.into_iter().filter(|arg| arg != "--supervised").collect();
+    let shutdown = async move {
+        if supervised {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                () = stdin_closed() => {}
+            }
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    };
+    match bridge_gate::run(&args, shutdown).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 #[cfg(test)]
