@@ -271,6 +271,19 @@ freigegeben).
   („Was kann mein Netz?“, Bridge Login mit Passkeys an Speicher-Knoten, App-Zeichen für den Server-Code, „Login hier
   einschalten“) gebaut, Tests grün; Paddys Echttest mit Tailscale steht aus.
 
+## Phase 8 – Aufräumen und Komfort (Paddy 13.11.2026)
+- **Apps und Websites löschen** (als Erstes; Paddy: „gerade kann man nur sperren, das ist nervig“): der Inhaber zieht
+  eine App zurück – eine signierte Aussage im Transparenz-Log, alle Hosts hören auf und löschen ihre Dateien, der Name
+  wird frei. Anders als „Sperren“ (Maßnahme des Admins gegen fremde Inhalte, bleibt sichtbar). In BridgeControll
+  „Löschen“ neben „Neue Version“. Spezifikation und ADR vor dem Code.
+- Pro Website im Dashboard der Link „Öffentlich ansehen“ (`…/bridge4/<netz>/web/<name>/`), wenn das Netz öffentlich ist.
+- Bridge Login ausbauen: auch im Bridge-Browser und unter „Ansehen“ (heute nur über die öffentliche Adresse), angemeldet
+  bleiben, mehrere Passkeys je Konto, Zahl der Konten im Dashboard, Helfer im JavaScript-SDK.
+- Speicher-Oberfläche in BridgeControll; App-API auch über den Leser (Bridge-Browser).
+- Bridge-3-Server als Name im Netz und auf der Startseite, auch auf anderen PCs des Netzes.
+- Öffentliche Eingänge auf PCs von Mitgliedern (Manifest-Regel), das Tor ohne Neustart neu laden.
+- Danach in Paddys Reihenfolge: Oracle-Dauer-Server, Anbindung an Grove ganz am Ende, eigene Domain nur optional.
+
 ## Nebenher
 - Bridge 3 läuft weiter (Branch `bridge-3`), bekommt nur noch Fehlerbehebungen.
 - Jede größere Entscheidung als ADR in `docs/adr/`.
