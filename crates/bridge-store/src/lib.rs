@@ -183,6 +183,12 @@ const MIGRATIONS: &[&str] = &[
                                  version INTEGER NOT NULL, entry BLOB NOT NULL, UNIQUE (net, account, version));
      CREATE TABLE login_counters (net TEXT NOT NULL, cred_id BLOB NOT NULL, count INTEGER NOT NULL,
                                   PRIMARY KEY (net, cred_id)) WITHOUT ROWID;",
+    // 15: Bridge Login with several devices (docs/11 §14): every passkey of an account, each belongs to one account.
+    "CREATE TABLE login_credentials (net TEXT NOT NULL, cred_id BLOB NOT NULL, account TEXT NOT NULL,
+                                     PRIMARY KEY (net, cred_id)) WITHOUT ROWID;
+     CREATE INDEX login_credentials_account ON login_credentials (net, account);
+     INSERT INTO login_credentials (net, cred_id, account) SELECT net, cred_id, account FROM login_accounts;
+     DROP INDEX login_accounts_cred;",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

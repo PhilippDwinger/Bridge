@@ -2,184 +2,25 @@
 //! A test authenticator (ES256 via `es256_test_sign`) stands in for the browser: register, log in, recover, the
 //! account exchange between storage nodes, app tokens for the server code of an app and the frame's login script.
 
-use bridge_core::crypto::{es256_test_sign, sha256};
 use bridge_core::encoding::b64;
 use bridge_core::login::{account_id, app_user, recovery_hash};
 use bridge_core::{Draft, Id, Identity, Role, Statement};
 use bridge_net::{Category, JoinMode, Name, NameKind, Seal, Services};
-use bridge_node::ReaderAccess;
 use bridge_node::admin::YEAR_MS;
 use bridge_sdk::AppDraft;
 use bridge_tests::apps::{AppNet, get, header, served};
-use bridge_tests::net::{TestNet, TestNode, eventually, test_config};
+use bridge_tests::net::{TestNet, eventually};
 use bridge_tests::now_ms;
 use rand_core::OsRng;
-use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use serde_json::json;
+
+mod login_common;
+
+use login_common::{Entrance, Passkey, code, e, login_node};
 
 type TestResult = Result<(), String>;
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
-
-fn e(error: impl std::fmt::Display) -> String {
-    error.to_string()
-}
-
-/// A test passkey (ES256).
-struct Passkey {
-    secret: [u8; 32],
-    id: Vec<u8>,
-    spki: Vec<u8>,
-}
-
-impl Passkey {
-    fn new(seed: u8) -> Self {
-        let secret = [seed; 32];
-        let (spki, _) = es256_test_sign(&secret, b"");
-        Self { secret, id: vec![seed; 16], spki }
-    }
-
-    fn credential(&self) -> Value {
-        json!({"id": b64(&self.id), "alg": -7, "key": b64(&self.spki)})
-    }
-
-    fn sign(&self, auth: &[u8], client: &[u8]) -> String {
-        let mut message = auth.to_vec();
-        message.extend_from_slice(&sha256(client));
-        b64(&es256_test_sign(&self.secret, &message).1)
-    }
-}
-
-/// The entrance of a login node as a browser sees it.
-#[derive(Clone)]
-struct Entrance {
-    url: String,
-    rp_id: String,
-    origin: String,
-}
-
-impl Entrance {
-    fn auth_data(&self, counter: u32) -> Vec<u8> {
-        let mut auth = sha256(self.rp_id.as_bytes()).to_vec();
-        auth.push(0x05); // user present + verified
-        auth.extend_from_slice(&counter.to_be_bytes());
-        auth
-    }
-
-    fn client_data(&self, kind: &str, challenge: &str) -> Vec<u8> {
-        json!({"type": kind, "challenge": challenge, "origin": self.origin, "crossOrigin": false})
-            .to_string()
-            .into_bytes()
-    }
-
-    async fn post(&self, path: &str, body: &Value) -> Result<(u16, Value), String> {
-        let answer = reqwest::Client::new()
-            .post(format!("{}/v4/login/{path}", self.url))
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()
-            .await
-            .map_err(e)?;
-        let status = answer.status().as_u16();
-        let bytes = answer.bytes().await.map_err(e)?;
-        Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
-    }
-
-    async fn info(&self) -> Result<Value, String> {
-        let (status, _, body) = get(&format!("{}/v4/login/info", self.url)).await?;
-        if status != 200 {
-            return Err(format!("info: {status}"));
-        }
-        serde_json::from_slice(&body).map_err(e)
-    }
-
-    async fn challenge(&self) -> Result<String, String> {
-        match self.post("challenge", &json!({})).await? {
-            (200, answer) => Ok(answer["challenge"].as_str().unwrap_or_default().to_owned()),
-            other => Err(format!("challenge: {other:?}")),
-        }
-    }
-
-    /// A register request for `passkey` with recovery `code` (a fresh challenge unless given).
-    async fn register_body(&self, name: &str, passkey: &Passkey, code: &[u8]) -> Result<Value, String> {
-        let challenge = self.challenge().await?;
-        Ok(json!({
-            "name": name,
-            "credential": passkey.credential(),
-            "client_data": b64(&self.client_data("webauthn.create", &challenge)),
-            "auth_data": b64(&self.auth_data(0)),
-            "recovery": b64(&recovery_hash(code)),
-        }))
-    }
-
-    async fn assert(&self, passkey: &Passkey, counter: u32) -> Result<(u16, Value), String> {
-        let challenge = self.challenge().await?;
-        let (client, auth) = (self.client_data("webauthn.get", &challenge), self.auth_data(counter));
-        let body = json!({
-            "credential_id": b64(&passkey.id),
-            "client_data": b64(&client),
-            "auth_data": b64(&auth),
-            "signature": passkey.sign(&auth, &client),
-        });
-        self.post("assert", &body).await
-    }
-
-    async fn recover(
-        &self,
-        account: &str,
-        code: &[u8],
-        passkey: &Passkey,
-        new_code: &[u8],
-    ) -> Result<(u16, Value), String> {
-        let challenge = self.challenge().await?;
-        let body = json!({
-            "account": account,
-            "code": b64(code),
-            "credential": passkey.credential(),
-            "client_data": b64(&self.client_data("webauthn.create", &challenge)),
-            "auth_data": b64(&self.auth_data(0)),
-            "recovery": b64(&recovery_hash(new_code)),
-        });
-        self.post("recover", &body).await
-    }
-}
-
-/// A node with the public address `https://<host>/bridge4/testnetz` (its relying party) besides its loopback
-/// address, sealed `gateway,storage` at level 2 - a login node. `public`: with the public reader (frame pages) and
-/// level 3 (a website entrance).
-async fn login_node(net: &TestNet, host: &str, public: bool) -> Result<(TestNode, Entrance), String> {
-    let dir = tempfile::tempdir().map_err(e)?;
-    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(e)?;
-    let url = format!("http://{}", listener.local_addr().map_err(e)?);
-    let mut config = test_config(dir.path(), Some(net.membership(&[])), &url);
-    config.urls.push(format!("https://{host}/bridge4/testnetz"));
-    if public {
-        config.reader.access = ReaderAccess::Public;
-        config.server.trusted_proxies = vec![[127, 0, 0, 1].into()];
-    }
-    let node = bridge_node::start(config, listener).await?;
-    let node = TestNode { dir, node, url: url.clone() };
-    net.synced(&node).await?;
-    if public {
-        // A website entrance needs level 3 (docs/11 §13).
-        let services = bridge_node::admin::parse_services("gateway,storage")?;
-        net.admin.seal(&node.url, &node.id(), 3, services).await?;
-        bridge_tests::net::wait_for("node is a gateway", || node.status().gateway).await?;
-    } else {
-        net.seal_as(&node, "gateway,storage").await?;
-    }
-    let entrance = Entrance { url, rp_id: host.to_owned(), origin: format!("https://{host}") };
-    eventually("login is on", || async {
-        let info = entrance.info().await?;
-        if info["enabled"] == json!(true) { Ok(()) } else { Err(info.to_string()) }
-    })
-    .await?;
-    Ok((node, entrance))
-}
-
-fn code(seed: u8) -> Vec<u8> {
-    vec![seed; 15]
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn accounts_register_log_in_recover_and_reach_every_storage_node() -> TestResult {

@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+qrcodegen.workspace = true
 bridge-core.workspace = true
 bridge-store.workspace = true
 bridge-transport.workspace = true

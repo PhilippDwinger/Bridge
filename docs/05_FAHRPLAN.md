@@ -288,7 +288,7 @@ freigegeben).
    5 Fehlversuchen ungültig) und denselben Code als **QR-Code** (für Geräte ohne Kamera reicht der Code). Das neue Gerät
    gibt ihn ein, legt seinen eigenen Passkey an; beide zeigen dieselbe **Prüfzahl**, das alte Gerät bestätigt mit seinem
    Passkey (signierter Eintrag `add`, jeder Speicher-Knoten prüft die Unterschrift). „Meine Geräte“ zum Entfernen
-   (`remove`, ebenfalls signiert). Keine Passwörter.
+   (`remove`, ebenfalls signiert). Keine Passwörter. **Gebaut 14.11.2026** (docs/11 §14, ADR 0027 Nachtrag).
 4. **BridgeControll aktualisiert sich selbst**: „Update verfügbar“ lädt die neue Version von GitHub, prüft Paddys
    Signatur und ersetzt sich (kein ZIP von Hand mehr); Grundlage dafür, dass Knoten anderer nicht veralten.
 5. **Owner-Backup im eigenen Netz**: App-Schlüssel und Einstellungen des Owners, verschlüsselt mit einem Schlüssel aus

@@ -214,6 +214,7 @@ dependencies = [
  "bridge-store",
  "bridge-transport",
  "bridge-wasm",
+ "qrcodegen",
  "rand_core 0.6.4",
  "serde_json",
  "tempfile",

@@ -57,7 +57,10 @@ border-radius:6px}.bl-btn{display:block;width:100%;margin:.5rem 0;padding:.55rem
 #2448c8;border:0;border-radius:6px;cursor:pointer}.bl-btn:disabled{opacity:.6}.bl-err{color:#b3261e;min-height:1.2em;\
 margin:.4rem 0}.bl-muted{color:#5b6475;font-size:.9rem;margin:.3rem 0}.bl-code{font:600 1.05rem ui-monospace,monospace;\
 word-break:break-all;background:#f0f2f7;padding:.4rem;border-radius:6px;margin:.2rem 0 .6rem}.bl-more{margin-top:1rem}\
-.bl-close{color:#2448c8;margin-top:.5rem}";
+.bl-close{color:#2448c8;margin-top:.5rem}.bl-big{font:700 1.6rem ui-monospace,monospace;letter-spacing:.08em;\
+text-align:center;margin:.6rem 0}.bl-qr{display:block;width:180px;height:180px;margin:.4rem auto}.bl-dev{display:flex;\
+gap:.6rem;align-items:center;padding:.45rem 0;border-bottom:1px solid #e3e6ee}.bl-dev span:first-child{flex:1}\
+.bl-danger{color:#b3261e}.bl-choice .bl-btn{margin-top:.2rem}";
 
 impl Node {
     /// Whether the app of `owner` may go to this request (docs/11 §4): always for callers on this PC and in the

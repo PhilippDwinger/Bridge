@@ -16,6 +16,9 @@
   var cached = null;
   var asked = false;
   var dialog = null;
+  var mine = null; // the passkey this page logged in with (Base64url)
+  var polling = 0; // the poll running now (a new dialog stops the old one)
+  var pairFromLink = null; // a pairing code from #koppeln=… (QR code)
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -106,13 +109,13 @@
     return !!(window.PublicKeyCredential && navigator.credentials && window.crypto && crypto.subtle);
   }
 
-  // A new passkey for `name` at this network's login (create ceremony).
-  async function newPasskey(name) {
+  // A new passkey for `name` at this network's login (create ceremony; `given`: a challenge from the node).
+  async function newPasskey(name, given) {
     var credential = await navigator.credentials.create({
       publicKey: {
         rp: { id: info.rp_id, name: "Bridge Login" },
         user: { id: crypto.getRandomValues(new Uint8Array(16)), name: name, displayName: name },
-        challenge: await challenge(),
+        challenge: given || (await challenge()),
         pubKeyCredParams: [
           { type: "public-key", alg: -7 },
           { type: "public-key", alg: -8 },
@@ -141,6 +144,7 @@
     made.name = name;
     made.recovery = b64(await recoveryHash(code));
     var answer = await call("register", made);
+    mine = made.credential.id;
     await loggedIn(answer);
     showCode(answer.account, code);
   }
@@ -156,8 +160,34 @@
       auth_data: b64(response.authenticatorData),
       signature: b64(response.signature),
     });
+    mine = b64(credential.rawId);
     await loggedIn(answer);
     closeDialog();
+  }
+
+  // A passkey of the account signs `challengeText` (an entry of the account: a device more or less).
+  async function approval(challengeText) {
+    var credential = await navigator.credentials.get({
+      publicKey: { challenge: unb64(challengeText), rpId: info.rp_id, userVerification: "preferred", timeout: 120000 },
+    });
+    var response = credential.response;
+    return {
+      credential_id: b64(credential.rawId),
+      client_data: b64(response.clientDataJSON),
+      auth_data: b64(response.authenticatorData),
+      signature: b64(response.signature),
+    };
+  }
+
+  function joined(base, extra) {
+    for (var key in extra) if (Object.prototype.hasOwnProperty.call(extra, key)) base[key] = extra[key];
+    return base;
+  }
+
+  function wait(ms) {
+    return new Promise(function (done) {
+      setTimeout(done, ms);
+    });
   }
 
   async function recover(account, oldCode) {
@@ -171,6 +201,7 @@
     made.code = b64(old);
     made.recovery = b64(await recoveryHash(code));
     var answer = await call("recover", made);
+    mine = made.credential.id;
     await loggedIn(answer);
     showCode(answer.account, code);
   }
@@ -187,6 +218,7 @@
     session = null;
     who = null;
     cached = null;
+    mine = null;
     bar();
     send({ bridge: "login", user: null });
   }
@@ -215,6 +247,10 @@
     root.textContent = "";
     if (who) {
       root.appendChild(el("span", "", who.name));
+      var devices = el("button", "bl-link", "Geräte");
+      devices.type = "button";
+      devices.addEventListener("click", devicesDialog);
+      root.appendChild(devices);
       var out = el("button", "bl-link", "Abmelden");
       out.type = "button";
       out.addEventListener("click", logout);
@@ -230,6 +266,7 @@
   }
 
   function closeDialog() {
+    polling++;
     if (dialog) dialog.remove();
     dialog = null;
     if (asked && !session) send({ bridge: "login", user: null });
@@ -291,6 +328,39 @@
           error,
         ),
       );
+      var pair = el("details", "bl-more");
+      pair.appendChild(el("summary", "", "Konto schon auf einem anderen Gerät? Verbinden"));
+      pair.appendChild(
+        el(
+          "p",
+          "bl-muted",
+          "Auf dem anderen Gerät: Geräte → „Gerät hinzufügen“. Den Code hier eingeben (oder den QR-Code scannen).",
+        ),
+      );
+      var pairCode = el("input");
+      pairCode.maxLength = 12;
+      pairCode.spellcheck = false;
+      pairCode.autocomplete = "off";
+      var label = el("input");
+      label.maxLength = 40;
+      label.value = "Neues Gerät";
+      pair.appendChild(field("Code", pairCode));
+      pair.appendChild(field("Name dieses Geräts", label));
+      pair.appendChild(
+        action(
+          "Verbinden",
+          function () {
+            return joinAccount(pairCode.value, label.value.trim() || "Neues Gerät");
+          },
+          error,
+        ),
+      );
+      if (pairFromLink) {
+        pair.open = true;
+        pairCode.value = pairFromLink;
+        pairFromLink = null;
+      }
+      box.appendChild(pair);
       var more = el("details", "bl-more");
       more.appendChild(el("summary", "", "Passkey verloren? Konto wiederherstellen"));
       var account = el("input");
@@ -318,6 +388,212 @@
     close.addEventListener("click", closeDialog);
     box.appendChild(close);
     document.body.appendChild(dialog);
+  }
+
+  // A dialog box (replacing the open one); returns the box.
+  function box(title) {
+    if (dialog) dialog.remove();
+    polling++;
+    dialog = el("div", "bl-shade");
+    var inner = el("div", "bl-box");
+    inner.setAttribute("role", "dialog");
+    inner.setAttribute("aria-label", title);
+    dialog.appendChild(inner);
+    inner.appendChild(el("h2", "", title));
+    document.body.appendChild(dialog);
+    return inner;
+  }
+
+  function closer(inner, text) {
+    var close = el("button", "bl-link bl-close", text || "Schließen");
+    close.type = "button";
+    close.addEventListener("click", closeDialog);
+    inner.appendChild(close);
+    return close;
+  }
+
+  // B: joins with a code, makes its own passkey, shows the check digits and waits for the other device.
+  async function joinAccount(codeText, label) {
+    var joinedAnswer = await call("pair/join", { code: codeText, label: label });
+    var made = await newPasskey(joinedAnswer.name || label, unb64(joinedAnswer.challenge));
+    made.ticket = joinedAnswer.ticket;
+    var offered = await call("pair/offer", made);
+    var inner = box("Bestätigen");
+    inner.appendChild(el("p", "", "Bestätige auf deinem anderen Gerät, wenn dort dieselbe Prüfzahl steht:"));
+    inner.appendChild(el("p", "bl-big", offered.check.split("").join(" ")));
+    var state = el("p", "bl-muted", "Warte auf das andere Gerät …");
+    inner.appendChild(state);
+    closer(inner, "Abbrechen");
+    var mineNow = ++polling;
+    try {
+      while (mineNow === polling) {
+        await wait(2000);
+        if (mineNow !== polling) return;
+        var answer = await call("pair/wait", { ticket: joinedAnswer.ticket });
+        if (answer.state === "done") {
+          mine = made.credential.id;
+          await loggedIn(answer);
+          closeDialog();
+          return;
+        }
+        if (answer.state === "cancelled" || answer.state === "expired") {
+          throw new Error(answer.state === "cancelled" ? "Das andere Gerät hat abgelehnt." : "Der Code ist abgelaufen.");
+        }
+      }
+    } catch (problem) {
+      state.textContent = (problem && problem.message) || "Fehler";
+      state.className = "bl-err";
+    }
+  }
+
+  async function devicesDialog() {
+    var inner = box("Meine Geräte");
+    var error = el("p", "bl-err");
+    var list = el("div", "bl-devs");
+    inner.appendChild(list);
+    async function load(answer) {
+      var data = answer || (await call("devices", { session: session }));
+      list.textContent = "";
+      data.devices.forEach(function (device) {
+        var row = el("div", "bl-dev");
+        var text = el("span", "", device.label + (device.id === mine ? " (dieses Gerät)" : ""));
+        row.appendChild(text);
+        row.appendChild(el("span", "bl-muted", new Date(device.added).toLocaleDateString("de-DE")));
+        if (data.devices.length > 1) {
+          row.appendChild(
+            action(
+              "Entfernen",
+              async function () {
+                var prepared = await call("remove/prepare", { session: session, target: device.id });
+                var signed = await approval(prepared.challenge);
+                var after = await call("remove", joined({ session: session }, signed));
+                if (device.id === mine) {
+                  logout();
+                  closeDialog();
+                  return;
+                }
+                await load(after);
+              },
+              error,
+            ),
+          );
+          row.lastChild.className = "bl-link bl-danger";
+        }
+        list.appendChild(row);
+      });
+    }
+    try {
+      await load();
+    } catch (problem) {
+      error.textContent = (problem && problem.message) || "Fehler";
+    }
+    inner.appendChild(action("Gerät hinzufügen", pairingDialog, error));
+    inner.appendChild(error);
+    closer(inner);
+  }
+
+  function qrPicture(qr) {
+    var ns = "http://www.w3.org/2000/svg";
+    var full = qr.size + 8;
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 " + full + " " + full);
+    svg.setAttribute("class", "bl-qr");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "QR-Code");
+    var back = document.createElementNS(ns, "rect");
+    back.setAttribute("width", String(full));
+    back.setAttribute("height", String(full));
+    back.setAttribute("fill", "#fff");
+    svg.appendChild(back);
+    var d = "";
+    for (var y = 0; y < qr.size; y++) {
+      for (var x = 0; x < qr.size; x++) {
+        if (qr.modules.charAt(y * qr.size + x) === "1") d += "M" + (x + 4) + "," + (y + 4) + "h1v1h-1z";
+      }
+    }
+    var path = document.createElementNS(ns, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "#000");
+    svg.appendChild(path);
+    return svg;
+  }
+
+  // A: shows a code and its QR code, waits for the new device, compares the check digits, approves.
+  async function pairingDialog() {
+    var started = await call("pair/start", { session: session, link: location.href.split("#")[0] });
+    var inner = box("Gerät hinzufügen");
+    var shown = el("div", "");
+    shown.appendChild(
+      el(
+        "p",
+        "",
+        "Auf dem neuen Gerät diese Seite öffnen → Anmelden → „Verbinden“ und den Code eingeben – oder den QR-Code " +
+          "scannen.",
+      ),
+    );
+    shown.appendChild(el("p", "bl-big", started.code));
+    shown.appendChild(qrPicture(started.qr));
+    inner.appendChild(shown);
+    var state = el("p", "bl-muted", "");
+    inner.appendChild(state);
+    var error = el("p", "bl-err");
+    var choice = el("div", "bl-choice");
+    inner.appendChild(choice);
+    inner.appendChild(error);
+    var cancel = closer(inner, "Abbrechen");
+    var mineNow = ++polling;
+    try {
+      await watchPairing(mineNow, started, { state: state, shown: shown, choice: choice, error: error, cancel: cancel });
+    } catch (problem) {
+      error.textContent = (problem && problem.message) || "Fehler";
+    }
+  }
+
+  async function watchPairing(mineNow, started, parts) {
+    var state = parts.state;
+    var choice = parts.choice;
+    while (mineNow === polling) {
+      var left = Math.max(0, Math.round((started.exp - Date.now()) / 1000));
+      state.textContent = "Gilt noch " + Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0") + " Minuten.";
+      var status = await call("pair/status", { session: session, code: started.code });
+      if (mineNow !== polling) return;
+      if (status.state === "expired" || status.state === "cancelled") {
+        state.textContent = "Der Code ist abgelaufen.";
+        return;
+      }
+      if (status.state === "offered") {
+        state.textContent = "";
+        parts.shown.remove();
+        choice.textContent = "";
+        choice.appendChild(el("p", "", "Neues Gerät „" + status.label + "“. Steht dort dieselbe Prüfzahl?"));
+        choice.appendChild(el("p", "bl-big", status.check.split("").join(" ")));
+        choice.appendChild(
+          action(
+            "Ja, hinzufügen",
+            async function () {
+              var signed = await approval(status.challenge);
+              await call("pair/approve", joined({ session: session, code: started.code }, signed));
+              choice.textContent = "";
+              choice.appendChild(el("p", "", "Hinzugefügt – das neue Gerät ist jetzt angemeldet."));
+              parts.cancel.remove();
+              var done = el("button", "bl-btn", "Fertig");
+              done.type = "button";
+              done.addEventListener("click", devicesDialog);
+              choice.appendChild(done);
+            },
+            parts.error,
+          ),
+        );
+        var no = el("button", "bl-link bl-close", "Nein, ablehnen");
+        no.type = "button";
+        no.addEventListener("click", function () {
+          call("pair/cancel", { session: session, code: started.code }).then(closeDialog, closeDialog);
+        });
+        choice.appendChild(no);
+        return;
+      }
+      await wait(2000);
+    }
   }
 
   function showCode(account, code) {
@@ -382,12 +658,19 @@
     if (info && info.enabled) tell();
   });
 
+  // A QR code of a pairing (…#koppeln=CODE): take the code, forget the hash, open "Verbinden".
+  if (location.hash.indexOf("#koppeln=") === 0) {
+    pairFromLink = decodeURIComponent(location.hash.slice(9)).slice(0, 12);
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+
   call("info")
     .then(function (answer) {
       info = answer;
       if (info.enabled) {
         bar();
         tell();
+        if (pairFromLink && !session) openDialog();
       }
     })
     .catch(function () {

@@ -220,7 +220,7 @@ gebannt):
   `postMessage`, die Hülle antwortet mit Nutzer-ID, Anzeigename und einem **App-Zeichen** (9.4).
 - **Relying Party** (WebAuthn): der Host der öffentlichen Adresse des Knotens (z. B. `muttchen.tail91b057.ts.net`);
   erlaubter Ursprung genau `https://<host>[:port]`. Ein Passkey gilt damit für diesen Eingang (Host); weitere PCs als
-  Eingänge brauchen eigene Passkeys oder später eine gemeinsame Domain.
+  Eingänge brauchen eigene Passkeys oder später eine gemeinsame Domain. Weitere Geräte für dasselbe Konto: §14.
 
 ### 9.3 Konten-Einträge (selbst-beglaubigt, abgeglichen zwischen Speicher-Knoten)
 Ein Konto ist eine Folge von Einträgen; **jeder Speicher-Knoten prüft jeden Eintrag selbst** – ein Knoten kann kein
@@ -229,13 +229,14 @@ fremdes Konto übernehmen (`bridge-core::login`):
   `account = H("bridge4/login/account" ‖ key ‖ H(code))` (Base32, 20 Byte). Der Anzeigename (1–40 Zeichen, keine
   Steuerzeichen, Leerzeichen am Rand werden entfernt) ist **nicht** eindeutig.
 - `recover` (Version + 1): neuer Passkey und neuer `H(code)`, belegt mit dem **alten Code im Klartext** – danach ist der
-  alte Code wertlos, der alte Passkey ebenso. Ein Konto hat in v1 **genau einen Passkey** (weitere Passkeys pro Konto
-  später).
+  alte Code wertlos, **alle** bisherigen Passkeys ebenso (das Konto hat danach genau ein Gerät, „Gerät 1“).
+- `add` / `remove` (Version + 1): ein weiteres Gerät bzw. eines weniger, unterschrieben von einem Passkey des Kontos
+  (§14). Ein Konto hat 1–8 Geräte, jedes mit eigenem Passkey.
 - Ein Passkey gehört zu genau einem Konto. Gültig ist immer die nächste Version; Speicher-Knoten holen alle paar
   Sekunden bei bis zu 8 anderen Speicher-Knoten die Einträge seit ihrem Stand (`POST /v4/node/accounts`, signierte
   Knoten-Anfrage, Antwort höchstens 200 Einträge) und prüfen jeden. Grenzen: 100.000 Konten je Netz und Knoten,
-  Einträge ≤ 8 KiB. Gespeichert in der Datenbank des Knotens (Schema 14: Konten, Einträge in Ankunftsreihenfolge,
-  Signatur-Zähler).
+  Einträge ≤ 16 KiB. Gespeichert in der Datenbank des Knotens (Schema 14: Konten, Einträge in Ankunftsreihenfolge,
+  Signatur-Zähler; Schema 15: Tabelle `login_credentials` – welcher Passkey zu welchem Konto gehört).
 
 ### 9.4 Anmelden, Sitzung, App-Zeichen
 - `GET /v4/login/info` → `{enabled, reason, rp_id, origin, login_nodes}`.
@@ -332,3 +333,65 @@ Knoten ihn erreichen. Dafür braucht er eine eigene öffentliche Adresse – Web
   Neu gestartet wird es nur, wenn es nicht läuft.
 - Tests: e2e `phase7_public` (Stufe 2 nur Protokoll, mit Stufe 3 Websites), Tor (neue Routen ohne Neustart, kaputte
   Datei), BridgeControll (zweiter PC macht seinen Knoten erreichbar: Protokoll durch sein Tor, keine Websites).
+
+## 14. Phase 8, Schritt 3: Ein Konto auf mehreren Geräten (gebaut 14.11.2026)
+Paddy: dasselbe Konto auf PC und Handy – ohne die Windows-/Google-Fenster für Passkeys fremder Geräte. Jedes Gerät
+bekommt deshalb **seinen eigenen Passkey**; ein Gerät, das schon angemeldet ist, nimmt das neue ins Konto auf.
+
+### 14.1 Einträge `add` und `remove`
+- `add` `{op, v, account, cred:{id, alg, key}, label, at, approval}`: neues Gerät mit Namen (1–40 Zeichen wie der
+  Anzeigename), höchstens 8 Geräte, ein Passkey nur einmal (auch nicht in einem anderen Konto).
+- `remove` `{op, v, account, target, at, approval}`: der Passkey `target` geht; das letzte Gerät bleibt immer.
+- `approval` `{cred, client_data, auth_data, sig}`: eine WebAuthn-Anmeldung (`webauthn.get`) eines **Passkeys, den das
+  Konto schon hat**, über die Challenge `H("bridge4/login/approve\n" ‖ kanonischer Eintrag ohne approval)`. Jeder
+  Speicher-Knoten prüft selbst: Passkey gehört zum Konto, Zeremonie, Challenge, Flag „User Present“, Signatur. Ursprung
+  und Relying Party prüft nur der Eingang, der den Eintrag annimmt (wie bei `create`). Ein Knoten kann also kein Gerät
+  in ein fremdes Konto schmuggeln und keines entfernen.
+- Gespeicherte Form des Kontos: `devices:[{cred, label, added}]` (die alte Form mit einem `cred` wird weiter gelesen).
+
+### 14.2 Gerät hinzufügen (A: angemeldet, B: neues Gerät)
+1. A: **„Geräte“ → „Gerät hinzufügen“** – `POST /v4/login/pair/start {session, link}` → **Kopplungs-Code**: 8 Zeichen
+   aus `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (ohne Verwechsler 0/O, 1/I/L), gezeigt als `XXXX-XXXX`, 5 Minuten gültig,
+   genau einmal; dazu derselbe Code als **QR-Code** von `<link>#koppeln=<code>`. `link` muss eine Seite des eigenen
+   Eingangs sein (≤ 512 Zeichen); der Teil nach `#` geht nie an einen Server.
+2. B: öffnet dieselbe Website → Anmelden → **„Konto schon auf einem anderen Gerät? Verbinden“**, gibt den Code ein
+   (Groß/klein, Leerzeichen und `-` egal) und einen Gerätenamen – oder scannt den QR-Code, dann steht der Code schon
+   drin. `pair/join {code, label}` → Ticket (16 Byte), Challenge, Kontoname. **Falsche Codes: höchstens 5 je Adresse
+   in 10 Minuten**, dann `429`.
+3. B legt **seinen eigenen Passkey** an (`webauthn.create` mit dieser Challenge, geprüft wie beim Registrieren) –
+   `pair/offer {ticket, credential, client_data, auth_data}` → **Prüfzahl**: 3 Ziffern aus
+   `H("bridge4/login/pair\n" ‖ ticket ‖ öffentlicher Schlüssel)`.
+4. A sieht (`pair/status`) den Gerätenamen und dieselbe Prüfzahl. Stimmt sie, bestätigt A mit **seinem** Passkey
+   (`pair/approve`, signiert den `add`-Eintrag) – oder lehnt ab (`pair/cancel`). Die Prüfzahl verhindert, dass jemand,
+   der den Code mitgelesen hat, schneller ist und sein eigenes Gerät unterschieben lässt.
+5. B fragt alle 2 Sekunden (`pair/wait {ticket}`) und bekommt nach der Bestätigung seine Sitzung – angemeldet. Danach
+   meldet sich B mit seinem eigenen Passkey an, A weiter mit seinem.
+
+Alles Offene (Codes, Tickets, Fehlversuche) liegt nur im RAM des Eingangs, höchstens 10.000 je Art; A und B müssen
+denselben Eingang benutzen.
+
+### 14.3 Meine Geräte
+- `POST /v4/login/devices {session}` → Name und Geräte (Name, hinzugefügt am); die Leiste zeigt „Geräte“ neben
+  „Abmelden“ und markiert „(dieses Gerät)“.
+- **Entfernen**: `remove/prepare {session, target}` → Challenge (2 min) des `remove`-Eintrags;
+  `remove {session, credential_id, client_data, auth_data, signature}` mit einem Passkey des Kontos → Eintrag. Wer
+  das eigene Gerät entfernt, ist danach abgemeldet. Ein verlorenes Gerät entfernt man von einem anderen; sind alle weg,
+  hilft der Wiederherstellungs-Code (§9.3, danach hat das Konto wieder nur ein Gerät).
+
+### 14.4 Restrisiken
+- Wer Code **und** Prüfzahl von einem fremden Bildschirm abliest und A zum Bestätigen bringt, hat ein Gerät im Konto –
+  dagegen hilft nur, die Prüfzahl wirklich zu vergleichen; „Meine Geräte“ zeigt jedes Gerät mit Namen und Datum.
+- Ein Passkey gilt weiter nur für den Host eines Eingangs (§9.2); für einen zweiten Eingang braucht jedes Gerät dort
+  einen eigenen Passkey (später: gemeinsame Domain).
+
+### 14.5 Abnahme Schritt 3
+- Kern (`bridge-core::login`): `add`/`remove` nur mit Unterschrift eines Passkeys des Kontos (nicht der neue selbst,
+  kein fremder, keine andere Challenge, keine falsche Zeremonie), höchstens 8, letztes bleibt, `recover` wirft alle
+  anderen hinaus, alte gespeicherte Form lesbar. Speicher: Passkey → Konto über `login_credentials`, Entfernen gibt ihn
+  frei.
+- e2e (`tests/e2e/tests/phase8_devices.rs`): koppeln, Prüfzahl, bestätigen, B meldet sich mit eigenem Passkey an, der
+  `add`-Eintrag erreicht den zweiten Speicher-Knoten, entfernen, letztes Gerät bleibt, ablehnen; Angriffe (Link eines
+  fremden Ursprungs, Code zweimal, der neue Passkey bestätigt sich selbst, ein fremdes Konto bestätigt, Code raten →
+  `429`, ohne Sitzung `401`).
+- In Chromium mit zwei virtuellen Authenticatoren geprüft (A zeigt Code und QR-Code, B öffnet `#koppeln=…`, gleiche
+  Prüfzahl, A bestätigt, beide Apps sehen dieselbe Nutzer-ID, B meldet sich neu an, A entfernt „Handy“).

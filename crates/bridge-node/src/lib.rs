@@ -23,6 +23,7 @@ mod appserver;
 mod blobs;
 mod blocklists;
 mod compute;
+mod devices;
 mod error;
 pub mod keyfile;
 mod lan;

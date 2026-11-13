@@ -14,8 +14,14 @@
   `bridge-core::crypto` (Invariante: Krypto nur dort; Signieren nur im Test-Feature `test-vectors`).
 - **Umfang v1** (gebaut 13.11.2026): ein Passkey je Konto, Einträge `create` und `recover`; Login an einem Knoten, der
   selbst Speicher-Knoten mit öffentlicher `https`-Adresse ist (BridgeControll: „Login hier einschalten“); Sitzung nur
-  im Speicher der Hülle (kein Browser-Speicher, `Cross-Origin-Opener-Policy: same-origin`). Später: mehrere Passkeys je
-  Konto, angemeldet bleiben, gemeinsame Domain für mehrere Eingänge.
+  im Speicher der Hülle (kein Browser-Speicher, `Cross-Origin-Opener-Policy: same-origin`). Später: angemeldet
+  bleiben, gemeinsame Domain für mehrere Eingänge.
+- **Nachtrag 14.11.2026 – mehrere Geräte** (Phase 8, Schritt 3, docs/11 §14): 1–8 Passkeys je Konto, jedes Gerät mit
+  eigenem Passkey (keine Passkey-Fenster für fremde Geräte). Neue Einträge `add`/`remove`, unterschrieben von einem
+  Passkey, den das Konto schon hat – jeder Speicher-Knoten prüft das selbst. Gekoppelt wird mit einem Kopplungs-Code
+  (8 Zeichen, 5 min, einmal; auch als QR-Code) und einer Prüfzahl, die beide Geräte zeigen. Verworfen: den Passkey
+  selbst teilen (geht nur innerhalb eines Anbieters wie Google/Apple), Hybrid-Anmeldung per Bluetooth (das sind die
+  Fenster, die Paddy stören), ein zweiter Wiederherstellungs-Code je Gerät (wäre ein Passwort).
 - **Alternativen**: Passwörter mit Argon2 (stehlbar, Phishing); Login per E-Mail (fremder Dienst, kostet); OAuth bei
   großen Anbietern (fremd, Tracking); Konten im Transparenz-Log (öffentlich, bläht das Log auf).
 - **Folgen**: Kein Geheimnis auf dem Server; ein Speicher-Knoten kann kein Konto übernehmen (nur verweigern). Ein

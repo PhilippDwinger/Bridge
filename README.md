@@ -88,6 +88,9 @@ mit seinen Knoten schafft (Nachrichten, Websites, Speicher, Rechnen, Login, Wäc
 den öffentlichen Owner-Knoten zusätzlich zum Speicher-Knoten: Besucher legen dann in der Leiste jeder Website ein Konto
 mit **Passkey** an (ohne Passwort, ohne E-Mail, Wiederherstellungs-Code zum Aufschreiben). Mit einem zweiten
 Speicher-Knoten (anderer PC, beim Siegeln „Speicher“ ankreuzen) wird die Ampel grün und die Konten liegen doppelt.
+**Weitere Geräte** (docs/11 §14): angemeldet auf „Geräte“ → „Gerät hinzufügen“ zeigt einen Code (und QR-Code); auf dem
+Handy dieselbe Website öffnen → Anmelden → „Verbinden“, Code eingeben, eigenen Passkey anlegen, auf beiden Geräten
+dieselbe Prüfzahl vergleichen und am ersten Gerät bestätigen. Dort lassen sich Geräte auch wieder entfernen.
 Eine App fragt die Leiste per `postMessage` und bekommt eine Nutzer-ID nur für sich plus ein Zeichen für ihren
 Server-Code:
 

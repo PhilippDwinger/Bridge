@@ -45,7 +45,7 @@ const MAX_TRACKED: usize = 10_000;
 /// Entries per exchange answer.
 const ENTRIES_PER_ANSWER: usize = 200;
 /// Largest login request body.
-const MAX_LOGIN_BODY: usize = 16 * 1024;
+pub(crate) const MAX_LOGIN_BODY: usize = 16 * 1024;
 /// Hour in ms.
 const HOUR_MS: i64 = 3600 * 1000;
 
@@ -53,15 +53,17 @@ const HOUR_MS: i64 = 3600 * 1000;
 #[derive(Default)]
 pub(crate) struct LoginState {
     challenges: Mutex<HashMap<[u8; 32], i64>>,
+    /// Devices being added and entries waiting for their approval (`devices.rs`).
+    pub(crate) devices: crate::devices::DeviceState,
     registrations: Mutex<HashMap<IpAddr, (i64, u32)>>,
     since: Mutex<HashMap<Id, i64>>,
 }
 
-fn field<'a>(body: &'a Map<String, Value>, name: &str) -> NodeResult<&'a str> {
+pub(crate) fn field<'a>(body: &'a Map<String, Value>, name: &str) -> NodeResult<&'a str> {
     body.get(name).and_then(Value::as_str).ok_or_else(|| NodeError::bad_format(format!("{name} missing")))
 }
 
-fn credential_of(value: Option<&Value>) -> NodeResult<Credential> {
+pub(crate) fn credential_of(value: Option<&Value>) -> NodeResult<Credential> {
     let object = value.and_then(Value::as_object).ok_or_else(|| NodeError::bad_format("credential missing"))?;
     let text = |name: &str| object.get(name).and_then(Value::as_str).unwrap_or_default();
     let alg = object.get("alg").and_then(Value::as_i64).ok_or_else(|| NodeError::bad_format("credential.alg"))?;
@@ -73,7 +75,7 @@ fn credential_of(value: Option<&Value>) -> NodeResult<Credential> {
 }
 
 /// The challenge inside client data (Base64url) - only to find it; [`check_client_data`] compares exactly.
-fn challenge_of(client_data: &[u8]) -> NodeResult<[u8; 32]> {
+pub(crate) fn challenge_of(client_data: &[u8]) -> NodeResult<[u8; 32]> {
     let value: Value = serde_json::from_slice(client_data).map_err(|_| NodeError::bad_format("client data"))?;
     let text = value.get("challenge").and_then(Value::as_str).unwrap_or_default();
     Ok(b64_fixed::<32>(text, "challenge")?)
@@ -98,7 +100,7 @@ impl Node {
         None
     }
 
-    fn login_ready(&self, now: i64) -> NodeResult<(String, String)> {
+    pub(crate) fn login_ready(&self, now: i64) -> NodeResult<(String, String)> {
         if let Some(reason) = self.login_blocker(now) {
             return Err(NodeError::forbidden(reason));
         }
@@ -118,6 +120,7 @@ impl Node {
             (Method::Post, "/v4/login/assert") => self.login_assert(request, now).await,
             (Method::Post, "/v4/login/recover") => self.login_recover(request, now).await,
             (Method::Post, "/v4/login/app") => self.login_app(request, now).await,
+            (Method::Post, path) => self.route_devices(path, request, now).await,
             _ => Err(NodeError::not_found()),
         }
     }
@@ -131,6 +134,12 @@ impl Node {
 
     fn login_challenge(&self, now: i64) -> NodeResult<Vec<u8>> {
         self.login_ready(now)?;
+        let challenge = self.new_challenge(now)?;
+        Ok(json!({"challenge": b64(&challenge)}).to_string().into_bytes())
+    }
+
+    /// A fresh challenge of this node (2 minutes, once).
+    pub(crate) fn new_challenge(&self, now: i64) -> NodeResult<[u8; 32]> {
         let mut challenge = [0u8; 32];
         OsRng.fill_bytes(&mut challenge);
         let mut open = lock(&self.inner.login.challenges);
@@ -139,16 +148,21 @@ impl Node {
             return Err(NodeError { retry_after: Some(10), ..NodeError::new(429, "RATE_LIMITED", "too many logins") });
         }
         open.insert(challenge, now.saturating_add(CHALLENGE_MS));
-        Ok(json!({"challenge": b64(&challenge)}).to_string().into_bytes())
+        Ok(challenge)
     }
 
     /// Takes a challenge (once): whether it was handed out here and is still good.
-    fn take_challenge(&self, challenge: &[u8; 32], now: i64) -> bool {
+    pub(crate) fn take_challenge(&self, challenge: &[u8; 32], now: i64) -> bool {
         lock(&self.inner.login.challenges).remove(challenge).is_some_and(|expires| expires > now)
     }
 
     /// Checks client and authenticator data of a ceremony (`kind`) against a challenge of this node.
-    fn check_ceremony(&self, body: &Map<String, Value>, kind: &str, now: i64) -> NodeResult<(Vec<u8>, Vec<u8>, u32)> {
+    pub(crate) fn check_ceremony(
+        &self,
+        body: &Map<String, Value>,
+        kind: &str,
+        now: i64,
+    ) -> NodeResult<(Vec<u8>, Vec<u8>, u32)> {
         let (rp_id, origin) = self.login_ready(now)?;
         let client = b64_var(field(body, "client_data")?, "client_data", MAX_CLIENT_DATA)?;
         let auth = b64_var(field(body, "auth_data")?, "auth_data", MAX_AUTH_DATA)?;
@@ -189,7 +203,8 @@ impl Node {
             .await?
             .ok_or_else(|| NodeError::forbidden("unknown passkey"))?;
         let account = Account::from_value(&serde_json::from_str(&state).map_err(|_| NodeError::unavailable())?)?;
-        account.credential.verify_assertion(&auth, &client, &signature)?;
+        let device = account.device(&cred_id).ok_or_else(|| NodeError::forbidden("unknown passkey"))?;
+        device.credential.verify_assertion(&auth, &client, &signature)?;
         let (counter_net, counter_id) = (net.clone(), cred_id.clone());
         let seen = self.blocking(move |store| store.login_counter(&counter_net, &counter_id)).await?;
         if (count > 0 || seen > 0) && count <= seen {
@@ -249,7 +264,7 @@ impl Node {
     }
 
     /// A session for `account`, signed here.
-    fn session_token(&self, account: &Id, now: i64) -> NodeResult<String> {
+    pub(crate) fn session_token(&self, account: &Id, now: i64) -> NodeResult<String> {
         let statement = Statement::sign(
             &Draft {
                 kind: SESSION_KIND,
@@ -264,7 +279,7 @@ impl Node {
     }
 
     /// The issuer of a token must be a storage node with level ≥ 2 now, and the token signed by it.
-    fn verify_issuer(&self, statement: &Statement, issuer: &Id, now: i64) -> NodeResult<()> {
+    pub(crate) fn verify_issuer(&self, statement: &Statement, issuer: &Id, now: i64) -> NodeResult<()> {
         let card: Option<KeyCard> = self.with_core(|core| {
             core.state.login_nodes(now).into_iter().find(|(id, _)| id == issuer).and_then(|(_, card)| card)
         })?;
@@ -309,7 +324,7 @@ impl Node {
     }
 
     /// The account as stored here.
-    async fn account(&self, id: &Id) -> NodeResult<Option<Account>> {
+    pub(crate) async fn account(&self, id: &Id) -> NodeResult<Option<Account>> {
         let (net, account) = (self.inner.net.to_string(), id.to_string());
         let stored = self.blocking(move |store| store.login_account(&net, &account)).await?;
         match stored {
@@ -321,18 +336,22 @@ impl Node {
     }
 
     /// Checks an entry against the stored account and stores it with the new state.
-    async fn apply_entry(&self, entry: &Entry) -> NodeResult<Account> {
+    pub(crate) async fn apply_entry(&self, entry: &Entry) -> NodeResult<Account> {
         let current = self.account(entry.account()).await?;
-        let next = entry.apply(current.as_ref()).map_err(|error| match error {
-            bridge_core::CoreError::BadSignature => NodeError::forbidden("recovery code does not fit"),
-            other => NodeError::from(other),
+        let next = entry.apply(current.as_ref()).map_err(|error| match (error, entry) {
+            (bridge_core::CoreError::BadSignature, Entry::Recover { .. }) => {
+                NodeError::forbidden("recovery code does not fit")
+            }
+            (bridge_core::CoreError::BadSignature, _) => NodeError::forbidden("not signed by a passkey of the account"),
+            (other, _) => NodeError::from(other),
         })?;
         let bytes = entry.to_bytes()?;
         let state = next.to_value().to_string();
-        let (net, account, cred_id, version, updated) =
-            (self.inner.net.to_string(), next.id.to_string(), next.credential.id.clone(), next.version, next.updated);
+        let cred_ids: Vec<Vec<u8>> = next.devices.iter().map(|device| device.credential.id.clone()).collect();
+        let (net, account, version, updated) =
+            (self.inner.net.to_string(), next.id.to_string(), next.version, next.updated);
         let applied = self
-            .blocking(move |store| store.login_apply(&net, &account, version, &cred_id, &state, &bytes, updated))
+            .blocking(move |store| store.login_apply(&net, &account, version, &cred_ids, &state, &bytes, updated))
             .await?;
         match applied {
             LoginApplied::Applied | LoginApplied::Known => Ok(next),

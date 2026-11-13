@@ -153,6 +153,30 @@ pub fn check_auth_data(bytes: &[u8], rp_id: &str) -> CoreResult<AuthData> {
     Ok(AuthData { rp_id_hash, flags, sign_count })
 }
 
+/// Checks the WebAuthn data of an **approval** - a passkey signing an account entry (docs/11 §14): client data of
+/// type `webauthn.get` over exactly `challenge`, not cross-origin, authenticator data with "user present". Origin and
+/// RP ID are checked by the node that took the ceremony (each entrance has its own); the signature binds the entry.
+pub fn check_approval(client_data: &[u8], auth_data: &[u8], challenge: &[u8]) -> CoreResult<()> {
+    if client_data.len() > MAX_CLIENT_DATA {
+        return Err(CoreError::TooLarge("client data".into()));
+    }
+    let value: Value = serde_json::from_slice(client_data).map_err(|_| CoreError::format("client data: not JSON"))?;
+    let field = |name: &str| value.get(name).and_then(Value::as_str);
+    if field("type") != Some("webauthn.get") {
+        return Err(CoreError::format("approval: wrong type"));
+    }
+    if field("challenge") != Some(b64(challenge).as_str()) {
+        return Err(CoreError::format("approval: not for this entry"));
+    }
+    if value.get("crossOrigin").and_then(Value::as_bool) == Some(true) {
+        return Err(CoreError::format("approval: cross-origin"));
+    }
+    if auth_data.len() < 37 || auth_data.len() > MAX_AUTH_DATA || auth_data[32] & FLAG_UP == 0 {
+        return Err(CoreError::format("approval: authenticator data"));
+    }
+    Ok(())
+}
+
 /// The relying party of a node's public address: its host as RP ID and `scheme://host[:port]` as the only origin -
 /// `https`, or `http` only for `localhost` (tests). `None` for anything else (an IP address can not be an RP ID).
 #[must_use]
