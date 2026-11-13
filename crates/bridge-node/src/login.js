@@ -376,10 +376,19 @@
     tell();
   });
 
+  // The app may ask before this script runs or before `info` is here: tell it once login is ready, and again whenever
+  // its frame (re)loads - its listener exists by then.
+  frame.addEventListener("load", function () {
+    if (info && info.enabled) tell();
+  });
+
   call("info")
     .then(function (answer) {
       info = answer;
-      if (info.enabled) bar();
+      if (info.enabled) {
+        bar();
+        tell();
+      }
     })
     .catch(function () {
       info = null;

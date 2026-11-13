@@ -265,7 +265,8 @@ fremdes Konto übernehmen (`bridge-core::login`):
 - `postMessage` (nur vom eigenen `iframe` angenommen): App → Hülle `{"bridge":"login"}` (wer ist angemeldet?) oder
   `{"bridge":"login","ask":true}` (Anmelde-Fenster öffnen); Hülle → App
   `{"bridge":"login","user":…,"name":…,"token":…,"exp":…}` oder `{"bridge":"login","user":null}` (auch beim
-  Abmelden). Die Hülle holt ein neues App-Zeichen 5 Minuten vor Ablauf.
+  Abmelden). Die Hülle meldet sich auch von selbst, sobald Login bereit ist und wenn die App (neu) lädt – eine App,
+  die zu früh gefragt hat, bekommt so trotzdem ihre Antwort. Die Hülle holt ein neues App-Zeichen 5 Minuten vor Ablauf.
 
 ### 9.5 Restrisiken (bewusst)
 - **Gemeinsamer Ursprung**: alle Netze und Bridge-3-Server hinter einem Tor teilen `https://<gerät>.ts.net`. Eine
