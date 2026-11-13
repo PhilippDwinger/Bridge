@@ -575,11 +575,11 @@
     });
   }
 
-  function logDialog(node) {
+  function logDialog(node, path) {
     const box = h('div', { class: 'b-log bc-log', role: 'log', 'aria-label': 'Protokoll' });
     const load = async () => {
       try {
-        const data = await api('GET', '/api/nodes/' + node.id + '/log?lines=300');
+        const data = await api('GET', (path || '/api/nodes/' + node.id + '/log') + '?lines=300');
         box.replaceChildren(...(data.lines.length ? data.lines : ['(noch leer)']).map((line) => h('div', { class: 'b-log__line', text: line })));
         box.scrollTop = box.scrollHeight;
       } catch (error) { toast('err', 'Protokoll nicht lesbar', error.message); }
@@ -1099,6 +1099,7 @@
           h('div', { class: 'bc-row bc-row--between bc-section-gap' }, h('h2', { class: 'bc-h2 bc-list-title', text: 'Apps' }),
             h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', onclick: () => siteDialog(id, data, null) }, icon('plus'), 'Website hochladen')),
           h('div', { class: 'bc-list' }, appRows),
+          bridge3Section(data, id),
           reportsSection(data, id),
           namesSection(data, id)),
         h('aside', { class: 'bc-cols__side', 'aria-label': 'Mitglieder und Einladungen' },
@@ -1164,6 +1165,95 @@
           node.net ? h('div', { class: 'bc-stack--tight' }, h('h2', { class: 'bc-h2', text: 'Netz' }),
             h('p', { class: 'bc-text', text: node.net.name + ' · ' + node.net.mode + ' · ' + (node.net.witnessed ? 'Log bezeugt' : 'Log wird bezeugt') }),
             h('p', { class: 'bc-mono', text: node.net.id })) : null)));
+  }
+
+  // ---------- Bridge-3-Server (docs/11 §8) ----------
+
+  function bridge3Section(data, id) {
+    const b3 = data.bridge3;
+    if (!b3) return null;
+    const states = { running: ['ok', 'Läuft', 'live'], waiting: ['warn', 'Startet neu'], failed: ['err', 'Abgestürzt'], stopping: ['info', 'Stoppt', 'spin'], off: ['neutral', 'Aus', 'hollow'] };
+    const setup = !b3.code_dir
+      ? h('p', { class: 'bc-muted bc-p0' }, 'Realms, Topics, Commands und Friends aus Bridge 3 laufen hier in echten Bridge-3-Servern. Dafür einmal den Bridge-3-Ordner einstellen. ',
+        h('button', { class: 'bc-link-btn', type: 'button', text: 'Einstellen', onclick: () => bridge3SettingsDialog(b3) }))
+      : h('p', { class: 'bc-muted bc-p0' }, 'Ordner: ', h('span', { class: 'bc-mono', text: b3.code_dir }),
+        b3.check && b3.check.ok ? ' · Python: ' + b3.check.python : '',
+        b3.check && !b3.check.ok ? h('span', { class: 'bc-err-text', text: ' · ' + b3.check.problem }) : '',
+        ' · ', h('button', { class: 'bc-link-btn', type: 'button', text: 'ändern', onclick: () => bridge3SettingsDialog(b3) }));
+    const rows = b3.servers.length ? b3.servers.map((server, index) => {
+      const state = states[server.state] || states.off;
+      const running = server.state === 'running' || server.state === 'waiting';
+      return h('div', { class: 'srv' },
+        h('span', { class: 'srv__nr', text: nr(index) }),
+        h('div', { class: 'srv__body' }, h('span', { class: 'srv__name', text: server.name }),
+          h('div', { class: 'srv__meta' }, pill(state[0], state[1], state[2]), chip('ID ' + server.id), chip('Port ' + server.port),
+            server.last_exit && server.state !== 'running' ? h('span', { class: 'bc-muted', text: server.last_exit }) : null),
+          copyField(server.url, 'Adresse von ' + server.name)),
+        h('div', { class: 'srv__actions' },
+          running
+            ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Stop',
+              onclick: (event) => act(event.currentTarget, () => api('POST', '/api/bridge3/' + server.id + '/stop', {}), 'Gestoppt').then(refresh) })
+            : h('button', { class: 'b-btn b-btn--primary b-btn--sm', type: 'button', text: 'Starten',
+              onclick: (event) => act(event.currentTarget, () => api('POST', '/api/bridge3/' + server.id + '/start', {}), 'Startet').then(refresh) }),
+          h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Protokoll', onclick: () => logDialog({ name: server.name }, '/api/bridge3/' + server.id + '/log') }),
+          h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Löschen', onclick: () => bridge3DeleteDialog(server) })));
+    }) : [h('p', { class: 'bc-empty-line', text: 'Noch kein Bridge-3-Server in diesem Netz.' })];
+    return h('section', { class: 'bc-stack--tight bc-section-gap', 'aria-label': 'Bridge-3-Server' },
+      h('div', { class: 'bc-row bc-row--between' }, h('h2', { class: 'bc-h2', text: 'Bridge-3-Server' }),
+        h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', onclick: () => (b3.code_dir ? bridge3AddDialog(id) : bridge3SettingsDialog(b3)) }, icon('plus'), 'Bridge-3-Server hinzufügen')),
+      setup, h('div', { class: 'bc-list' }, rows));
+  }
+
+  function bridge3SettingsDialog(b3) {
+    const dir = h('input', { class: 'b-input b-input--mono', id: 'b3-dir', autocomplete: 'off', spellcheck: 'false', value: b3.code_dir || '', placeholder: 'C:\\Users\\name\\Documents\\Programmieren\\Projekte\\Bridge' });
+    const python = h('input', { class: 'b-input b-input--mono', id: 'b3-python', autocomplete: 'off', spellcheck: 'false', value: b3.python || '', placeholder: 'leer = automatisch' });
+    const body = [
+      field('b3-dir', 'Bridge-3-Ordner', dir, 'Der Ordner mit main.py (Branch bridge-3).'),
+      field('b3-python', 'Python (optional)', python, 'Leer: BridgeControll sucht selbst (.venv von BridgeControll 3, dann py -3). Es braucht die Pakete aus requirements.txt.')];
+    formDialog('Bridge-3-Server: Einstellungen', null, body, 'Speichern und prüfen', async () => {
+      const result = await api('POST', '/api/bridge3/settings', { code_dir: dir.value, python: python.value });
+      if (result.ok) toast('ok', 'Bridge 3 bereit', 'Python: ' + result.python);
+      else toast('warn', 'Gespeichert, aber', result.problem);
+      refresh();
+      return true;
+    });
+  }
+
+  function bridge3AddDialog(id) {
+    const sid = h('input', { class: 'b-input b-input--mono', id: 'b3-id', autocomplete: 'off', spellcheck: 'false', maxlength: '40', placeholder: 'z. B. spiel' });
+    const name = h('input', { class: 'b-input', id: 'b3-name', autocomplete: 'off', maxlength: '64', placeholder: 'z. B. Mein Spiel' });
+    const password = h('input', { class: 'b-input', id: 'b3-pw', type: 'password', autocomplete: 'new-password', maxlength: '200' });
+    const body = [
+      field('b3-name', 'Name', name),
+      field('b3-id', 'Server-ID', sid, 'Teil der Adresse …/bridge3/<ID> – danach fest. a-z, 0-9 und -.'),
+      field('b3-pw', 'Admin-Passwort', password, 'Mindestens 8 Zeichen – damit meldest du dich im Dashboard des Bridge-3-Servers an.'),
+      h('p', { class: 'bc-muted bc-p0', text: 'Der Server läuft wie in Bridge 3 (alles im Arbeitsspeicher, Passwort-Schutz) und ist über die Adresse des Netzes erreichbar. Am besten das Netz zuerst öffentlich machen – sonst ändert sich die Adresse später.' })];
+    name.addEventListener('input', () => {
+      if (!sid.dataset.touched) sid.value = name.value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    });
+    sid.addEventListener('input', () => { sid.dataset.touched = '1'; });
+    formDialog('Bridge-3-Server hinzufügen', null, body, 'Hinzufügen', async () => {
+      const result = await api('POST', '/api/nodes/' + id + '/bridge3-add', { id: sid.value, name: name.value, password: password.value, autostart: true });
+      if (result.started) toast('ok', 'Bridge-3-Server startet', result.url);
+      else toast('warn', 'Angelegt, aber nicht gestartet', result.problem || '');
+      refresh();
+      return true;
+    });
+  }
+
+  function bridge3DeleteDialog(server) {
+    const input = h('input', { class: 'b-input', autocomplete: 'off', spellcheck: 'false' });
+    const ok = h('button', { class: 'b-btn b-btn--danger-solid', type: 'button', text: 'Löschen', disabled: true });
+    input.addEventListener('input', () => { ok.disabled = input.value.trim() !== server.id; });
+    const close = openDialog(h('div', { class: 'b-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'b3-del-title' },
+      h('h3', { id: 'b3-del-title', text: server.name + ' löschen?' }),
+      h('p', { text: 'Der Server stoppt und verschwindet. Was er im Arbeitsspeicher hatte (Realms, Nachrichten), ist danach weg. Tippe zum Bestätigen: ' + server.id }),
+      input,
+      h('div', { class: 'b-dialog__btns' }, h('button', { class: 'b-btn b-btn--secondary', type: 'button', text: 'Abbrechen', onclick: () => close() }), ok)));
+    ok.addEventListener('click', async () => {
+      const done = await act(ok, () => api('POST', '/api/bridge3/' + server.id + '/delete', { confirm: input.value }), 'Gelöscht');
+      if (done !== null) { close(); refresh(); }
+    });
   }
 
   // ---------- Öffentlich (docs/11 §5) ----------

@@ -121,10 +121,14 @@ impl ProcStatus {
 pub struct Launch {
     /// The node's local ID (key of the supervisor); `gate` for the gate.
     pub id: String,
-    /// The program's mode: `node` or `gate` (docs/11 §3).
+    /// The program's mode: `node` or `gate` (docs/11 §3) - this program with `<mode> --supervised`.
     pub mode: &'static str,
-    /// Arguments after `<mode> --supervised`.
+    /// Another program instead (a Bridge 3 server: Python, docs/11 §8); then `mode` is not used.
+    pub program: Option<PathBuf>,
+    /// Arguments (after `<mode> --supervised`, or of `program`).
     pub args: Vec<String>,
+    /// Extra environment variables.
+    pub env: Vec<(String, String)>,
     /// Its log file.
     pub log: PathBuf,
 }
@@ -229,7 +233,7 @@ async fn supervise(
             set(&|s| s.state = RunState::Off);
             return;
         }
-        let mut child = match command(&exe, launch.mode, &launch.args).spawn() {
+        let mut child = match command(&exe, &launch).spawn() {
             Ok(child) => child,
             Err(error) => {
                 let text = format!("Programm nicht startbar: {error}");
@@ -321,14 +325,21 @@ async fn supervise(
     }
 }
 
-/// The command for one process: `<exe> <mode> --supervised <args>` (`node` or `gate`), pipes for all three streams,
-/// killed if the supervisor goes away; no console window on Windows.
-fn command(exe: &Path, mode: &str, args: &[String]) -> Command {
-    let mut command = Command::new(exe);
+/// The command for one process: `<exe> <mode> --supervised <args>` (`node` or `gate`) or `<program> <args>`, with
+/// its extra environment, pipes for all three streams, killed if the supervisor goes away; no console window on
+/// Windows.
+fn command(exe: &Path, launch: &Launch) -> Command {
+    let mut command = match &launch.program {
+        Some(program) => Command::new(program),
+        None => {
+            let mut own = Command::new(exe);
+            own.arg(launch.mode).arg("--supervised");
+            own
+        }
+    };
     command
-        .arg(mode)
-        .arg("--supervised")
-        .args(args)
+        .args(&launch.args)
+        .envs(launch.env.iter().map(|(name, value)| (name.as_str(), value.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

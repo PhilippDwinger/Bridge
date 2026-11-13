@@ -17,7 +17,7 @@ mod proxy;
 pub mod route;
 
 pub use proxy::{Limits, serve};
-pub use route::{Decision, Route, Routes, decide};
+pub use route::{Bridge3Route, Decision, Route, Routes, decide};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

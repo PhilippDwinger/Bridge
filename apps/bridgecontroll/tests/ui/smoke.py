@@ -45,6 +45,37 @@ def free_port():
         return sock.getsockname()[1]
 
 
+# Stand-in for the Bridge 3 code (docs/11 §8): answers every GET with its address.
+FAKE_BRIDGE = """
+import http.server, json, threading
+
+class ConnectionMode:
+    UNSAFE = "unsafe"
+
+class Bridge:
+    def __init__(self, host, port, password, public_url):
+        self.host, self.port, self.public_url, self.server = host, port, public_url, None
+
+    def start_server(self, mode):
+        bridge = self
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"url": bridge.public_url, "path": self.path}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args):
+                pass
+        self.server = http.server.ThreadingHTTPServer((self.host, self.port), Handler)
+        self.server.serve_forever()
+
+    def stop_server(self):
+        if self.server:
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+"""
+
 FAKE_TAILSCALE = """#!/bin/sh
 # Stand-in for tailscale (docs/11 §5): the PC's name, Funnel always works.
 case "$1" in
@@ -419,6 +450,46 @@ def main():
                     raise AssertionError("Not-Aus wirkt nicht")
                 time.sleep(0.5)
             public.close()
+
+            # Bridge-3-Server (docs/11 §8): settings with a stand-in Bridge 3, a server, reachable through the gate.
+            code = tempfile.mkdtemp(prefix="bc-ui-bridge3-")
+            for folder in ("bridge/core", "bridge/server"):
+                os.makedirs(os.path.join(code, folder), exist_ok=True)
+            for name, text in (("main.py", ""), ("bridge/core/__init__.py", ""), ("bridge/server/__init__.py", ""),
+                               ("bridge/server/base_path.py", ""),
+                               ("bridge/core/protocol.py", "trust_proxy = False\ntrust_proxy_ips = '*'\n"),
+                               ("bridge/__init__.py", FAKE_BRIDGE)):
+                with open(os.path.join(code, name), "w", encoding="utf-8") as handle:
+                    handle.write(text)
+            page.goto(base + "/" + owner_hash)
+            page.wait_for_selector("button:has-text('Bridge-3-Server hinzufügen')")
+            page.click("button:has-text('Bridge-3-Server hinzufügen')")
+            page.wait_for_selector("#b3-dir")
+            page.fill("#b3-dir", code)
+            page.fill("#b3-python", sys.executable)
+            shot("31-bridge3-einstellungen", dialog=True)
+            page.click(".b-form button[type=submit]")
+            page.wait_for_selector("text=Bridge 3 bereit", timeout=30000)
+            page.click("button:has-text('Bridge-3-Server hinzufügen')")
+            page.wait_for_selector("#b3-name")
+            page.fill("#b3-name", "Mein Spiel")
+            assert page.input_value("#b3-id") == "mein-spiel", page.input_value("#b3-id")
+            page.fill("#b3-pw", "geheim123")
+            shot("32-bridge3-hinzufuegen", dialog=True)
+            page.click(".b-form button[type=submit]")
+            page.wait_for_selector("section[aria-label='Bridge-3-Server'] :text('Läuft')", timeout=60000)
+            page.wait_for_selector("text=https://pc.tail1234.ts.net/bridge4/testnetz/bridge3/mein-spiel")
+            shot("33-dashboard-bridge3")
+            check = browser.new_page()
+            deadline = time.time() + 30
+            while True:
+                answer = check.goto(f"http://127.0.0.1:{gate}/bridge4/testnetz/bridge3/mein-spiel/server/status")
+                if answer is not None and answer.status == 200 and "bridge3/mein-spiel" in check.content():
+                    break
+                if time.time() > deadline:
+                    raise AssertionError("Bridge-3-Server nicht über das Tor erreichbar")
+                time.sleep(0.5)
+            check.close()
 
             page.evaluate("fetch('/api/quit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})")
             browser.close()

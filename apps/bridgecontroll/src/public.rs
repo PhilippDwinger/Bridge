@@ -19,7 +19,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bridge_gate::{Route, Routes};
+use bridge_gate::{Bridge3Route, Route, Routes};
 use bridge_net::AdultPolicy;
 use serde_json::{Value, json};
 
@@ -162,7 +162,15 @@ pub fn routes_of(config: &AppConfig) -> Vec<Route> {
         .nodes
         .iter()
         .filter_map(|node| {
-            node.public_key.as_ref().map(|key| Route { key: key.clone(), port: node.listen_port, web: node.public_web })
+            let key = node.public_key.as_ref()?;
+            let bridge3 = config
+                .bridge3
+                .servers
+                .iter()
+                .filter(|server| server.node == node.id)
+                .map(|server| Bridge3Route { id: server.id.clone(), port: server.port })
+                .collect();
+            Some(Route { key: key.clone(), port: node.listen_port, web: node.public_web, bridge3 })
         })
         .collect()
 }
@@ -187,6 +195,8 @@ pub async fn apply_gate(app: &App) -> Result<(), String> {
     app.supervisor.start(Launch {
         id: GATE_ID.to_owned(),
         mode: "gate",
+        program: None,
+        env: Vec::new(),
         args: vec![
             "--listen".to_owned(),
             format!("127.0.0.1:{gate_port}"),
@@ -303,6 +313,7 @@ pub async fn make_public(app: &App, id: &str, funnel_port: Option<u16>) -> Resul
     let changed = entry_of(app, id).await?;
     let running = restart(app, &entry, &changed).await;
     let sealed = reseal_own(app, &changed, running).await;
+    crate::bridge3::restart_for_node(app, id).await; // their address changes with the network's
     Ok(json!({"ok": true, "url": url, "key": key, "sealed": sealed}))
 }
 
@@ -376,6 +387,7 @@ pub async fn make_private(app: &App, id: &str) -> Result<Value, String> {
     let changed = entry_of(app, id).await?;
     let running = restart(app, &entry, &changed).await;
     let sealed = reseal_own(app, &changed, running).await;
+    crate::bridge3::restart_for_node(app, id).await;
     Ok(json!({"ok": true, "sealed": sealed, "warning": warning}))
 }
 
@@ -562,7 +574,7 @@ mod tests {
         });
         assert_eq!(network_key(&config, Some("testnetz"), "ABCDEF"), "abcdef", "taken by another network");
         let routes = routes_of(&config);
-        assert_eq!(routes, vec![Route { key: "testnetz".into(), port: 7401, web: false }]);
+        assert_eq!(routes, vec![Route { key: "testnetz".into(), port: 7401, web: false, bridge3: Vec::new() }]);
         assert_eq!(node_view(&config.nodes[0])["web"], json!(false));
     }
 }

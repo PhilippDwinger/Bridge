@@ -68,6 +68,12 @@ Voraussetzung: Tailscale installiert und angemeldet, Funnel im Tailnet erlaubt. 
 öffentlich“** nimmt alles zurück. Netze, die 18+ erlauben, werden nie öffentlich; öffentlich sind nur Apps von Inhabern
 ab Stufe 2.
 
+**Bridge-3-Server im Netz** (docs/11 §8): Bridge 4 hat keine eigenen Realms – im Owner-Dashboard unter
+**„Bridge-3-Server“** läuft echter Bridge-3-Code (Realms, Topics, Commands, Friends) mit dem Python des PCs. Einmal den
+Bridge-3-Ordner einstellen (Branch `bridge-3`), dann „Bridge-3-Server hinzufügen“ (ID, Name, Passwort). Ist das Netz
+öffentlich, ist der Server unter `https://<gerät>.<tailnet>.ts.net/bridge4/<netz>/bridge3/<id>` erreichbar – diese
+Adresse kommt in die Bridge-3-Extensions (Roblox, Minecraft, Python, JS).
+
 ## Knoten starten
 ```
 bridge-node --data <ordner> --listen 127.0.0.1:7400 --name "Mein Knoten"

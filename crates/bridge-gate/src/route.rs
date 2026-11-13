@@ -10,6 +10,19 @@ pub const MAX_TARGET: usize = 2048;
 pub const MAX_KEY: usize = 64;
 /// The prefix Tailscale Funnel mounts the gate at; removed if Tailscale did not cut it off.
 pub const PREFIX: &str = "bridge4";
+/// Most Bridge 3 servers of one network.
+pub const MAX_BRIDGE3: usize = 32;
+/// Longest Bridge 3 server ID.
+pub const MAX_BRIDGE3_ID: usize = 40;
+
+/// A Bridge 3 server of a network (docs/11 §8): `/bridge4/<key>/bridge3/<id>/…` → `127.0.0.1:<port>/…`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bridge3Route {
+    /// Its ID: 1-40 of `a-z 0-9 -`.
+    pub id: String,
+    /// Its port on `127.0.0.1`.
+    pub port: u16,
+}
 
 /// One public network on this PC.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,8 +31,10 @@ pub struct Route {
     pub key: String,
     /// The port of the network's node on `127.0.0.1`.
     pub port: u16,
-    /// Websites and apps public (`false`: the Not-Aus - only `/v4/` goes through).
+    /// Websites and apps public (`false`: the Not-Aus - only `/v4/` and the Bridge 3 servers go through).
     pub web: bool,
+    /// Its Bridge 3 servers (at most [`MAX_BRIDGE3`]).
+    pub bridge3: Vec<Bridge3Route>,
 }
 
 /// The routes of the gate (from the file BridgeControll writes).
@@ -38,11 +53,19 @@ pub fn valid_key(key: &str) -> bool {
         && key != "bridge3"
 }
 
+/// Whether `id` may be a Bridge 3 server ID in a path: 1-40 of `a-z 0-9 -`.
+#[must_use]
+pub fn valid_bridge3_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_BRIDGE3_ID
+        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 impl Routes {
     /// Routes from a list (checked like [`Routes::parse`]).
     ///
     /// # Errors
-    /// Too many routes, an invalid key or port, a key twice.
+    /// Too many routes or Bridge 3 servers, an invalid key, ID or port, a key or ID twice.
     pub fn new(routes: Vec<Route>) -> Result<Self, String> {
         if routes.len() > MAX_ROUTES {
             return Err(format!("höchstens {MAX_ROUTES} Routen"));
@@ -57,11 +80,23 @@ impl Routes {
             if routes[..index].iter().any(|other| other.key == route.key) {
                 return Err(format!("Route {index}: Schlüssel doppelt"));
             }
+            if route.bridge3.len() > MAX_BRIDGE3 {
+                return Err(format!("Route {index}: höchstens {MAX_BRIDGE3} Bridge-3-Server"));
+            }
+            for (number, server) in route.bridge3.iter().enumerate() {
+                if !valid_bridge3_id(&server.id) || server.port < 1024 {
+                    return Err(format!("Route {index}: Bridge-3-Server {number} ungültig"));
+                }
+                if route.bridge3[..number].iter().any(|other| other.id == server.id) {
+                    return Err(format!("Route {index}: Bridge-3-Server {} doppelt", server.id));
+                }
+            }
         }
         Ok(Self { routes })
     }
 
-    /// `{"routes":[{"key":"testnetz","port":7401,"web":true}, …]}` - nothing else, every field required.
+    /// `{"routes":[{"key":"testnetz","port":7401,"web":true,"bridge3":[{"id":"spiel","port":7801}]}, …]}` - nothing
+    /// else; `bridge3` may be left out (none).
     ///
     /// # Errors
     /// Not this form, or [`Routes::new`] refuses it.
@@ -72,14 +107,26 @@ impl Routes {
         let value: Value = serde_json::from_slice(bytes).map_err(|e| format!("Routen-Datei: {e}"))?;
         let object = value.as_object().filter(|o| o.len() == 1).ok_or("Routen-Datei: nur {\"routes\": [...]}")?;
         let list = object.get("routes").and_then(Value::as_array).ok_or("Routen-Datei: routes fehlt")?;
+        let port_of = |value: Option<&Value>| value.and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok());
         let mut routes = Vec::with_capacity(list.len().min(MAX_ROUTES));
         for item in list.iter().take(MAX_ROUTES + 1) {
-            let item = item.as_object().filter(|o| o.len() == 3).ok_or("Route: key, port, web")?;
+            let item = item.as_object().ok_or("Route: key, port, web")?;
+            if item.len() < 3 || item.keys().any(|k| !["key", "port", "web", "bridge3"].contains(&k.as_str())) {
+                return Err("Route: key, port, web (bridge3)".into());
+            }
             let key = item.get("key").and_then(Value::as_str).ok_or("Route: key")?;
-            let port =
-                item.get("port").and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok()).ok_or("Route: port")?;
+            let port = port_of(item.get("port")).ok_or("Route: port")?;
             let web = item.get("web").and_then(Value::as_bool).ok_or("Route: web")?;
-            routes.push(Route { key: key.to_owned(), port, web });
+            let mut bridge3 = Vec::new();
+            if let Some(list) = item.get("bridge3") {
+                for server in list.as_array().ok_or("Route: bridge3")?.iter().take(MAX_BRIDGE3 + 1) {
+                    let server = server.as_object().filter(|o| o.len() == 2).ok_or("Bridge-3-Server: id, port")?;
+                    let id = server.get("id").and_then(Value::as_str).ok_or("Bridge-3-Server: id")?;
+                    let port = port_of(server.get("port")).ok_or("Bridge-3-Server: port")?;
+                    bridge3.push(Bridge3Route { id: id.to_owned(), port });
+                }
+            }
+            routes.push(Route { key: key.to_owned(), port, web, bridge3 });
         }
         Self::new(routes)
     }
@@ -87,8 +134,15 @@ impl Routes {
     /// The file form ([`Routes::parse`] reads it back).
     #[must_use]
     pub fn to_json(&self) -> String {
-        let list: Vec<Value> =
-            self.routes.iter().map(|r| serde_json::json!({"key": r.key, "port": r.port, "web": r.web})).collect();
+        let list: Vec<Value> = self
+            .routes
+            .iter()
+            .map(|r| {
+                let bridge3: Vec<Value> =
+                    r.bridge3.iter().map(|b| serde_json::json!({"id": b.id, "port": b.port})).collect();
+                serde_json::json!({"key": r.key, "port": r.port, "web": r.web, "bridge3": bridge3})
+            })
+            .collect();
         serde_json::json!({ "routes": list }).to_string()
     }
 
@@ -159,6 +213,9 @@ pub fn decide(routes: &Routes, target: &str) -> Decision {
     }
     let Some(route) = routes.get(key) else { return Decision::NotFound };
     let Some(tail) = tail else { return Decision::Redirect(format!("{key}/")) };
+    if let Some(rest) = tail.strip_prefix("bridge3/").or_else(|| (tail == "bridge3").then_some("")) {
+        return bridge3(route, rest, query);
+    }
     let forwarded = format!("/{tail}");
     if !route.web && web_path(&forwarded) {
         return Decision::Off;
@@ -168,6 +225,24 @@ pub fn decide(routes: &Routes, target: &str) -> Decision {
         None => forwarded,
     };
     Decision::Forward { port: route.port, target }
+}
+
+/// `/<key>/bridge3/<rest>`: to the Bridge 3 server `<id>` of the route with `/<after the id>` (docs/11 §8).
+fn bridge3(route: &Route, rest: &str, query: Option<&str>) -> Decision {
+    let (id, after) = match rest.split_once('/') {
+        Some((id, after)) => (id, Some(after)),
+        None => (rest, None),
+    };
+    if !valid_bridge3_id(id) {
+        return Decision::NotFound;
+    }
+    let Some(server) = route.bridge3.iter().find(|server| server.id == id) else { return Decision::NotFound };
+    let Some(after) = after else { return Decision::Redirect(format!("{id}/")) };
+    let target = match query {
+        Some(query) => format!("/{after}?{query}"),
+        None => format!("/{after}"),
+    };
+    Decision::Forward { port: server.port, target }
 }
 
 /// Paths of websites and apps (switched off by the Not-Aus): the start page, `/web/…`, `/app/…`.
@@ -239,8 +314,18 @@ mod tests {
 
     fn routes() -> Routes {
         Routes::new(vec![
-            Route { key: "testnetz".into(), port: 7401, web: true },
-            Route { key: "zu".into(), port: 7402, web: false },
+            Route {
+                key: "testnetz".into(),
+                port: 7401,
+                web: true,
+                bridge3: vec![Bridge3Route { id: "spiel".into(), port: 7801 }],
+            },
+            Route {
+                key: "zu".into(),
+                port: 7402,
+                web: false,
+                bridge3: vec![Bridge3Route { id: "s".into(), port: 7802 }],
+            },
         ])
         .unwrap_or_default()
     }
@@ -267,6 +352,16 @@ mod tests {
             assert_eq!(d("/zu/app/abc/"), Decision::Off);
             assert_eq!(d("/zu/app"), Decision::Off);
             assert_eq!(d("/zu/v4/poll"), forward(7402, "/v4/poll"));
+            // Bridge 3 servers of a network (also with its websites off).
+            assert_eq!(d("/testnetz/bridge3/spiel/client/login?x=1"), forward(7801, "/client/login?x=1"));
+            assert_eq!(d("/testnetz/bridge3/spiel/"), forward(7801, "/"));
+            assert_eq!(d("/testnetz/bridge3/spiel"), Decision::Redirect("spiel/".into()));
+            assert_eq!(d("/zu/bridge3/s/admin"), forward(7802, "/admin"));
+            assert_eq!(d("/testnetz/bridge3/nix/"), Decision::NotFound);
+            assert_eq!(d("/testnetz/bridge3/Spiel/"), Decision::NotFound);
+            assert_eq!(d("/testnetz/bridge3/"), Decision::NotFound);
+            assert_eq!(d("/testnetz/bridge3"), Decision::NotFound);
+            assert_eq!(d("/zu/bridge3/spiel/"), Decision::NotFound, "only the network's own servers");
         }
         assert_eq!(decide(&r, "/"), Decision::Home);
         assert_eq!(decide(&r, "/bridge4"), Decision::Home);
@@ -316,6 +411,10 @@ mod tests {
         for bad in [
             r#"{"routes":[{"key":"a","port":7401}]}"#,
             r#"{"routes":[{"key":"a","port":7401,"web":true,"x":1}]}"#,
+            r#"{"routes":[{"key":"a","port":7401,"web":true,"bridge3":[{"id":"S","port":7801}]}]}"#,
+            r#"{"routes":[{"key":"a","port":7401,"web":true,"bridge3":[{"id":"s","port":80}]}]}"#,
+            r#"{"routes":[{"key":"a","port":7401,"web":true,"bridge3":[{"id":"s","port":7801,"x":1}]}]}"#,
+            r#"{"routes":[{"key":"a","port":7401,"web":true,"bridge3":[{"id":"s","port":7801},{"id":"s","port":7802}]}]}"#,
             r#"{"routes":[{"key":"A","port":7401,"web":true}]}"#,
             r#"{"routes":[{"key":"bridge4","port":7401,"web":true}]}"#,
             r#"{"routes":[{"key":"bridge3","port":7401,"web":true}]}"#,
@@ -327,8 +426,10 @@ mod tests {
         ] {
             assert!(Routes::parse(bad.as_bytes()).is_err(), "{bad}");
         }
-        let many: Vec<Route> =
-            (0..=MAX_ROUTES).map(|n| Route { key: format!("n{n}"), port: 7401, web: true }).collect();
+        assert!(Routes::parse(br#"{"routes":[{"key":"a","port":7401,"web":true}]}"#)?.all()[0].bridge3.is_empty());
+        let many: Vec<Route> = (0..=MAX_ROUTES)
+            .map(|n| Route { key: format!("n{n}"), port: 7401, web: true, bridge3: Vec::new() })
+            .collect();
         assert!(Routes::new(many).is_err());
         Ok(())
     }

@@ -358,6 +358,135 @@ pub fn check_host(host: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(format!("Tailscale-Name {host:?} ist ungültig")) }
 }
 
+/// Most Bridge 3 servers on one PC (docs/11 §8).
+pub const MAX_BRIDGE3: usize = 32;
+/// First port tried for a Bridge 3 server.
+pub const FIRST_BRIDGE3_PORT: u16 = 7801;
+/// Names a Bridge 3 server ID can not have: the paths of Bridge 3/4 and Bridge 3's own routes.
+pub const BRIDGE3_RESERVED: [&str; 14] = [
+    "bridge3",
+    "bridge4",
+    "admin",
+    "server",
+    "s2s",
+    "client",
+    "message",
+    "command",
+    "realm",
+    "express",
+    "agent",
+    "conversation",
+    "friends",
+    "site",
+];
+
+/// A Bridge 3 server in a network (docs/11 §8, ADR 0026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bridge3Server {
+    /// Its ID (part of its address `…/bridge3/<id>`): 2-40 of `a-z 0-9 -`, not at the ends, not reserved.
+    pub id: String,
+    /// Its name for people.
+    pub name: String,
+    /// The local ID of the owner node whose network it belongs to.
+    pub node: String,
+    /// Its port on 127.0.0.1.
+    pub port: u16,
+    /// Its admin password (8-200 characters) - Bridge 3 needs it at every start.
+    pub password: String,
+    /// Start it when BridgeControll starts.
+    pub autostart: bool,
+    /// Created (ms since 1970).
+    pub created: i64,
+}
+
+/// Whether `id` may be a Bridge 3 server ID (see [`Bridge3Server::id`]).
+pub fn check_bridge3_id(id: &str) -> Result<(), String> {
+    let ok = (2..=40).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !id.starts_with('-')
+        && !id.ends_with('-');
+    if !ok {
+        return Err("Server-ID: 2-40 Zeichen a-z, 0-9 und - (nicht am Anfang/Ende)".into());
+    }
+    if BRIDGE3_RESERVED.contains(&id) {
+        return Err(format!("„{id}“ ist ein Pfad von Bridge und kann keine Server-ID sein."));
+    }
+    Ok(())
+}
+
+impl Bridge3Server {
+    fn to_value(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "node": self.node, "port": self.port, "password": self.password,
+               "autostart": self.autostart, "created": self.created})
+    }
+
+    fn from_value(value: &Value) -> Result<Self, String> {
+        let object = value.as_object().ok_or("Bridge-3-Server: kein Objekt")?;
+        exact(object, &["id", "name", "node", "port", "password", "autostart", "created"])?;
+        let text = |name: &str| {
+            object.get(name).and_then(Value::as_str).map(str::to_owned).ok_or(format!("Bridge-3-Server: {name}"))
+        };
+        let server = Self {
+            id: text("id")?,
+            name: text("name")?,
+            node: text("node")?,
+            port: port(object.get("port")).ok_or("Bridge-3-Server: port")?,
+            password: text("password")?,
+            autostart: object.get("autostart").and_then(Value::as_bool).ok_or("Bridge-3-Server: autostart")?,
+            created: object.get("created").and_then(Value::as_i64).ok_or("Bridge-3-Server: created")?,
+        };
+        server.check()?;
+        Ok(server)
+    }
+
+    /// Every field.
+    pub fn check(&self) -> Result<(), String> {
+        check_bridge3_id(&self.id)?;
+        check_name(&self.name, "Name des Servers")?;
+        check_id(&self.node)?;
+        if self.port < MIN_PORT {
+            return Err(format!("Port ab {MIN_PORT}"));
+        }
+        let count = self.password.chars().count();
+        if !(8..=200).contains(&count) || self.password.chars().any(char::is_control) {
+            return Err("Passwort: 8 bis 200 Zeichen, keine Steuerzeichen".into());
+        }
+        Ok(())
+    }
+}
+
+/// The Bridge 3 servers of this PC and where their code and Python are (docs/11 §8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Bridge3Config {
+    /// The Bridge 3 folder (branch `bridge-3`, with `main.py` and `bridge/server/base_path.py`).
+    pub code_dir: Option<String>,
+    /// The Python to run it with (`None`: found automatically).
+    pub python: Option<String>,
+    /// The servers (at most [`MAX_BRIDGE3`]).
+    pub servers: Vec<Bridge3Server>,
+}
+
+impl Bridge3Config {
+    fn to_value(&self) -> Value {
+        let servers: Vec<Value> = self.servers.iter().map(Bridge3Server::to_value).collect();
+        json!({"code_dir": self.code_dir, "python": self.python, "servers": servers})
+    }
+
+    /// The server with this ID.
+    #[must_use]
+    pub fn server(&self, id: &str) -> Option<&Bridge3Server> {
+        self.servers.iter().find(|server| server.id == id)
+    }
+}
+
+/// A path setting: 1-1024 characters, no control characters.
+pub fn check_path_setting(path: &str, what: &str) -> Result<(), String> {
+    if path.trim().is_empty() || path.chars().count() > 1024 || path.chars().any(char::is_control) {
+        return Err(format!("{what}: 1 bis 1024 Zeichen, keine Steuerzeichen"));
+    }
+    Ok(())
+}
+
 /// All settings of the app.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppConfig {
@@ -365,6 +494,8 @@ pub struct AppConfig {
     pub nodes: Vec<NodeEntry>,
     /// The gate and Tailscale Funnel (phase 7).
     pub public: PublicConfig,
+    /// Bridge 3 servers in networks (phase 7).
+    pub bridge3: Bridge3Config,
 }
 
 /// The settings as loaded, with what was wrong in the file (German, for the start page).
@@ -415,8 +546,11 @@ impl AppConfig {
             None => PublicConfig::default(),
             Some(value) => PublicConfig::from_value(value)?,
         };
+        // `bridge3` came with the Bridge 3 servers (phase 7): a file without it means none.
+        let bridge3 = object.get("bridge3").cloned();
         let mut object = object.clone();
         object.remove("public");
+        object.remove("bridge3");
         let object = &object;
         exact(object, &["v", "nodes"])?;
         if object.get("v") != Some(&json!(1)) {
@@ -445,6 +579,34 @@ impl AppConfig {
                 Err(error) => warnings.push(format!("{label} übersprungen: {error}")),
             }
         }
+        if let Some(bridge3) = bridge3 {
+            let object = bridge3.as_object().ok_or("bridge3: kein Objekt")?;
+            exact(object, &["code_dir", "python", "servers"])?;
+            let setting = |name: &str| match object.get(name) {
+                Some(Value::Null) => Ok(None),
+                Some(Value::String(text)) => check_path_setting(text, name).map(|()| Some(text.clone())),
+                _ => Err(format!("bridge3: {name}")),
+            };
+            config.bridge3.code_dir = setting("code_dir")?;
+            config.bridge3.python = setting("python")?;
+            let list = object.get("servers").and_then(Value::as_array).ok_or("bridge3: servers")?;
+            for (index, item) in list.iter().enumerate() {
+                let label = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| check_bridge3_id(id).is_ok())
+                    .map_or_else(|| format!("Bridge-3-Server {}", index + 1), |id| format!("Bridge-3-Server {id}"));
+                let server = Bridge3Server::from_value(item).and_then(|server| {
+                    let mut next = config.clone();
+                    next.bridge3.servers.push(server.clone());
+                    next.check().map(|()| server)
+                });
+                match server {
+                    Ok(server) => config.bridge3.servers.push(server),
+                    Err(error) => warnings.push(format!("{label} übersprungen: {error}")),
+                }
+            }
+        }
         Ok((config, warnings))
     }
 
@@ -470,6 +632,22 @@ impl AppConfig {
                 }
             }
         }
+        if self.bridge3.servers.len() > MAX_BRIDGE3 {
+            return Err(format!("höchstens {MAX_BRIDGE3} Bridge-3-Server"));
+        }
+        let mut servers = std::collections::BTreeSet::new();
+        for server in &self.bridge3.servers {
+            server.check().map_err(|e| format!("Bridge-3-Server {}: {e}", server.id))?;
+            if !servers.insert(server.id.as_str()) {
+                return Err(format!("Bridge-3-Server {} doppelt", server.id));
+            }
+            if self.node(&server.node).is_none_or(|node| node.role != NodeRole::Owner) {
+                return Err(format!("Bridge-3-Server {}: kein Owner-Knoten {}", server.id, server.node));
+            }
+            if !ports.insert(server.port) {
+                return Err(format!("Port {} doppelt vergeben", server.port));
+            }
+        }
         Ok(())
     }
 
@@ -477,8 +655,10 @@ impl AppConfig {
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let nodes: Vec<Value> = self.nodes.iter().map(NodeEntry::to_value).collect();
-        let mut text = serde_json::to_string_pretty(&json!({"v": 1, "nodes": nodes, "public": self.public.to_value()}))
-            .unwrap_or_default();
+        let mut text = serde_json::to_string_pretty(
+            &json!({"v": 1, "nodes": nodes, "public": self.public.to_value(), "bridge3": self.bridge3.to_value()}),
+        )
+        .unwrap_or_default();
         text.push('\n');
         text.into_bytes()
     }
@@ -512,6 +692,7 @@ impl AppConfig {
             .filter(|node| Some(node.id.as_str()) != except)
             .any(|node| node.listen_port == port || node.lan_port == Some(port) || node.reader_port == Some(port))
             || self.public.gate_port == Some(port)
+            || self.bridge3.servers.iter().any(|server| server.port == port)
     }
 }
 

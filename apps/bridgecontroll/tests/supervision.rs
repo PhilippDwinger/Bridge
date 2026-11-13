@@ -12,6 +12,8 @@ fn launch(dir: &std::path::Path, port: u16) -> Launch {
     Launch {
         id: "0a1b2c3d".into(),
         mode: "node",
+        program: None,
+        env: Vec::new(),
         args: vec![
             "--data".into(),
             dir.join("node").display().to_string(),

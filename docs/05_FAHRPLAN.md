@@ -266,6 +266,9 @@ freigegeben).
 - Später, optional: eigene Domain.
 - **Abnahme** (docs/11 §11): eine Website von Paddys PC ist in einem fremden Browser über die Tailscale-Adresse
   erreichbar, zwei Netze teilen sich einen Port, Not-Aus wirkt sofort, BridgeControll 3 läuft daneben weiter.
+- **Stand (13.11.2026)**: Schritt 1 (Tor `crates/bridge-gate`, Leser `public`, Startseite/Hülle, „Öffentlich machen“),
+  Schritt 2 (BridgeControll 3: `/bridge3/<id>`, „Pfad umstellen“) und Schritt 3 (Bridge-3-Server im Netz) gebaut,
+  Tests grün; Paddys Echttest mit Tailscale steht aus. Schritt 4 (Fähigkeiten-Ampel, Bridge Login) als Nächstes.
 
 ## Nebenher
 - Bridge 3 läuft weiter (Branch `bridge-3`), bekommt nur noch Fehlerbehebungen.

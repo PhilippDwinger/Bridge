@@ -24,7 +24,7 @@ Friends wie bisher). Websites bekommen später ein **Bridge Login** mit Konten.
 | Schritt | Was | Wo |
 |---|---|---|
 | 1 | **Öffentlich**: das Tor (ein lokaler Eingang für alle Netze), Knopf „Öffentlich machen“ mit Tailscale Funnel, öffentliche Websites mit Hülle und Startseite, Not-Aus | `crates/bridge-gate`, `bridge-node` (Leser `public`, `/`, `/web/`), BridgeControll v2 |
-| 2 | **BridgeControll 3** legt Server unter `/bridge3/<id>` ab (alter Pfad bleibt zum Umstellen) | Ordner `BridgeControll` (Bridge 3) |
+| 2 | **BridgeControll 3** legt Server unter `/bridge3/<id>` ab (ältere Server: „Pfad umstellen“) | Ordner `BridgeControll` (Bridge 3) |
 | 3 | **Bridge-3-Server im Netz**: echte Bridge-3-Server, von BridgeControll v2 gestartet, unter `/bridge4/<netz>/bridge3/<id>/` | BridgeControll v2, Tor, Netz-Eintrag |
 | 4 | **Was kann mein Netz?** (Fähigkeiten-Ampel) und **Bridge Login** (Konten mit Passkeys, Daten pro Nutzer) | `bridge-net`, Knoten, BridgeControll v2, SDKs |
 
@@ -147,23 +147,41 @@ den Knoten-Ports dieses PCs auf `127.0.0.1`.
 Restrisiko: Was ein öffentlicher Knoten hostet, sieht die ganze Welt – der Owner ist dafür verantwortlich
 (NUTZUNGSREGELN.md). Tailscale sieht die Verbindungen (TLS endet bei Tailscale auf dem eigenen PC, nicht bei Dritten).
 
-## 7. Schritt 2: BridgeControll 3 auf `/bridge3/<id>`
-- Neue Server: Pfad `/bridge3/<id>` (bisher `/<id>`), Website `/bridge3/<id>/site`.
-- Bestehende Server bekommen den neuen Pfad **zusätzlich**; der alte bleibt, bis Paddy „Alten Pfad entfernen“ klickt
-  (laufende Spiele/Mods brechen sonst sofort ab). Die öffentliche Adresse des Servers (Identität in Bridge 3) wechselt
-  erst dann.
-- Weiterhin nur eigene Einträge, nie `reset`.
+## 7. Schritt 2: BridgeControll 3 auf `/bridge3/<id>` (gebaut 13.11.2026)
+- Neue Server: Pfad `/bridge3/<id>` (bisher `/<id>`), Website `/bridge3/<id>/site` (`servers.json`:
+  `"path_style": "bridge3"`). Server-IDs `bridge3` und `bridge4` sind gesperrt.
+- **Ältere Server** behalten `/<id>` (ihre Adresse ist ihre Identität), bis Paddy beim Server **„Pfad umstellen“**
+  klickt: alte Funnel-Einträge raus, Neustart mit `/bridge3/<id>` – laufende Spiele/Mods brechen so nicht ungefragt ab.
+  Danach brauchen Clients die neue Adresse; vertraute Server müssen neu vertrauen.
+- Weiterhin nur eigene Einträge, nie `reset`, nie `/bridge4`. Tests: `tests/test_bridgecontroll.py` (76 grün).
+- Gilt erst nach `BUILD_EXE.bat` (die Bridge-3-BridgeControll läuft als gebaute Exe).
 
 ## 8. Schritt 3: Bridge-3-Server im Netz (ADR 0026)
-- **Echter Bridge-3-Code** (Branch `bridge-3`, Ordner `Bridge`) mit Python des PCs – wie BridgeControll 3 es macht;
-  Realms, Topics, Commands, Friends, Express und alle Extensions funktionieren unverändert mit der neuen Adresse.
-- BridgeControll v2: pro Netz „Bridge-3-Server“: hinzufügen (ID, Passwort), starten/stoppen mit Watchdog, Protokoll,
-  löschen. Das Tor leitet `/<netz>/bridge3/<id>/…` an den Server; Eintrag im Netz (Name), damit Mitglieder ihn im
-  Bridge-Browser finden.
+- **Echter Bridge-3-Code** (Branch `bridge-3`, z. B. Paddys Ordner `Bridge`) mit Python des PCs – Realms, Topics,
+  Commands, Friends, Express und alle Extensions funktionieren unverändert, nur die Adresse ist neu.
+- **Einstellungen** (einmal pro PC, im Dashboard „Bridge-3-Server“): **Bridge-3-Ordner** (muss `main.py` und
+  `bridge/server/base_path.py` enthalten) und **Python** (leer = automatisch: `<Ordner>\..\BridgeControll\.venv`,
+  `<Ordner>\.venv`, dann `py -3` bzw. `python3`). Geprüft wird, ob dieses Python `fastapi`, `uvicorn`, `argon2`,
+  `httpx` laden kann; sonst eine klare Meldung (`pip install -r requirements.txt`).
+- **Server** (nur am Owner-Knoten eines Netzes – der Owner entscheidet): ID (`a-z 0-9 -`, 2–40, nicht `bridge3`,
+  `bridge4` und nicht die Bridge-Pfade `admin, server, …`), Name, Admin-Passwort (mind. 8 Zeichen), Autostart. Port
+  vergibt BridgeControll (ab 7801). Höchstens 32 Server pro PC.
+- **Start**: BridgeControll schreibt sein eigenes kleines Startskript (`bridge3/runner.py` im App-Ordner) und startet
+  `python runner.py` mit `BRIDGE_CODE_DIR`, `PORT`, `BRIDGE_PASSWORD`, `BRIDGE_PUBLIC_URL`, `BRIDGE_TRUST_PROXY=1`,
+  `BRIDGE_TRUST_PROXY_IPS=127.0.0.1,::1`. Das Skript bindet **nur 127.0.0.1** (nicht wie `main.py` alle Adressen –
+  aus dem Heimnetz kommt niemand am Tor vorbei) und stoppt sauber, wenn die Standard-Eingabe zugeht (Backup an
+  vertraute Server). Watchdog wie bei den Knoten, Protokoll pro Server.
+- **Adresse** (= Identität in Bridge 3): ist das Netz öffentlich `https://<gerät>.ts.net[:port]/bridge4/<netz>/bridge3/<id>`,
+  sonst `http://127.0.0.1:<port>`. Wird das Netz öffentlich (oder nicht mehr), starten seine Bridge-3-Server mit der
+  neuen Adresse neu – am besten das Netz zuerst öffentlich machen, dann Server anlegen.
+- **Tor**: die Route des Netzes kennt seine Bridge-3-Server (`"bridge3":[{"id":"spiel","port":7801}]`);
+  `/<netz>/bridge3/<id>/…` geht an `127.0.0.1:<port>/…` (Bridge 3 kommt mit und ohne Pfad zurecht). Der Not-Aus der
+  Websites betrifft sie nicht (eigenes Starten/Stoppen).
 - Sicherheit: Ein Bridge-3-Server hat die Sicherheit von Bridge 3 (Passwort, alles im RAM) – als eigener Prozess
-  abgeschottet, ohne Zugriff auf Schlüssel von Bridge 4; Grenzen am Tor.
-- Später: Server auf einem anderen PC des Netzes über den öffentlichen PC erreichbar; Server eines Netzes vertrauen
-  sich automatisch; Bridge-4-SDKs sprechen Bridge-3-Server an.
+  abgeschottet, ohne Zugriff auf Schlüssel von Bridge 4, nur über das Tor erreichbar. Das Passwort steht in den
+  Einstellungen von BridgeControll (nur für den Besitzer lesbar), wie bei BridgeControll 3.
+- Später: Eintrag im Netz (Name) und auf der Startseite; Server auf einem anderen PC des Netzes über den öffentlichen PC;
+  Server eines Netzes vertrauen sich automatisch; Bridge-4-SDKs sprechen Bridge-3-Server an.
 
 ## 9. Schritt 4: Was kann mein Netz? und Bridge Login
 - **Fähigkeiten-Ampel**: Jedes Feature sagt, was es im Netz braucht (z. B. Bridge Login: 2 Speicher-Knoten mit Siegel

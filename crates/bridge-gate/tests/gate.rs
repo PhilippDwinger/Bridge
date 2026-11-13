@@ -96,8 +96,8 @@ async fn get(url: &str, headers: &[(&str, &str)]) -> Result<(u16, reqwest::heade
 async fn the_gate_routes_and_sets_its_own_headers() -> TestResult {
     let port = backend().await?;
     let routes = Routes::new(vec![
-        Route { key: "testnetz".into(), port, web: true },
-        Route { key: "zu".into(), port, web: false },
+        Route { key: "testnetz".into(), port, web: true, bridge3: Vec::new() },
+        Route { key: "zu".into(), port, web: false, bridge3: Vec::new() },
     ])?;
     let url = gate(routes, Limits::default()).await?;
     // Forwarded with the prefix removed, the caller's forwarding headers dropped, the gate's own set.
@@ -150,7 +150,7 @@ async fn the_gate_routes_and_sets_its_own_headers() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn answers_stream_and_limits_hold() -> TestResult {
     let port = backend().await?;
-    let routes = Routes::new(vec![Route { key: "n".into(), port, web: true }])?;
+    let routes = Routes::new(vec![Route { key: "n".into(), port, web: true, bridge3: Vec::new() }])?;
     let limits = Limits { per_client: 2, max_body: 1024, ..Limits::default() };
     let url = gate(routes, limits).await?;
     // A large answer streams through whole.
@@ -173,13 +173,16 @@ async fn answers_stream_and_limits_hold() -> TestResult {
     assert_eq!(second.await.map_err(e)??, 200);
     assert_eq!(get(&format!("{url}/n/v4/info"), &[("x-forwarded-for", "8.8.8.8")]).await?.0, 200, "free again");
     // A node that is down: 502 with the gate's page.
-    let routes = Routes::new(vec![Route { key: "weg".into(), port: 1, web: true }]).map_err(e);
+    let routes = Routes::new(vec![Route { key: "weg".into(), port: 1, web: true, bridge3: Vec::new() }]).map_err(e);
     assert!(routes.is_err(), "ports below 1024 are refused");
     let free = TcpListener::bind("127.0.0.1:0").await.map_err(e)?;
     let gone_port = free.local_addr().map_err(e)?.port();
     drop(free);
-    let url =
-        gate(Routes::new(vec![Route { key: "weg".into(), port: gone_port, web: true }])?, Limits::default()).await?;
+    let url = gate(
+        Routes::new(vec![Route { key: "weg".into(), port: gone_port, web: true, bridge3: Vec::new() }])?,
+        Limits::default(),
+    )
+    .await?;
     assert_eq!(get(&format!("{url}/weg/v4/info"), &[]).await?.0, 502);
     Ok(())
 }

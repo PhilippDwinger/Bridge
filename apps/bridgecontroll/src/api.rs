@@ -13,6 +13,7 @@
 //! | `POST /api/nodes/<id>/name-register` · `name-revoke` · `report-status` · `report-action` · `contact` | names, reports, Meldeweg (owner) |
 //! | `POST /api/nodes/<id>/report` | report a name or ID of the node's network (member key of this PC) |
 //! | `POST /api/nodes/<id>/public` · `public-web` · `public-off` | public through the gate (docs/11 §5) |
+//! | `POST /api/nodes/<id>/bridge3-add` · `/api/bridge3/settings` · `/api/bridge3/<id>/start\|stop\|delete`, `GET /api/bridge3/<id>/log` | Bridge 3 servers (docs/11 §8) |
 //! | `GET /api/browser` · `POST /api/browser/resolve` · `/api/browser/search` | the Bridge-Browser |
 //! | `POST /api/wizard/start` · `short` · `confirm` · `check` · `create` · `cancel` | assistant "Neues BridgeNet" |
 //! | `POST /api/join/check` · `/api/join` | "Netz beitreten" |
@@ -41,6 +42,9 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
             ["browser"] => Answer::json(200, &browser::nodes(app).await),
             ["nodes", id, "dashboard"] => result(ops::dashboard(app, id, call.query).await),
             ["nodes", id, "log"] => log(app, id, call.query),
+            ["bridge3", id, "log"] if config::check_bridge3_id(id).is_ok() => {
+                log_of(app, &crate::bridge3::proc_id(id), call.query)
+            }
             ["nodes", id, "reports"] if config::check_id(id).is_ok() => {
                 result(moderation::reports(app, id, call.query).await)
             }
@@ -53,6 +57,13 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
     };
     match parts.as_slice() {
         ["nodes", id, action] => node_action(app, id, action, &body).await,
+        ["bridge3", "settings"] => result(crate::bridge3::settings(app, &body).await),
+        ["bridge3", id, action] if config::check_bridge3_id(id).is_ok() => match *action {
+            "start" => result(crate::bridge3::start(app, id).await),
+            "stop" => result(crate::bridge3::stop(app, id).await),
+            "delete" => result(crate::bridge3::delete(app, id, text(&body, "confirm")).await),
+            _ => Answer::error(404, "Nicht gefunden"),
+        },
         ["wizard", step] => wizard(app, step, &body).await,
         ["browser", "resolve"] => result(browser::resolve(app, &body).await),
         ["browser", "search"] => result(browser::search(app, &body).await),
@@ -109,6 +120,11 @@ fn log(app: &App, id: &str, query: &str) -> Answer {
     if config::check_id(id).is_err() {
         return Answer::error(404, "Nicht gefunden");
     }
+    log_of(app, id, query)
+}
+
+/// The end of a process log (`id`: a node ID, or a Bridge 3 server's `b3-<id>` - both checked by the caller).
+fn log_of(app: &App, id: &str, query: &str) -> Answer {
     let lines = ops::query_value(query, "lines").parse::<usize>().unwrap_or(200).clamp(1, 1000);
     Answer::json(200, &json!({"lines": logfile::tail(&app.node_log(id), lines)}))
 }
@@ -160,6 +176,7 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
             None => Answer::error(400, "on: true oder false"),
         },
         "public-off" => result(crate::public::make_private(app, id).await),
+        "bridge3-add" => result(crate::bridge3::add(app, id, body).await),
         "site-check" => result(crate::sites::check(app, id, body).await),
         "site-publish" => result(crate::sites::publish(app, id, body).await),
         _ => Answer::error(404, "Nicht gefunden"),

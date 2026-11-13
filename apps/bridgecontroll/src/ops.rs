@@ -783,6 +783,7 @@ pub async fn delete(app: &App, id: &str, confirm: &str) -> Result<Value, String>
     if entry.public_key.is_some() {
         crate::public::make_private(app, id).await?; // route, Funnel (if the last) and address first
     }
+    crate::bridge3::stop_for_node(app, id).await; // its Bridge 3 servers go with it
     app.supervisor.stop(id).await;
     let dir = app.node_dir(&entry);
     let backup = app.options.app_dir.join(BACKUP_DIR).join(format!("{}-{}", entry.id, now_ms()));
@@ -792,6 +793,7 @@ pub async fn delete(app: &App, id: &str, confirm: &str) -> Result<Value, String>
     }
     save(app, |config| {
         config.nodes.retain(|node| node.id != id);
+        crate::bridge3::forget_node(config, id);
         Ok(())
     })
     .await?;
@@ -1031,6 +1033,7 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
     if entry.role != NodeRole::Owner {
         return Ok(answer);
     }
+    answer["bridge3"] = crate::bridge3::view(app, id).await;
     let now = now_ms();
     let dir = app.node_dir(&entry);
     let locals = local_nodes(app).await;

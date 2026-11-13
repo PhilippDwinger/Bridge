@@ -18,6 +18,7 @@
 pub mod api;
 pub mod assets;
 pub mod autostart;
+pub mod bridge3;
 pub mod browser;
 pub mod config;
 pub mod http;
@@ -150,6 +151,8 @@ pub struct App {
     pub warnings: Vec<String>,
     /// Signalled when the user ends the app from the UI.
     pub quit: Notify,
+    /// The last check of the Bridge 3 folder and Python (docs/11 §8).
+    pub bridge3: bridge3::Checks,
 }
 
 impl App {
@@ -173,6 +176,8 @@ impl App {
         self.supervisor.start(Launch {
             id: entry.id.clone(),
             mode: "node",
+            program: None,
+            env: Vec::new(),
             args: ops::node_args(entry, &self.node_dir(entry)),
             log: self.node_log(&entry.id),
         });
@@ -290,6 +295,7 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
         links: Mutex::new(HashMap::new()),
         warnings,
         quit: Notify::new(),
+        bridge3: bridge3::Checks::default(),
         options,
     });
     // The first start makes the start menu entry if there is none (nothing on the desktop is touched then).
@@ -317,6 +323,8 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
                 tracing::warn!(%error, "Tor");
             }
         }
+        let autostart = Arc::clone(&app);
+        tokio::spawn(async move { bridge3::autostart(&autostart).await });
     }
     let tasks = vec![http::serve(listener, Arc::clone(&app)), tokio::spawn(status_rounds(Arc::clone(&app)))];
     tracing::info!(port = addr.port(), "BridgeControll bereit");
