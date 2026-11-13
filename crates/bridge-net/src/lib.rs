@@ -33,6 +33,7 @@ pub mod federation;
 pub mod log;
 pub mod merkle;
 pub mod names;
+pub mod retire;
 pub mod state;
 pub mod statements;
 
@@ -48,6 +49,7 @@ pub use log::{
 };
 pub use merkle::{Hash, Tree};
 pub use names::{AdultPolicy, Category, Label, LabelTarget, Name, NameKind, NameRules};
+pub use retire::Retire;
 pub use state::{
     Ability, Ahead, Applied, Endorsement, FederationInfo, NameInfo, NetState, ResolvedName, RulesAhead, SealInfo,
     Search, Transition, Transitions,

@@ -132,3 +132,77 @@ fn signatures_time_and_log() -> NetResult<()> {
     assert!(apps.net.skip(&statement).is_ok());
     Ok(())
 }
+
+/// An app name of the owner for `apps.app`.
+fn app_name(apps: &Apps, name: &str) -> NetResult<bridge_net::Name> {
+    Ok(bridge_net::Name {
+        name: name.into(),
+        kind: bridge_net::NameKind::App,
+        target: apps.app.id().clone(),
+        owner: apps.owner.id().clone(),
+        owner_card: apps.owner.key_card(Role::Client, None, T0)?,
+        card: Some(apps.app.key_card(Role::App, None, T0)?),
+        description: String::new(),
+        tags: Vec::new(),
+        category: bridge_net::Category::General,
+        hosts: Vec::new(),
+    })
+}
+
+#[test]
+fn a_deleted_app_is_gone_with_its_names() -> NetResult<()> {
+    use bridge_net::{Retire, Revoke, RevokeTarget};
+    let mut apps = setup(None)?;
+    let net = apps.net.net.clone();
+    // Names need level 1.
+    let seal = Seal { subject: apps.owner.id().clone(), level: 1, services: Services::NONE, card: None };
+    let sealed = apps.net.sign(&seal, &apps.net.master, T0 + 4 * MIN)?;
+    apps.net.accept(&sealed)?;
+    let name = app_name(&apps, "laden")?;
+    let named = name.sign_name(&net, T0 + 5 * MIN, T0 + 30 * DAY, &apps.owner, Some(&apps.app))?;
+    apps.net.accept(&named)?;
+    let version = signed(&apps, &manifest(&apps, vec![apps.web.id().clone()])?)?;
+    assert!(check_app(&apps.net.state, &version, NOW).is_ok());
+    assert!(apps.net.state.resolve_name("laden", NOW).is_ok());
+
+    let body = Retire::new(&apps.app, &apps.owner, T0)?;
+    // Attacks first: a stranger's key as owner, only one signer, too short a lifetime, a non-member owner.
+    let stranger = identity(50);
+    let foreign = Retire::new(&apps.app, &stranger, T0)?.sign_retire(&net, T0 + 15 * MIN, &apps.app, &stranger)?;
+    assert_eq!(apps.net.skip(&foreign)?, NetError::NotMember);
+    let alone = body.sign(&net, T0 + 15 * MIN, T0 + 15 * MIN + 366 * DAY, &apps.owner)?;
+    assert!(matches!(apps.net.skip(&alone)?, NetError::Forbidden(_)), "the app key must sign too");
+    let short = body.sign_multi(&net, T0 + 15 * MIN, T0 + 30 * DAY, &[&apps.app, &apps.owner])?;
+    assert!(matches!(apps.net.skip(&short)?, NetError::Forbidden(_)), "a year at least");
+    let long = body.sign_multi(&net, T0 + 15 * MIN, T0 + 15 * MIN + 400 * DAY, &[&apps.app, &apps.owner])?;
+    assert!(matches!(apps.net.skip(&long)?, NetError::Forbidden(_)), "at most a year and a day");
+
+    let retire = body.sign_retire(&net, T0 + 15 * MIN, &apps.app, &apps.owner)?;
+    apps.net.accept(&retire)?;
+    assert!(apps.net.state.is_retired(apps.app.id(), NOW));
+    assert!(matches!(check_app(&apps.net.state, &version, NOW), Err(NetError::Forbidden(_))), "every version");
+    assert!(apps.net.state.resolve_name("laden", NOW).is_err(), "its name ended");
+    assert!(apps.net.state.names_for(apps.app.id(), NOW).is_empty());
+    // Once only, never undone (only the net key could), no new names for it.
+    let again = body.sign_retire(&net, T0 + 16 * MIN, &apps.app, &apps.owner)?;
+    assert!(matches!(apps.net.skip(&again)?, NetError::Forbidden(_)));
+    let undo = Revoke { target: RevokeTarget::Statement(retire.hash_bytes()), reason: String::new() };
+    let undo = apps.net.sign(&undo, &apps.owner, T0 + 17 * MIN)?;
+    assert!(matches!(apps.net.skip(&undo)?, NetError::Forbidden(_)), "the owner can not undo it");
+    let renamed = name.sign_name(&net, T0 + 18 * MIN, T0 + 30 * DAY, &apps.owner, Some(&apps.app))?;
+    assert!(matches!(apps.net.skip(&renamed)?, NetError::Forbidden(_)), "no new name for a deleted app");
+    // The name is free for another app.
+    let other = identity(51);
+    let mut free = app_name(&apps, "laden")?;
+    free.target = other.id().clone();
+    free.card = Some(other.key_card(Role::App, None, T0)?);
+    let free = free.sign_name(&net, T0 + 19 * MIN, T0 + 30 * DAY, &apps.owner, Some(&other))?;
+    apps.net.accept(&free)?;
+    // Replay from scratch gives the same.
+    let replayed = apps.net.replayed()?;
+    assert!(replayed.is_retired(apps.app.id(), NOW) && replayed.resolve_name("laden", NOW).is_ok());
+    // A year later the deletion ends - every version from before has expired by then.
+    assert!(!apps.net.state.is_retired(apps.app.id(), T0 + 15 * MIN + 367 * DAY));
+    let _ = Kind::Retire;
+    Ok(())
+}

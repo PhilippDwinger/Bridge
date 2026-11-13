@@ -82,6 +82,7 @@ use crate::names::{
     AdultPolicy, Category, Label, LabelTarget, MAX_NAME_LIFETIME_MS, Name, NameKind, NameRules,
     description_is_reserved, fold, name_is_reserved, reserved_skeletons, search_words, skeleton, split_address,
 };
+use crate::retire::{MAX_RETIRE_LIFETIME_MS, MIN_RETIRE_LIFETIME_MS, Retire};
 use crate::statements::{
     Ban, Body, DAY_MS, Delegation, Invite, JoinMode, Kind, LogRules, Manifest, Member, Revoke, RevokeTarget, Right,
     Rights, Seal, Service, Services, WATCH_SERVICES, WatchRules,
@@ -124,6 +125,8 @@ pub const BAN_MEMORY_MS: i64 = (365 + 90 + 1) * DAY_MS;
 pub const MAX_NAMES: usize = 100_000;
 /// Most labels in a network (docs/08 §5).
 pub const MAX_LABELS: usize = 100_000;
+/// Most deleted apps (`retire`) in effect at once (docs/07 §10; beyond: no further deletion, fail closed).
+pub const MAX_RETIRED: usize = 100_000;
 /// Most results of one name search.
 pub const MAX_SEARCH_RESULTS: usize = 50;
 /// Longest search query (characters).
@@ -173,6 +176,7 @@ enum Key {
     Name(String),
     Label(LabelTarget),
     Federation(Id),
+    Retire(Id),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,6 +209,10 @@ enum Data {
     },
     /// A connection to another network (docs/10 §6): its gateways and the statement itself (clients check it).
     Federation(Box<FederationData>),
+    /// An app deleted by its owner (docs/07 §10).
+    Retire {
+        owner: Id,
+    },
 }
 
 /// A federation in effect.
@@ -285,6 +293,8 @@ struct Grants {
     invites: BTreeMap<Hash, Grant>,
     names: BTreeMap<String, Grant>,
     federations: BTreeMap<Id, Grant>,
+    /// Deleted apps (`retire`), by app ID.
+    retired: BTreeMap<Id, Grant>,
     /// Labels of names and of IDs (two maps, so a lookup needs no allocation).
     name_labels: BTreeMap<String, Grant>,
     id_labels: BTreeMap<Id, Grant>,
@@ -321,6 +331,7 @@ impl Grants {
             Key::Label(LabelTarget::Name(name)) => self.name_labels.get(name),
             Key::Label(LabelTarget::Id(id)) => self.id_labels.get(id),
             Key::Federation(peer) => self.federations.get(peer),
+            Key::Retire(app) => self.retired.get(app),
         }
     }
 
@@ -351,6 +362,7 @@ impl Grants {
             Key::Label(LabelTarget::Name(name)) => self.name_labels.insert(name, grant),
             Key::Label(LabelTarget::Id(id)) => self.id_labels.insert(id, grant),
             Key::Federation(peer) => self.federations.insert(peer, grant),
+            Key::Retire(app) => self.retired.insert(app, grant),
         };
         old
     }
@@ -371,6 +383,7 @@ impl Grants {
             Key::Label(LabelTarget::Name(name)) => self.name_labels.remove(name),
             Key::Label(LabelTarget::Id(id)) => self.id_labels.remove(id),
             Key::Federation(peer) => self.federations.remove(peer),
+            Key::Retire(app) => self.retired.remove(app),
         }?;
         if let (Key::Name(name), Data::Name(data)) = (key, &grant.data) {
             if self.name_skeletons.get(&data.skeleton) == Some(name) {
@@ -825,6 +838,7 @@ impl NetState {
             Kind::Name => self.check_name(statement, &signers, at)?,
             Kind::Label => self.check_label(statement, &signers, at)?,
             Kind::Federation => self.check_federation(statement, &signers, at)?,
+            Kind::Retire => self.check_retire(statement, &signers, at)?,
             Kind::Head | Kind::Cosign | Kind::Home | Kind::App | Kind::Blocklist | Kind::Agent => {
                 return Err(NetError::format("entry: not a log kind"));
             }
@@ -858,6 +872,10 @@ impl NetState {
             Effect::Grant(_, Grant { data: Data::Name(data), .. }) => {
                 self.verify_carried(statement, &signers, at, &data.body.cards())?;
             }
+            Effect::Grant(_, Grant { data: Data::Retire { .. }, .. }) => {
+                let body = Retire::from_body(statement.body())?;
+                self.verify_carried(statement, &signers, at, &body.cards())?;
+            }
             _ => self.verify_signers(statement, &signers, at)?,
         }
         Ok((effect, pool))
@@ -884,7 +902,7 @@ impl NetState {
     /// key) that is no admin. Admins revoke names from the general pool (with its reserve).
     fn is_names_entry(&self, effect: &Effect, signers: &[Id], at: i64) -> bool {
         match effect {
-            Effect::Grant(Key::Name(_), _) => true,
+            Effect::Grant(Key::Name(_) | Key::Retire(_), _) => true,
             Effect::RevokeStatement(key @ Key::Name(_)) => match (signers, self.grants.get(key)) {
                 ([signer], Some(grant)) => {
                     grant.issuers.contains(signer) && self.admin_rights_at(signer, at).is_empty()
@@ -1081,6 +1099,9 @@ impl NetState {
         if body.target != body.owner {
             self.check_subject(&body.target, iat, at, false)?;
         }
+        if body.kind == NameKind::App && self.is_retired(&body.target, at) {
+            return Err(NetError::forbidden("name: the app was deleted by its owner"));
+        }
         let rules = &self.name_rules;
         let level = self.level(&body.owner, at).ok_or(NetError::NotMember)?;
         if level < rules.min_level {
@@ -1196,8 +1217,11 @@ impl NetState {
                     Key::Member(_) | Key::Invite(_) => rights.has(Right::Members),
                     Key::Seal(..) | Key::Name(_) | Key::Label(_) => rights.has(Right::Seals),
                     Key::Ban(..) => rights.has(Right::Bans),
-                    Key::Federation(_) => false, // the net key only
+                    Key::Federation(_) | Key::Retire(_) => false, // the net key only
                 };
+                if matches!(key, Key::Retire(_)) && !by_master {
+                    return Err(NetError::forbidden("revoke: a deleted app stays deleted"));
+                }
                 if !(by_master || original || by_right) {
                     return Err(NetError::forbidden("revoke: no right for this statement"));
                 }
@@ -1227,6 +1251,32 @@ impl NetState {
                 Ok(Effect::RevokeIdentity { id, cascade, by_master })
             }
         }
+    }
+
+    /// A deletion of an app (docs/07 §10): app key and owner sign, the owner is a member, neither is banned, the
+    /// lifetime covers every version issued before (one year), the app is not deleted yet.
+    fn check_retire(&self, statement: &Statement, signers: &[Id], at: i64) -> NetResult<Effect> {
+        let body = Retire::from_body(statement.body())?;
+        let (iat, exp) = statement.times();
+        if !(MIN_RETIRE_LIFETIME_MS..=MAX_RETIRE_LIFETIME_MS).contains(&exp.saturating_sub(iat)) {
+            return Err(NetError::forbidden("retire: lifetime one year (up to a day more)"));
+        }
+        if signers != body.signers().as_slice() {
+            return Err(NetError::forbidden("retire: signed by the app key and its owner"));
+        }
+        self.check_subject(&body.app, iat, at, false)?;
+        self.check_subject(&body.owner, iat, at, false)?;
+        if self.level(&body.owner, at).is_none() {
+            return Err(NetError::NotMember);
+        }
+        if self.is_retired(&body.app, at) {
+            return Err(NetError::forbidden("retire: the app is deleted already"));
+        }
+        if !self.grants.retired.contains_key(&body.app) && self.grants.retired.len() >= MAX_RETIRED {
+            return Err(NetError::quota("deleted apps"));
+        }
+        let grant = self.new_grant(statement, signers, Data::Retire { owner: body.owner });
+        Ok(Effect::Grant(Key::Retire(body.app), grant))
     }
 
     /// The identity may receive a grant: not the net key, not compromised, not banned, not voided by an identity
@@ -1406,6 +1456,18 @@ impl NetState {
                 self.set_name_rules();
             }
             Effect::Grant(key, grant) => {
+                if let Key::Retire(app) = &key {
+                    // The names of a deleted app end with it (free again; their floor keeps old statements out).
+                    let names: Vec<String> = self
+                        .grants
+                        .names_by_target
+                        .get(app)
+                        .map(|set| set.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for name in names {
+                        self.take(&Key::Name(name));
+                    }
+                }
                 if let Data::Name(data) = &grant.data {
                     let day = at.div_euclid(DAY_MS);
                     if day != self.name_day {
@@ -1631,6 +1693,12 @@ impl NetState {
     #[must_use]
     pub fn is_member(&self, id: &Id, at: i64) -> bool {
         !self.excluded(id, at) && self.grants.members.get(id).is_some_and(|grant| grant.active(at))
+    }
+
+    /// Whether `app` was deleted by its owner and the deletion holds at `at` (docs/07 §10).
+    #[must_use]
+    pub fn is_retired(&self, app: &Id, at: i64) -> bool {
+        self.grants.retired.get(app).is_some_and(|grant| grant.active(at))
     }
 
     /// Whether `id` is banned at `at`.

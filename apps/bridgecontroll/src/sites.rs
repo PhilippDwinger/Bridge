@@ -378,6 +378,25 @@ pub async fn publish(app: &App, id: &str, body: &Map<String, Value>) -> Result<V
     }))
 }
 
+/// `POST /api/nodes/<id>/site-delete` `{"app"}`: deletes an app of the owner folder in the whole network (docs/07 §10,
+/// ADR 0028) - a `retire` entry signed with its key and the owner key, then the app key is gone. Only apps whose key is
+/// in the owner node's folder.
+pub async fn delete(app: &App, id: &str, body: &Map<String, Value>) -> Result<Value, String> {
+    let entry = entry_of(app, id).await?;
+    admin_client(app, &entry)?;
+    let dir = app.node_dir(&entry);
+    let app_id = Id::parse(text(body, "app").trim()).map_err(|_| "keine App-ID".to_owned())?;
+    let keys = crate::moderation::app_keys(&dir).await;
+    if !keys.iter().any(|key| key["id"] == json!(app_id.as_str())) {
+        return Err("Diese App hat ihren Schlüssel nicht im Ordner des Owner-Knotens – löschen kann sie nur, wer den \
+                    Schlüssel hat (fremde Apps: „Sperren“)."
+            .into());
+    }
+    let url = entry.local_url();
+    let names = patient(|| bridge_node_cli::apps::delete(&dir, &app_id, Some(&url))).await?;
+    Ok(json!({"ok": true, "app": app_id.as_str(), "names": names}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

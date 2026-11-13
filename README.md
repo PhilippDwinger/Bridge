@@ -63,6 +63,10 @@ https://<gerät>.<tailnet>.ts.net/bridge4/<netz>/web/<name>/      eine Website (
 https://<gerät>.<tailnet>.ts.net/bridge4/<netz>/v4/…             der Knoten (Beitritt, SDKs, andere Knoten)
 ```
 
+Jede Website im Dashboard hat dann den Knopf **„Öffentlich“** (die öffentliche Adresse mit Bridge Login); eigene
+Websites lassen sich mit **„Löschen“** im ganzen Netz entfernen (endgültig, die Adresse wird frei; Kommandozeile:
+`bridge-node app delete`).
+
 Voraussetzung: Tailscale installiert und angemeldet, Funnel im Tailnet erlaubt. BridgeControll setzt nur den Pfad
 `/bridge4` (Einträge von BridgeControll 3 bleiben). **„Websites aus“** ist der Not-Aus (sofort), **„Nicht mehr
 öffentlich“** nimmt alles zurück. Netze, die 18+ erlauben, werden nie öffentlich; öffentlich sind nur Apps von Inhabern

@@ -1034,17 +1034,22 @@
     const rank = (n) => (n.self ? 9 : (n.standing.level === null ? -1 : n.standing.level));
     const sorted = data.nodes.slice().sort((a, b) => rank(b) - rank(a) || (a.name || a.id).localeCompare(b.name || b.id));
     const nodeRows = sorted.map((n, index) => dashNodeRow(id, n, index, net));
-    const appRows = data.apps.length ? data.apps.map((a, index) => h('div', { class: 'srv' },
-      h('span', { class: 'srv__nr', text: nr(index) }),
-      h('div', { class: 'srv__body' }, h('span', { class: 'srv__name', text: a.name || short(a.id) }),
-        h('div', { class: 'srv__meta' }, a.banned ? pill('err', 'Gesperrt') : (a.state === 'serving' ? pill('ok', 'Version ' + a.version) : pill('info', 'Holt Version ' + a.version, 'spin')),
-          chip(plural(a.hosts, 'Host', 'Hosts')), chip('App ' + short(a.id)), chip('Owner ' + short(a.owner)))),
-      h('div', { class: 'srv__actions' },
-        !a.banned && a.view && a.state === 'serving' ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.view, target: '_blank', rel: 'noopener noreferrer' }, icon('external'), 'Ansehen') : null,
-        !a.banned && data.app_keys.some((k) => k.id === a.id) ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Neue Version',
-          onclick: () => siteDialog(id, data, data.app_keys.find((k) => k.id === a.id)) }) : null,
-        a.banned ? null : h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Sperren',
-          onclick: () => banDialog(id, a.id, a.name || 'diese App', true) })))) : [h('p', { class: 'bc-empty-line', text: data.app_keys.length
+    const appRows = data.apps.length ? data.apps.map((a, index) => {
+      const own = data.app_keys.some((k) => k.id === a.id);
+      const serving = !a.banned && a.state === 'serving';
+      return h('div', { class: 'srv', 'data-app': a.id },
+        h('span', { class: 'srv__nr', text: nr(index) }),
+        h('div', { class: 'srv__body' }, h('span', { class: 'srv__name', text: a.name || short(a.id) }),
+          h('div', { class: 'srv__meta' }, a.banned ? pill('err', 'Gesperrt') : (a.state === 'serving' ? pill('ok', 'Version ' + a.version) : pill('info', 'Holt Version ' + a.version, 'spin')),
+            a.address ? chip(a.address) : null, chip(plural(a.hosts, 'Host', 'Hosts')), chip('App ' + short(a.id)), chip('Owner ' + short(a.owner)))),
+        h('div', { class: 'srv__actions' },
+          serving && a.public ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.public, target: '_blank', rel: 'noopener noreferrer', title: 'Über die öffentliche Adresse – mit Bridge Login' }, icon('globe'), 'Öffentlich') : null,
+          serving && a.view ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.view, target: '_blank', rel: 'noopener noreferrer', title: 'Auf diesem PC (ohne Login)' }, icon('external'), 'Ansehen') : null,
+          !a.banned && own ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Neue Version',
+            onclick: () => siteDialog(id, data, data.app_keys.find((k) => k.id === a.id)) }) : null,
+          own ? h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Löschen', onclick: () => deleteSiteDialog(id, a) })
+            : (a.banned ? null : h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Sperren',
+              onclick: () => banDialog(id, a.id, a.name || 'diese App', true) })))); }) : [h('p', { class: 'bc-empty-line', text: data.app_keys.length
       ? 'Keine App auf dem Owner-Knoten. Deine Apps (' + data.app_keys.map((a) => a.name).join(', ') + ') liegen auf anderen Hosts – im Bridge-Browser findest du sie über ihre Namen.'
       : 'Noch keine Website. Mit „Website hochladen“ wird ein Ordner auf diesem PC zu einer Website in deinem Netz.' })];
 
@@ -1317,6 +1322,14 @@
       action = h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login braucht eine öffentliche Adresse – erst „Öffentlich machen“.' });
     }
     return h('div', { class: 'bc-stack--tight', id: 'abilities' }, h('h2', { class: 'bc-h2', text: 'Was kann mein Netz?' }), rows, action);
+  }
+
+  function deleteSiteDialog(ownerId, a) {
+    const what = '„' + (a.name || short(a.id)) + '“';
+    confirmDialog(what + ' löschen?',
+      'Die Website verschwindet im ganzen Netz: alle Hosts hören auf und geben ihre Dateien frei' + (a.address ? ', die Adresse ' + a.address + ' wird frei' : '') + '. Das kann man nicht rückgängig machen – für eine neue Website lädst du den Ordner einfach wieder hoch.',
+      'Endgültig löschen',
+      () => api('POST', '/api/nodes/' + ownerId + '/site-delete', { app: a.id }).then(() => { toast('ok', 'Gelöscht', what + ' ist im ganzen Netz weg.'); refresh(); }));
   }
 
   function publicDialog(id, summary) {

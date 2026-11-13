@@ -90,6 +90,7 @@ Aussage der Art `app` (04 §3), `net` = Netz-ID, **zwei Signaturen** (`sigs`: Ap
   geprüft), stellt erst um, wenn alles da und geprüft ist (atomar), und behält die vorige Version als Rückweg.
 - **Host entfernen**: neue Version ohne diesen Host. Ein Host, der sich nicht mehr in der neuesten Version findet,
   hört sofort auf auszuliefern und gibt die Blobs frei. Sperrt das Netz die App oder den Owner, hören alle Hosts auf.
+  **Löschen** (der Owner) über einen Rückzug im Log: §10.
 - **Grenzen**: max. 64 gehostete Apps pro Knoten (einstellbar), je Owner nach seiner Stufe höchstens 4 / 16 / 64
   (Stufe 0 / 1 / 2+, einstellbar), Speicher über die Kontingente des Owners auf diesem Knoten – bei der Annahme für die
   ganze Version reserviert (§5).
@@ -301,6 +302,9 @@ Owner-Knotens **„Neue Version“** (Version + 1, dieselben Hosts). Dahinter di
   `node-key.json` oder App-Schlüsseln darunter.
 - Der Owner-Knoten wird Host; ohne `web`-Siegel siegelt BridgeControll ihn neu (Stufe 3, bisherige Dienste + `web`).
 - „Ansehen“ öffnet die Website über den Leser dieses PCs in einem neuen Tab (jeder Browser dieses PCs).
+- *Phase 8*: Ist das Netz öffentlich, zeigt jede Website mit Namen die Adresse und **„Öffentlich“** (`<öffentliche
+  Adresse>/web/<name>/` – mit Bridge Login, docs/11 §9). Eigene Apps (Schlüssel im Ordner) haben **„Löschen“** statt
+  „Sperren“ (§10); „Sperren“ bleibt für fremde Apps.
 
 ## 9. Grenzen und offene Punkte von Phase 4a
 - Kein `Range` und kein `If-None-Match` beim Ausliefern (der `ETag` ist da; Videos spielen, Springen geht noch nicht).
@@ -327,3 +331,21 @@ Owner-Knotens **„Neue Version“** (Version + 1, dieselben Hosts). Dahinter di
 - *Review 7*: Die vorige Version zählt im Kontingent mit: Wer eine App mit lauter neuen Dateien aktualisiert, braucht
   Platz für aktuelle + vorige + neue Version.
 - Daten-Werkzeuge und Server-Code: Stufe 2 (§6).
+
+## 10. Apps löschen (Phase 8, ADR 0028)
+- **Rückzug** = Log-Eintrag der Art `retire` (06 §3): `{"app","owner","card","owner_card"}` (Karten wie im Manifest),
+  unterschrieben von **App-Schlüssel und Owner** (`sigs`), Laufzeit mindestens 1 Jahr und höchstens 1 Jahr + 1 Tag.
+  Angenommen nur, wenn der Owner Mitglied ist, keiner der beiden gesperrt ist und die App noch nicht zurückgezogen ist.
+  Er zählt im Topf der Namen (06, Review 9), höchstens 100.000 gelten gleichzeitig (darüber `429`, fail closed).
+- **Wirkung**, solange er gilt (`NetState::is_retired`):
+  - Jede Version der App ist ungültig (`check_standing`): Hosts nehmen keine an, die gehostete hört in ihrer nächsten
+    Runde auf und gibt die Blobs frei (wie bei einer Sperre), der Leser liefert nichts mehr aus, `/v4/app/publish`
+    lehnt ab (`403`).
+  - Alle Namen, die auf die App zeigen, enden (wie widerrufen: frei, mit Untergrenze gegen alte Aussagen); neue Namen
+    für sie werden abgelehnt.
+  - Nicht widerrufbar (nur der Hauptschlüssel), bleibt auch bei `revoke identity … cascade` des Owners.
+- **Kommandozeile**: `bridge-node app delete --data <ordner> --app <id> [--node <adresse>]` – unterschreibt mit
+  `apps/<id>.json` und `owner-key.json`, gibt den Rückzug an den Owner-Knoten, wartet, bis er gilt, und löscht dann den
+  App-Schlüssel.
+- **BridgeControll**: „Löschen“ bei eigenen Apps (Rückfrage mit Name und Adresse; „kann nicht rückgängig gemacht
+  werden“), dahinter dieselbe Funktion.

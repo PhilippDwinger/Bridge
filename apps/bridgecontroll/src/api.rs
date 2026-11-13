@@ -181,6 +181,7 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
         "bridge3-add" => result(crate::bridge3::add(app, id, body).await),
         "site-check" => result(crate::sites::check(app, id, body).await),
         "site-publish" => result(crate::sites::publish(app, id, body).await),
+        "site-delete" => result(crate::sites::delete(app, id, body).await),
         _ => Answer::error(404, "Nicht gefunden"),
     }
 }

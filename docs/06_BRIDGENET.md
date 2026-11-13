@@ -160,6 +160,7 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 | `app` | eine Version einer Bridge-App (07 §3) | App-Schlüssel **und** Owner (`sigs`) – **steht nicht im Log**, die Hosts behalten sie (Phase 4a) |
 | `name` | Name → Ziel, Art, Inhaber, Karten, Beschreibung, Schlagworte, Kategorie (08 §3) | der Inhaber (bei Apps mit dem App-Schlüssel, `sigs`) nach den Namensregeln (Phase 4) |
 | `label` | `{"target":"<name oder id>","category":"adult\|general","reason":"…"}` (08 §5) | Admin mit `seals` (Phase 4) |
+| `retire` | `{"app":"<app-id>","owner":"<mitglied-id>","card":<karte des app-schlüssels>,"owner_card":<karte des owners>}` – eine App löschen (07 §10, ADR 0028) | App-Schlüssel **und** Owner (`sigs`; der Owner ist Mitglied, keiner gesperrt), Laufzeit ≥ 1 Jahr; nicht widerrufbar (nur Hauptschlüssel) |
 
 - **Hash einer Aussage** = Base64url(SHA-256(kanonische Bytes der Aussage **ohne** `sig` bzw. `sigs`)). Er ist die
   Identität der Aussage für Widerruf (`revoke` mit `statement`), Ersetzen („neuer ersetzt älter“), Doppelte und
@@ -169,7 +170,7 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 - **Karten im Log**: Das Manifest trägt die Karte des Hauptschlüssels (`card`, Rolle `net`), jede Delegation die
   Karte des Admins (`card`, Rolle `admin`, Pflicht), ein Siegel optional die Karte des Inhabers (Pflicht bei
   `gateway`, mit `urls`). So kann jeder, der das Log hat, alle Signaturen prüfen.
-- **Mehr-Augen** (`sigs`) nur bei `manifest` und `seal` (dazu `name` einer App: App-Schlüssel + Inhaber, 08 §3); alle
+- **Mehr-Augen** (`sigs`) nur bei `manifest` und `seal` (dazu `name` einer App und `retire`: App-Schlüssel + Inhaber); alle
   anderen Arten haben genau einen Aussteller. Jeder
   Unterzeichner muss selbst berechtigt sein. `sigs` ist streng aufsteigend nach `iss` sortiert (derselbe
   Unterzeichner zweimal ist damit ungültig), jeder Eintrag ist genau `{"iss","sig"}` – sonst ist die Aussage ungültig

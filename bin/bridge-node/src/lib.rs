@@ -25,6 +25,7 @@
 //! bridge-node app publish --data <folder> --app <id> --folder <path> [--host <node-id>]... [--entry <file>]
 //!                         [--description <text>] [--node <url>]
 //! bridge-node app hosts   --data <folder> --app <id> [--add <node-id>]... [--remove <node-id>]... [--node <url>]
+//! bridge-node app delete  --data <folder> --app <id> [--node <url>]
 //! ```
 //! `net rescue` reads the 24 words from the terminal or standard input (one line, never shown, stored or logged; past
 //! std's stdin buffer, see `secret`).
@@ -110,6 +111,7 @@ pub const USAGE: &str = "Aufruf:
                           [--description <text>] [--node <adresse>]   (neue Version; Hosts brauchen ein Siegel mit
                           Dienst web, ohne --host: die der letzten Version, sonst der Owner-Knoten)
   bridge-node app hosts   --data <ordner> --app <id> [--add <knoten-id>]... [--remove <knoten-id>]... [--node <adresse>]
+  bridge-node app delete  --data <ordner> --app <id> [--node <adresse>]   (löscht die App im ganzen Netz, endgültig)
                           (neue Version mit denselben Dateien und geänderten Hosts)
   bridge-node net federate --data <ordner> --peer <netz-id> --gateway <adresse>... [--days 365] [--node <adresse>]
                           (Netz verbinden, nur mit den 24 Wörtern; beide Owner müssen es tun, docs/10 §6)
@@ -878,6 +880,15 @@ async fn app_command(command: &str, flags: &Flags) -> Result<(), String> {
         return Ok(());
     }
     let app = Id::parse(flags.need("--app")?).map_err(|_| "--app: eine App-ID (32 Zeichen)".to_owned())?;
+    if command == "delete" {
+        flags.only(&["--data", "--app", "--node"])?;
+        let names = apps::delete(&data, &app, flags.one("--node")).await?;
+        println!("App {app} gelöscht: alle Hosts hören auf und geben die Dateien frei, der App-Schlüssel ist weg.");
+        if !names.is_empty() {
+            println!("Frei geworden: {}", names.join(", "));
+        }
+        return Ok(());
+    }
     let done = match command {
         "publish" => {
             flags.only(&["--data", "--app", "--folder", "--host", "--entry", "--description", "--node"])?;

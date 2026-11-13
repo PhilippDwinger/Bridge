@@ -276,7 +276,8 @@ freigegeben).
    zurück – eine signierte Aussage im Transparenz-Log, alle Hosts hören auf und löschen ihre Dateien, der Name wird
    frei. Anders als „Sperren“ (Maßnahme des Admins gegen fremde Inhalte, bleibt sichtbar). In BridgeControll „Löschen“
    neben „Neue Version“; dazu pro Website der Link „Öffentlich ansehen“ (`…/bridge4/<netz>/web/<name>/`).
-   Spezifikation und ADR vor dem Code.
+   **Gebaut 13.11.2026** (docs/07 §10, ADR 0028): Log-Art `retire`, `bridge-node app delete`, „Löschen“ und
+   „Öffentlich“ in BridgeControll.
 2. **Öffentliche Eingänge auf PCs von Mitgliedern** (Manifest-Regel, der Owner erlaubt es): erst damit kann ein PC
    außerhalb des LANs Speicher-Knoten, Empfänger oder zweiter Login-Knoten sein; das Tor ohne Neustart neu laden.
 3. **Gerät hinzufügen** (Bridge Login, Paddy 13.11.: ein Konto auf mehreren Geräten ohne Fenster für fremde Geräte):

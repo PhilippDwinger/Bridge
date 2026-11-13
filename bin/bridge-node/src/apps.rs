@@ -1,4 +1,4 @@
-//! `bridge-node app create|publish|hosts` (docs/07 §8): Bridge apps from the owner's data folder, without
+//! `bridge-node app create|publish|hosts|delete` (docs/07 §8, §10): Bridge apps from the owner's data folder, without
 //! BridgeControll. User-facing texts are German.
 //!
 //! - The app key lives in `apps/<app-id>.json` in the data folder (owner-only file) - never on a host.
@@ -17,7 +17,7 @@ use bridge_core::app::{AppManifest, MAX_APP_NAME_CHARS};
 use bridge_core::encoding::{b64, b64_fixed};
 use bridge_core::json::parse_strict;
 use bridge_core::{Id, Identity, Statement};
-use bridge_net::{Member, NetState, is_web_host};
+use bridge_net::{Member, NetState, Retire, is_web_host};
 use bridge_node::admin::{AdminClient, YEAR_MS};
 use bridge_node::keyfile;
 use bridge_sdk::{AppDraft, AppVersion, BlobSource, Client, SdkError};
@@ -233,6 +233,41 @@ impl Owner {
         }
         best
     }
+}
+
+/// How long `app delete` waits until the log has the deletion.
+const DELETE_WAIT: Duration = Duration::from_secs(30);
+
+/// `app delete` (docs/07 §10): a `retire` entry signed with the app key and the owner key of the folder, handed to the
+/// owner node; once the log has it, the app key is removed. Returns the names that ended with the app.
+pub async fn delete(data: &Path, app: &Id, node_url: Option<&str>) -> Result<Vec<String>, String> {
+    let (key, _) = load(data, app)?;
+    let owner_key = owner(data)?;
+    let owner = Owner::open(data, node_url).await?;
+    let at = now();
+    let names: Vec<String> =
+        owner.state.names_for(app, at).into_iter().map(|resolved| resolved.info.name.name.clone()).collect();
+    if !owner.state.is_retired(app, at) {
+        let body = Retire::new(&key, &owner_key, at).map_err(|e| format!("Löschen: {e}"))?;
+        let statement =
+            body.sign_retire(owner.admin.net(), at, &key, &owner_key).map_err(|e| format!("Löschen: {e}"))?;
+        owner.admin.submit(&statement).await.map_err(|e| format!("Löschen: {e}"))?;
+        let deadline = Instant::now() + DELETE_WAIT;
+        loop {
+            let (_, state) = owner.admin.load_state().await?;
+            if state.is_retired(app, now()) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("Der Owner-Knoten hat das Löschen angenommen, das Log zeigt es aber noch nicht - später \
+                            noch einmal versuchen."
+                    .into());
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    std::fs::remove_file(app_key_path(data, app)).map_err(|e| format!("App-Schlüssel löschen: {e}"))?;
+    Ok(names)
 }
 
 /// What `app publish` / `app hosts` did.

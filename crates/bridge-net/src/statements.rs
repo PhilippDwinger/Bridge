@@ -88,11 +88,13 @@ pub enum Kind {
     Agent,
     /// A connection to another network (docs/10 §6; log, net key only).
     Federation,
+    /// An app deleted by its owner (docs/07 §10; log, app key and owner).
+    Retire,
 }
 
 impl Kind {
     /// The kinds that are entries of the transparency log.
-    pub const LOG_KINDS: [Kind; 10] = [
+    pub const LOG_KINDS: [Kind; 11] = [
         Kind::Manifest,
         Kind::Delegation,
         Kind::Invite,
@@ -103,6 +105,7 @@ impl Kind {
         Kind::Name,
         Kind::Label,
         Kind::Federation,
+        Kind::Retire,
     ];
 
     /// Wire name (`t`).
@@ -125,6 +128,7 @@ impl Kind {
             Self::Blocklist => "blocklist",
             Self::Agent => "agent",
             Self::Federation => "federation",
+            Self::Retire => "retire",
         }
     }
 
@@ -148,6 +152,7 @@ impl Kind {
             "blocklist" => Self::Blocklist,
             "agent" => Self::Agent,
             "federation" => Self::Federation,
+            "retire" => Self::Retire,
             _ => return None,
         })
     }

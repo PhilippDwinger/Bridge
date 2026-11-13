@@ -1174,7 +1174,21 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
     let apps: Vec<Value> = apps
         .iter()
         .map(|hosted| {
+            // Its address (the first name pointing to it) and - in a public network - the public frame with Bridge
+            // Login (docs/07 §8a, docs/11 §9).
+            let address = state.names_for(&hosted.app, now).first().map(|resolved| resolved.info.name.name.clone());
+            let public = match (&entry.public_url, &address) {
+                (Some(base), Some(name)) if entry.public_web => {
+                    Some(format!("{}/web/{name}/", base.trim_end_matches('/')))
+                }
+                _ => None,
+            };
             json!({
+                "address": address.as_ref().map(|name| match &manifest.short {
+                    Some(short) => format!("{name}.{short}"),
+                    None => name.clone(),
+                }),
+                "public": public,
                 "id": hosted.app.as_str(),
                 "name": hosted.name,
                 "version": hosted.version,

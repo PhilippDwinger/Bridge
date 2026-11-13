@@ -96,6 +96,37 @@ async fn upload_a_website_and_a_new_version() -> TestResult {
         Ok((status == 200 && body.contains("Version zwei")).then_some(()))
     })
     .await?;
+    let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+    assert_eq!(dash["apps"][0]["address"], json!("testseite.testnetz"));
+    assert_eq!(dash["apps"][0]["public"], json!(null), "no public link while the network is not public");
+
+    // Löschen (docs/07 §10): gone in the whole network, the address free, the key gone - for good.
+    let delete = format!("/api/nodes/{owner}/site-delete");
+    let (status, refused) = app.post(&delete, &json!({"app": "x"})).await?;
+    assert!(status == 400 && refused.to_string().contains("App-ID"), "{status} {refused}");
+    let deleted = app.ok(&delete, &json!({"app": app_id})).await?;
+    assert_eq!(deleted["names"], json!(["testseite"]));
+    wait_for(30, "site gone", || async {
+        let (status, _) = get_page(&view).await?;
+        Ok((status == 404).then_some(()))
+    })
+    .await?;
+    wait_for(30, "address free", || async {
+        let (status, _) = app.post("/api/browser/resolve", &json!({"address": "testseite.testnetz"})).await?;
+        Ok((status != 200).then_some(()))
+    })
+    .await?;
+    let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+    assert!(dash["app_keys"].as_array().is_some_and(Vec::is_empty), "the key is gone: {}", dash["app_keys"]);
+    wait_for(30, "dashboard without the app", || async {
+        let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+        Ok(dash["apps"].as_array().is_some_and(Vec::is_empty).then_some(()))
+    })
+    .await?;
+    let (status, again) = app.post(&delete, &json!({"app": app_id})).await?;
+    assert!(status == 400 && again.to_string().contains("Schlüssel"), "{status} {again}");
+    let (status, _) = app.post(&publish, &json!({"folder": site.display().to_string(), "app": app_id})).await?;
+    assert_eq!(status, 400, "no new version of a deleted app");
 
     app.shutdown().await;
     Ok(())

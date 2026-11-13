@@ -438,6 +438,10 @@ def main():
             public.frame_locator("iframe").locator("h1:has-text('Hallo von der Testseite')").wait_for(timeout=30000)
             assert "Problem melden" in public.locator(".bar").inner_text(), public.locator(".bar").inner_text()
             shot_page("29-oeffentlich-huelle")
+            # The website row links the public frame (with Bridge Login) besides the local view.
+            page.wait_for_selector(".srv:has-text('Meine Testseite') a:has-text('Öffentlich')", timeout=30000)
+            href = page.get_attribute(".srv:has-text('Meine Testseite') a:has-text('Öffentlich')", "href")
+            assert href == "https://pc.tail1234.ts.net/bridge4/testnetz/web/meine-testseite/", href
             # Was kann mein Netz? and Bridge Login (docs/11 §9): the owner node becomes a storage node, the frame gets
             # Bridge's login script.
             page.wait_for_selector("#abilities button:has-text('Login hier einschalten')")
@@ -510,6 +514,16 @@ def main():
                     raise AssertionError("Bridge-3-Server nicht über das Tor erreichbar")
                 time.sleep(0.5)
             check.close()
+
+            # Löschen (docs/07 §10): the own website goes in the whole network, the address is free.
+            page.locator(".srv:has-text('Meine Testseite')").scroll_into_view_if_needed()
+            page.click(".srv:has-text('Meine Testseite') button:has-text('Löschen')")
+            page.wait_for_selector(".b-dialog :text('Endgültig löschen')")
+            shot("36-website-loeschen", dialog=True)
+            page.click(".b-dialog button:has-text('Endgültig löschen')")
+            page.wait_for_selector("text=ist im ganzen Netz weg", timeout=60000)
+            page.wait_for_selector(".srv:has-text('Meine Testseite')", state="detached", timeout=60000)
+            shot("37-dashboard-geloescht")
 
             page.evaluate("fetch('/api/quit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})")
             browser.close()
