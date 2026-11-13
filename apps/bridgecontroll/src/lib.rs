@@ -31,6 +31,7 @@ pub mod sites;
 pub mod startmenu;
 pub mod status;
 pub mod supervisor;
+pub mod update;
 pub mod wizard;
 
 use std::collections::HashMap;
@@ -108,6 +109,10 @@ pub struct Options {
     pub menu_dir: Option<PathBuf>,
     /// The `tailscale` command line (docs/11 §5; tests put a stand-in here).
     pub tailscale: public::SharedTailscale,
+    /// The program file an update replaces (docs/12; `None`: this app does not update itself).
+    pub program: Option<PathBuf>,
+    /// Where updates come from.
+    pub update: update::Source,
 }
 
 impl Options {
@@ -125,6 +130,8 @@ impl Options {
             custom_app_dir: false,
             menu_dir: None,
             tailscale: Arc::new(public::SystemTailscale::find()),
+            program: None,
+            update: update::Source::standard(),
         }
     }
 }
@@ -153,6 +160,8 @@ pub struct App {
     pub quit: Notify,
     /// The last check of the Bridge 3 folder and Python (docs/11 §8).
     pub bridge3: bridge3::Checks,
+    /// Self-update (docs/12).
+    pub updater: update::Updater,
 }
 
 impl App {
@@ -283,7 +292,11 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
     let listener = bind(options.port).await?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let auth = Auth::new();
-    let instance = serde_json::json!({"v": 2, "port": addr.port(), "key": auth.launch_key()}).to_string();
+    let instance = serde_json::json!({
+        "v": 2, "port": addr.port(), "key": auth.launch_key(),
+        "version": update::own_version().to_string(), "pid": std::process::id(),
+    })
+    .to_string();
     config::write_private(&options.app_dir.join(INSTANCE_FILE), instance.as_bytes())?;
     let app = Arc::new(App {
         port: addr.port(),
@@ -296,6 +309,7 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
         warnings,
         quit: Notify::new(),
         bridge3: bridge3::Checks::default(),
+        updater: update::Updater::new(options.update.clone(), &options.app_dir),
         options,
     });
     // The first start makes the start menu entry if there is none (nothing on the desktop is touched then).
@@ -326,7 +340,11 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
         let autostart = Arc::clone(&app);
         tokio::spawn(async move { bridge3::autostart(&autostart).await });
     }
-    let tasks = vec![http::serve(listener, Arc::clone(&app)), tokio::spawn(status_rounds(Arc::clone(&app)))];
+    let tasks = vec![
+        http::serve(listener, Arc::clone(&app)),
+        tokio::spawn(status_rounds(Arc::clone(&app))),
+        tokio::spawn(update::background(Arc::clone(&app))),
+    ];
     tracing::info!(port = addr.port(), "BridgeControll bereit");
     Ok(Running { app, addr, tasks, _lock: lock })
 }

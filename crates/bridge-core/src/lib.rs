@@ -25,6 +25,7 @@ pub mod link;
 pub mod login;
 pub mod mnemonic;
 pub mod pow;
+pub mod release;
 pub mod request;
 pub mod statement;
 pub mod stream;

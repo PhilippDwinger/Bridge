@@ -1,14 +1,16 @@
 //! BridgeControll v2 (ADR 0017).
 //!
 //! ```text
-//! bridgecontroll [--data <app folder>] [--port 7380] [--no-browser] [--autostart]
+//! bridgecontroll [--data <app folder>] [--port 7380] [--no-browser] [--autostart] [--after-update <version>]
 //! bridgecontroll node [--supervised] --data <node folder> [bridge-node flags]
 //! bridgecontroll gate [--supervised] --listen 127.0.0.1:<port> --routes <file>
 //! ```
 //! Without a command it runs the app: the UI on 127.0.0.1, the browser opens with a one-time login link (also printed),
 //! the nodes marked for autostart start. One app per app folder (an exclusive lock, held while it runs): a second start
 //! only opens the browser (with a new login link, proven by the running app) and ends. `--autostart` (start with the
-//! system): no browser. Ends with Ctrl+C or "Beenden" in the UI.
+//! system): no browser. Ends with Ctrl+C or "Beenden" in the UI - or for an update (docs/12): the checked new version
+//! takes the program's place and starts with `--after-update <old version>` (it waits for the lock), see
+//! [`bridgecontroll::update::hand_over`].
 //!
 //! `node`: runs one node exactly like `bridge-node` would (same flags); with `--supervised` it also stops cleanly when
 //! its standard input closes - that is how the app stops the nodes it watches.
@@ -36,10 +38,12 @@ struct AppArgs {
     port: u16,
     browser: bool,
     autostart: bool,
+    after_update: Option<String>,
 }
 
 fn app_args(args: &[String]) -> Result<AppArgs, String> {
-    let mut parsed = AppArgs { data: None, port: bridgecontroll::DEFAULT_PORT, browser: true, autostart: false };
+    let mut parsed =
+        AppArgs { data: None, port: bridgecontroll::DEFAULT_PORT, browser: true, autostart: false, after_update: None };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -49,6 +53,11 @@ fn app_args(args: &[String]) -> Result<AppArgs, String> {
                 parsed.port = port.parse().ok().filter(|port| *port >= 1024).ok_or("--port: 1024-65535")?;
             }
             "--no-browser" => parsed.browser = false,
+            "--after-update" => {
+                let version = iter.next().ok_or("--after-update braucht eine Version")?;
+                bridge_core::release::Version::parse(version).map_err(|_| "--after-update: a.b.c")?;
+                parsed.after_update = Some(version.clone());
+            }
             "--autostart" => {
                 parsed.autostart = true;
                 parsed.browser = false;
@@ -127,7 +136,16 @@ async fn app(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let lock = match InstanceLock::acquire(&app_dir) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("Programm-Pfad unbekannt: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let acquired =
+        if parsed.after_update.is_some() { lock_after_update(&app_dir).await } else { InstanceLock::acquire(&app_dir) };
+    let lock = match acquired {
         Ok(Some(lock)) => lock,
         Ok(None) => return second_start(&app_dir, parsed.autostart).await,
         Err(message) => {
@@ -143,14 +161,12 @@ async fn app(args: &[String]) -> ExitCode {
             .init(),
         Err(error) => eprintln!("Log-Datei: {error}"),
     }
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => {
-            eprintln!("Programm-Pfad unbekannt: {error}");
-            return ExitCode::from(2);
-        }
-    };
-    let mut options = Options::new(app_dir, exe);
+    if let Some(from) = &parsed.after_update {
+        bridgecontroll::update::after_update(&exe, &app_dir, from);
+    }
+    let mut options = Options::new(app_dir.clone(), exe.clone());
+    options.program = Some(exe.clone());
+    options.update = bridgecontroll::update::Source::for_program();
     options.port = parsed.port;
     options.custom_app_dir = custom;
     options.menu_dir = bridgecontroll::startmenu::system_dir();
@@ -175,8 +191,34 @@ async fn app(args: &[String]) -> ExitCode {
         () = running.quit_requested() => {}
     }
     println!("BridgeControll beendet die Knoten …");
+    let app = std::sync::Arc::clone(running.app());
     running.shutdown().await;
+    if let Some(pending) = app.updater.take_pending() {
+        drop(app);
+        match bridgecontroll::update::hand_over(&exe, &app_dir, args, &pending).await {
+            bridgecontroll::update::HandOver::Started => {
+                tracing::info!(version = %pending.version, "Update: die neue Version läuft");
+            }
+            bridgecontroll::update::HandOver::WentBack(why) => {
+                tracing::error!(%why, "Update: zurück zur alten Version");
+            }
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// After an update the old version may still hold the lock for a moment: try for [`bridgecontroll::update::LOCK_WAIT`].
+async fn lock_after_update(app_dir: &std::path::Path) -> Result<Option<InstanceLock>, String> {
+    let deadline = tokio::time::Instant::now() + bridgecontroll::update::LOCK_WAIT;
+    loop {
+        if let Some(lock) = InstanceLock::acquire(app_dir)? {
+            return Ok(Some(lock));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// Another app holds the folder's lock: ask it for a login link (it proves its launch key) and open the browser.
@@ -250,7 +292,16 @@ mod tests {
         assert!(plain.browser && !plain.autostart && plain.data.is_none() && plain.port == 7380);
         let auto = app_args(&args(&["--autostart", "--data", "/x", "--port", "8000"]))?;
         assert!(!auto.browser && auto.autostart && auto.data == Some(PathBuf::from("/x")) && auto.port == 8000);
-        for bad in [&["--port", "80"][..], &["--port"], &["--data"], &["--evil"], &["--port", "x"]] {
+        assert_eq!(app_args(&args(&["--after-update", "0.1.0"]))?.after_update.as_deref(), Some("0.1.0"));
+        for bad in [
+            &["--port", "80"][..],
+            &["--port"],
+            &["--data"],
+            &["--evil"],
+            &["--port", "x"],
+            &["--after-update"],
+            &["--after-update", "1.2"],
+        ] {
             assert!(app_args(&args(bad)).is_err(), "{bad:?}");
         }
         Ok(())

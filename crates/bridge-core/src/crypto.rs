@@ -70,15 +70,18 @@ pub fn mac_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
-/// Incremental SHA-256 (for streams).
+/// Incremental SHA-256 (for streams and downloads).
 #[derive(Clone, Default)]
-pub(crate) struct Hasher(Sha256);
+pub struct Hasher(Sha256);
 
 impl Hasher {
-    pub(crate) fn update(&mut self, bytes: &[u8]) {
+    /// Feeds `bytes`.
+    pub fn update(&mut self, bytes: &[u8]) {
         self.0.update(bytes);
     }
-    pub(crate) fn finish(self) -> [u8; 32] {
+    /// The hash of everything fed.
+    #[must_use]
+    pub fn finish(self) -> [u8; 32] {
         self.0.finalize().into()
     }
 }

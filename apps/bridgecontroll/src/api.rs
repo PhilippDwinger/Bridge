@@ -40,6 +40,7 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
     if call.method == Method::GET {
         return match parts.as_slice() {
             ["overview"] => Answer::json(200, &ops::overview(app).await),
+            ["update"] => Answer::json(200, &app.updater.status()),
             ["browser"] => Answer::json(200, &browser::nodes(app).await),
             ["nodes", id, "dashboard"] => result(ops::dashboard(app, id, call.query).await),
             ["nodes", id, "log"] => log(app, id, call.query),
@@ -79,6 +80,12 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
             None => Answer::error(400, "login_autostart fehlt"),
         },
         ["startmenu"] => result(ops::set_startmenu(app).await),
+        ["update", "check"] => result(crate::update::check(app).await),
+        ["update", "install"] => result(crate::update::install(app, false).await),
+        ["update", "auto"] => match body.get("on").and_then(Value::as_bool) {
+            Some(on) => result(crate::update::set_auto(app, on)),
+            None => Answer::error(400, "on fehlt"),
+        },
         ["quit"] => {
             app.quit.notify_waiters();
             app.quit.notify_one();

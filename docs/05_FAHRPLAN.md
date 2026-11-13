@@ -291,6 +291,9 @@ freigegeben).
    (`remove`, ebenfalls signiert). Keine Passwörter. **Gebaut 14.11.2026** (docs/11 §14, ADR 0027 Nachtrag).
 4. **BridgeControll aktualisiert sich selbst**: „Update verfügbar“ lädt die neue Version von GitHub, prüft Paddys
    Signatur und ersetzt sich (kein ZIP von Hand mehr); Grundlage dafür, dass Knoten anderer nicht veralten.
+   **Gebaut 14.11.2026** (docs/12, ADR 0029): Veröffentlichungs-Schlüssel nur auf Paddys PC, unterschriebene
+   Ankündigung `releases/bridgecontroll.json`, Workflow `release.yml` (Tag `bc-v…`), automatisch (abschaltbar),
+   zurück zur alten Version, wenn die neue nicht startet. Aktiv ab der ersten Version mit eingetragenem Schlüssel.
 5. **Owner-Backup im eigenen Netz**: App-Schlüssel und Einstellungen des Owners, verschlüsselt mit einem Schlüssel aus
    den 24 Wörtern, liegen auf den Speicher-Knoten; auf einem neuen PC stellen die 24 Wörter alles wieder her.
 6. Danach: Bridge Login auch im Bridge-Browser und unter „Ansehen“ (heute nur über die öffentliche Adresse),

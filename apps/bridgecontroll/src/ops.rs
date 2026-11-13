@@ -1014,7 +1014,7 @@ pub async fn overview(app: &App) -> Value {
     };
     json!({
         "host": host_name(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::update::own_version().to_string(),
         "nodes": rows,
         "warnings": app.warnings,
         "suggested": {"listen_port": listen, "lan_port": lan},
@@ -1028,6 +1028,7 @@ pub async fn overview(app: &App) -> Value {
             "exists": app.options.menu_dir.as_deref().is_some_and(crate::startmenu::exists),
         },
         "public": crate::public::summary(app).await,
+        "update": app.updater.status(),
     })
 }
 

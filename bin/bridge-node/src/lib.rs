@@ -65,6 +65,7 @@ pub mod apps;
 pub mod blocklist;
 pub mod names;
 pub mod plugin;
+pub mod release;
 mod secret;
 
 /// The usage text (German, it reaches people through the terminal).
@@ -133,7 +134,11 @@ pub const USAGE: &str = "Aufruf:
   bridge-node agent revoke --owner-key <datei> --node-url <adresse> --agent <id>
   bridge-node ai --key <datei> (--join <link> | --node-url <adresse>) --model <name> (--allow-members yes | --allow <id,…>)
                  [--backend http://127.0.0.1:11434] [--api ollama|openai] [--models a,b] [--allow-agents yes] [--rate 30]
-                 (KI-Dienst mit einem Modell auf diesem PC, z. B. Ollama; --join nur beim ersten Start; docs/10 §4)";
+                 (KI-Dienst mit einem Modell auf diesem PC, z. B. Ollama; --join nur beim ersten Start; docs/10 §4)
+  bridge-node release keygen --out <datei>   (Veröffentlichungs-Schlüssel für BridgeControll-Updates; docs/12 §6)
+  bridge-node release sign   --key <datei> --tag bc-v<version> [--notes <text>] --out <bridgecontroll.json>
+                             (lädt die Dateien des GitHub-Release selbst, unterschreibt Größe und SHA-256)
+  bridge-node release verify --file <bridgecontroll.json> [--public <schlüssel>]";
 
 /// Flags as `(name, value)` pairs; every flag takes a value.
 fn flags(args: impl Iterator<Item = String>) -> Result<Vec<(String, String)>, String> {
@@ -781,6 +786,73 @@ async fn blocklist_command(command: &str, flags: &Flags) -> Result<(), String> {
     Ok(())
 }
 
+/// `bridge-node release …` (docs/12 §6).
+async fn release_command(command: &str, flags: &Flags) -> Result<(), String> {
+    match command {
+        "keygen" => {
+            flags.only(&["--out"])?;
+            let path = Path::new(flags.need("--out")?);
+            let public = release::keygen(path)?;
+            println!("Veröffentlichungs-Schlüssel angelegt: {}", path.display());
+            println!("Öffentlicher Schlüssel (kommt ins Programm): {}", b64(&public));
+            println!(
+                "Die Datei geheim halten und sichern (z. B. USB-Stick) - wer sie hat, kann Updates unterschreiben."
+            );
+        }
+        "sign" => {
+            flags.only(&["--key", "--tag", "--notes", "--out", "--base"])?;
+            let key = release::load_key(Path::new(flags.need("--key")?))?;
+            let tag = flags.need("--tag")?;
+            let (base, rule) = release_source(flags)?;
+            let (bytes, signed) =
+                release::sign(&key, tag, flags.one("--notes").unwrap_or_default(), &base, &rule, SystemClock.now_ms())
+                    .await?;
+            let out = Path::new(flags.need("--out")?);
+            if let Some(dir) = out.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            let mut text = bytes;
+            text.push(b'\n');
+            std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
+            print!("{}", release::describe(&signed, &key.public()));
+            println!(
+                "Geschrieben: {} - committen und pushen, dann finden alle BridgeControlls das Update.",
+                out.display()
+            );
+        }
+        "verify" => {
+            flags.only(&["--file", "--public"])?;
+            let keys = match flags.one("--public") {
+                Some(text) => vec![
+                    bridge_core::encoding::b64_fixed::<32>(text, "--public")
+                        .map_err(|_| "--public: 32 Byte Base64url")?,
+                ],
+                None => release::built_in_keys(),
+            };
+            if keys.is_empty() {
+                return Err("Im Programm steht noch kein Veröffentlichungs-Schlüssel - --public angeben".into());
+            }
+            let (signed, key) = release::verify(Path::new(flags.need("--file")?), &keys, SystemClock.now_ms())?;
+            print!("Gültig: {}", release::describe(&signed, &key));
+        }
+        other => return Err(format!("unbekannter Befehl release {other}\n{USAGE}")),
+    }
+    Ok(())
+}
+
+/// Where `release sign` loads the files: GitHub; debug builds also `--base http://127.0.0.1:<port>/…/` (tests).
+fn release_source(flags: &Flags) -> Result<(String, bridge_transport::download::HostRule), String> {
+    match flags.one("--base") {
+        None => Ok((release::RELEASE_BASE.to_owned(), release::github_rule())),
+        #[cfg(debug_assertions)]
+        Some(base) if base.starts_with("http://127.0.0.1:") && base.ends_with('/') => Ok((
+            base.to_owned(),
+            bridge_transport::download::HostRule { hosts: vec!["127.0.0.1".into()], allow_http: true },
+        )),
+        Some(_) => Err("--base gibt es nur in Test-Builds".into()),
+    }
+}
+
 /// `bridge-node name …` (docs/08 §10).
 async fn name_command(command: &str, flags: &Flags) -> Result<(), String> {
     let data = PathBuf::from(flags.need("--data")?);
@@ -1097,6 +1169,13 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
         let command = args.next().unwrap_or_default();
         match flags(args) {
             Ok(flags) => agent_command(&command, &Flags(flags)).await,
+            Err(message) => Err(message),
+        }
+    } else if args.peek().map(String::as_str) == Some("release") {
+        args.next();
+        let command = args.next().unwrap_or_default();
+        match flags(args) {
+            Ok(flags) => release_command(&command, &Flags(flags)).await,
             Err(message) => Err(message),
         }
     } else if args.peek().map(String::as_str) == Some("blocklist") {

@@ -407,7 +407,7 @@
       // Entries of the settings file that were skipped at the start (review 8) - the app runs without them.
       const warnings = (data.warnings || []).map((text) => h('div', { class: 'b-banner b-banner--warn', role: 'alert' },
         icon('warn'), h('span', { class: 'b-banner__text' }, h('b', { text: 'Einstellungen: ' }), text)));
-      const list = h('section', { class: 'hs__list', 'aria-label': 'Netze' }, warnings,
+      const list = h('section', { class: 'hs__list', 'aria-label': 'Netze' }, warnings, updateBanners(data.update),
         data.nodes.length ? data.nodes.map((node, index) => nodeRow(node, index)) : emptyState());
       const autostart = data.autostart.supported
         ? switchBox(data.autostart.windows ? 'Mit Windows starten' : 'Mit dem PC starten', {
@@ -438,6 +438,7 @@
             h('div', { class: 'start__foot' },
               h('img', { class: 'start__mark', src: '/ui/logo/bridge4-bildmarke.svg', alt: '' }),
               h('span', { class: 'start__version' }, h('span', { text: 'BridgeControll v2 · ' + data.version }), h('span', { text: 'Bridge 4 · bridge-node ' + data.version }))),
+            updateRow(data.update),
             h('div', { class: 'bc-foot__row' }, autostart,
               data.startmenu && data.startmenu.supported ? h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button',
                 text: data.startmenu.exists ? 'Startmenü' : 'Ins Startmenü', title: 'Eintrag „BridgeControll“ im Startmenü auf dieses Programm setzen',
@@ -488,6 +489,60 @@
       owner ? 'Das ist der Owner-Knoten: Solange er aus ist, nimmt das Netz keine neuen Einträge an (Log-Führer). Clients anderer Empfänger merken nichts.'
         : 'Clients, die bei diesem Knoten wohnen, verlieren kurz die Verbindung. Die Post bleibt gespeichert.',
       'Stoppen', () => api('POST', '/api/nodes/' + node.id + '/stop').then(refresh));
+  }
+
+  // Self-update (docs/12): banners above the networks, the switch and "Nach Updates suchen" in the footer.
+  function updateBanners(u) {
+    if (!u || !u.enabled) return null;
+    const out = [];
+    const banner = (kind, text, button) => h('div', { class: 'b-banner b-banner--' + kind, role: 'status' }, icon(kind === 'warn' ? 'warn' : 'info'),
+      h('span', { class: 'b-banner__text' }, ...text), button || null);
+    const now = h('button', { class: 'b-btn b-btn--primary b-btn--sm', type: 'button', text: 'Jetzt aktualisieren', onclick: () => updateDialog(u) });
+    if (u.installing) {
+      out.push(banner('info', [h('b', { text: 'BridgeControll wird aktualisiert … ' }), 'Gleich startet es neu.']));
+    } else if (u.available && u.failed === u.available.version) {
+      out.push(banner('warn', [h('b', { text: 'Update auf ' + u.failed + ' ging schief. ' }), 'BridgeControll läuft weiter mit ' + u.version + '.'], now));
+    } else if (u.available) {
+      out.push(banner('info', [h('b', { text: 'BridgeControll ' + u.available.version + ' ist da. ' }), u.available.notes || ''], now));
+    }
+    if (u.last && u.last.ok && Date.now() - u.last.at < 24 * 3600 * 1000) {
+      out.push(banner('info', [h('b', { text: 'Aktualisiert ' }), 'von ' + u.last.from + ' auf ' + u.last.to + '.']));
+    }
+    return out;
+  }
+
+  function updateRow(u) {
+    if (!u || !u.enabled) return null;
+    const auto = switchBox('Automatisch aktualisieren', {
+      checked: u.auto,
+      onchange: async (event) => {
+        const on = event.target.checked;
+        try {
+          await api('POST', '/api/update/auto', { on });
+          toast('ok', on ? 'Updates kommen automatisch' : 'Updates nur noch per Knopf');
+        } catch (error) { event.target.checked = !on; toast('err', 'Nicht geklappt', error.message); }
+      },
+    });
+    const search = h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Nach Updates suchen' });
+    search.addEventListener('click', () => act(search, async () => {
+      const state = await api('POST', '/api/update/check', {});
+      refresh();
+      if (state.available) toast('info', 'BridgeControll ' + state.available.version + ' ist da');
+      else toast('ok', 'BridgeControll ist aktuell', 'Version ' + state.version);
+    }));
+    return h('div', { class: 'bc-foot__row' }, auto, search);
+  }
+
+  function updateDialog(u) {
+    const size = u.available.size >= 1048576 ? ' (' + Math.round(u.available.size / 1048576) + ' MB)' : '';
+    confirmDialog('Auf ' + u.available.version + ' aktualisieren?',
+      'BridgeControll lädt die neue Version' + size + ', prüft Paddys Unterschrift und startet neu. Die Knoten sind dafür ein paar Sekunden aus; danach öffnet sich ein neues Fenster.',
+      'Aktualisieren', async () => {
+        await api('POST', '/api/update/install', {});
+        stopTimer();
+        app.replaceChildren(h('main', { class: 'bc-login' }, h('div', { class: 'b-empty' }, h('h3', { text: 'BridgeControll startet neu' }),
+          h('p', { text: 'Gleich öffnet sich ein neues Fenster mit der neuen Version. Dieses kannst du schließen.' }))));
+      }, false);
   }
 
   function quitDialog() {

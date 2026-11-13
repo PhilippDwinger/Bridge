@@ -86,7 +86,33 @@ esac
 """
 
 
-def start_app(exe, data, port):
+def update_server(node_exe, data):
+    """A local update source (docs/12): a signed announcement of version 9.9.9 (release key made with bridge-node
+    release keygen, signed with release sign from the files this server serves). Returns the test source for the app."""
+    import http.server
+    import json
+    import threading
+    root = tempfile.mkdtemp(prefix="bc-ui-update-")
+    port = free_port()
+    os.makedirs(os.path.join(root, "files", "bc-v9.9.9"))
+    with open(os.path.join(root, "files", "bc-v9.9.9", "bridgecontroll-linux-x86_64"), "wb") as file:
+        file.write(b"neue Version" * 1000)
+    handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=root, **k)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    key = os.path.join(tempfile.mkdtemp(), "release-key.txt")
+    made = subprocess.run([node_exe, "release", "keygen", "--out", key], capture_output=True, text=True, check=True)
+    public = re.search(r"Programm\): (\S+)", made.stdout).group(1)
+    subprocess.run([node_exe, "release", "sign", "--key", key, "--tag", "bc-v9.9.9", "--notes",
+                    "Geräte für Bridge Login und Selbst-Update.", "--out", os.path.join(root, "bridgecontroll.json"),
+                    "--base", f"http://127.0.0.1:{port}/files/"], capture_output=True, text=True, check=True)
+    # Not automatic: the smoke test only looks at the banner and the dialog.
+    with open(os.path.join(data, "update.json"), "w", encoding="utf-8") as file:
+        file.write('{"auto": false, "failed": null, "last": null}')
+    return json.dumps({"base": f"http://127.0.0.1:{port}", "key": public, "first_check_ms": 3600000})
+
+
+def start_app(exe, data, port, update=None):
     # The start menu entry goes into a temporary place, not into this machine's menu; Tailscale is a stand-in.
     fake = os.path.join(data, "fake-tailscale.sh")
     os.makedirs(data, exist_ok=True)
@@ -94,6 +120,8 @@ def start_app(exe, data, port):
         script.write(FAKE_TAILSCALE)
     os.chmod(fake, 0o755)
     env = dict(os.environ, XDG_DATA_HOME=os.path.join(data, "xdg-data"), BRIDGECONTROLL_TAILSCALE=fake)
+    if update:
+        env["BRIDGECONTROLL_UPDATE_TEST"] = update
     process = subprocess.Popen(
         [exe, "--data", data, "--port", str(port), "--no-browser"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
@@ -163,7 +191,8 @@ def main():
     os.makedirs(args.shots, exist_ok=True)
     data = tempfile.mkdtemp(prefix="bc-ui-")
     port = free_port()
-    process, login = start_app(os.path.abspath(args.exe), data, port)
+    update = update_server(os.path.abspath(args.node_exe), data)
+    process, login = start_app(os.path.abspath(args.exe), data, port, update)
     base = f"http://127.0.0.1:{port}"
     problems = []
     console = []
@@ -524,6 +553,17 @@ def main():
             page.wait_for_selector("text=ist im ganzen Netz weg", timeout=60000)
             page.wait_for_selector(".srv:has-text('Meine Testseite')", state="detached", timeout=60000)
             shot("37-dashboard-geloescht")
+
+            # Self-update (docs/12): back on the start page, look for updates - 9.9.9 is there; the dialog.
+            page.evaluate("location.hash = '#/'")
+            page.wait_for_selector("button:has-text('Nach Updates suchen')")
+            page.click("button:has-text('Nach Updates suchen')")
+            page.wait_for_selector(".b-banner:has-text('BridgeControll 9.9.9 ist da')", timeout=30000)
+            shot("38-update-da")
+            page.click(".b-banner button:has-text('Jetzt aktualisieren')")
+            page.wait_for_selector(".b-dialog :text('Auf 9.9.9 aktualisieren?')")
+            shot("39-update-dialog", dialog=True)
+            page.click(".b-dialog button:has-text('Abbrechen')")
 
             page.evaluate("fetch('/api/quit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})")
             browser.close()

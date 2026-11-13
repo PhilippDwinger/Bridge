@@ -18,6 +18,7 @@
 //!
 //! Layering (docs/03_ARCHITEKTUR.md): depends only on `bridge-core` (address keys, hashes, IDs).
 
+pub mod download;
 pub mod lan;
 mod public;
 
@@ -858,7 +859,7 @@ impl HttpClient {
 }
 
 /// The error with its causes (e.g. "… : invalid peer certificate: …"), bounded in depth and length.
-fn connection_error(error: &dyn std::error::Error) -> TransportError {
+pub(crate) fn connection_error(error: &dyn std::error::Error) -> TransportError {
     let mut text = error.to_string();
     let mut cause = error.source();
     for _ in 0..4 {

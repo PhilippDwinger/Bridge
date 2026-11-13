@@ -103,6 +103,12 @@ window.addEventListener("message", (event) => {
 });
 ```
 
+**BridgeControll aktualisiert sich selbst** (docs/12): neue Versionen kommen von GitHub, aber nur mit Paddys
+Unterschrift (Größe und SHA-256 in `releases/bridgecontroll.json`). Standard: automatisch – die Knoten sind dafür ein
+paar Sekunden aus; startet die neue Version nicht, kommt die alte zurück. Unten im Dashboard: „Automatisch
+aktualisieren“ und „Nach Updates suchen“. Veröffentlichen: Tag `bc-v<version>` pushen, dann
+`bridge-node release sign …` und die Datei committen (docs/12 §6).
+
 ## Knoten starten
 ```
 bridge-node --data <ordner> --listen 127.0.0.1:7400 --name "Mein Knoten"

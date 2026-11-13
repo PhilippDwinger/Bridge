@@ -1,0 +1,62 @@
+name: Release BridgeControll
+
+# docs/12 §6 (ADR 0029): a tag bc-v<version> builds BridgeControll and bridge-node for Windows and Linux and puts them
+# into the GitHub release of that tag. Nobody trusts these files by themselves - Paddy signs size and SHA-256 on his PC
+# (bridge-node release sign) and commits releases/bridgecontroll.json; only then do the programs take the update.
+
+on:
+  push:
+    tags: ["bc-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  create:
+    name: Tag = Version, Release anlegen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag names the version in Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "${GITHUB_REF_NAME}" != "bc-v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} passt nicht zur Version ${version} in Cargo.toml"
+            exit 1
+          fi
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+            --title "BridgeControll ${GITHUB_REF_NAME#bc-v}" \
+            --notes "Wird erst übernommen, wenn Paddy releases/bridgecontroll.json unterschrieben hat (docs/12 §6)."
+
+  build:
+    name: Bauen (${{ matrix.platform }})
+    needs: create
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+            ext: .exe
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            ext: ""
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build (release)
+        run: cargo build --release -p bridgecontroll -p bridge-node-bin
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir out
+          cp "target/release/bridgecontroll${{ matrix.ext }}" "out/bridgecontroll-${{ matrix.platform }}${{ matrix.ext }}"
+          cp "target/release/bridge-node${{ matrix.ext }}" "out/bridge-node-${{ matrix.platform }}${{ matrix.ext }}"
+          gh release upload "${GITHUB_REF_NAME}" out/* --repo "${GITHUB_REPOSITORY}" --clobber
