@@ -67,6 +67,11 @@ Jede Website im Dashboard hat dann den Knopf **„Öffentlich“** (die öffentl
 Websites lassen sich mit **„Löschen“** im ganzen Netz entfernen (endgültig, die Adresse wird frei; Kommandozeile:
 `bridge-node app delete`).
 
+**Ein PC eines Mitglieds** (eigene BridgeControll, eigenes Tailscale) macht seinen Knoten unter „Übers Internet“ → „Erreichbar machen“ aus dem
+Internet erreichbar – dann kann er dem Netz auch außerhalb des Heimnetzes helfen, z. B. als zweiter Speicher-Knoten.
+Danach den Knoten-Ausweis an den Owner schicken, der siegelt ihn damit neu. Websites zeigt so ein Knoten erst mit
+Stufe 3.
+
 Voraussetzung: Tailscale installiert und angemeldet, Funnel im Tailnet erlaubt. BridgeControll setzt nur den Pfad
 `/bridge4` (Einträge von BridgeControll 3 bleiben). **„Websites aus“** ist der Not-Aus (sofort), **„Nicht mehr
 öffentlich“** nimmt alles zurück. Netze, die 18+ erlauben, werden nie öffentlich; öffentlich sind nur Apps von Inhabern

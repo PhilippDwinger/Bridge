@@ -186,3 +186,48 @@ async fn answers_stream_and_limits_hold() -> TestResult {
     assert_eq!(get(&format!("{url}/weg/v4/info"), &[]).await?.0, 502);
     Ok(())
 }
+
+/// Writes the route file whole (like BridgeControll: a temporary file, then renamed).
+fn write_routes(path: &std::path::Path, routes: &Routes) -> TestResult {
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, routes.to_json()).map_err(e)?;
+    std::fs::rename(&temp, path).map_err(e)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_gate_takes_new_routes_without_a_restart() -> TestResult {
+    let port = backend().await?;
+    let dir = tempfile::tempdir().map_err(e)?;
+    let file = dir.path().join("routes.json");
+    write_routes(&file, &Routes::new(vec![Route { key: "eins".into(), port, web: true, bridge3: Vec::new() }])?)?;
+    let free = TcpListener::bind("127.0.0.1:0").await.map_err(e)?;
+    let addr = free.local_addr().map_err(e)?;
+    drop(free);
+    let args = vec!["--listen".to_owned(), addr.to_string(), "--routes".to_owned(), file.display().to_string()];
+    tokio::spawn(async move { bridge_gate::run(&args, std::future::pending()).await });
+    let url = format!("http://{addr}");
+    let eventually = |path: String, want: u16| async move {
+        for _ in 0..80 {
+            if let Ok((status, _, _)) = get(&path, &[]).await {
+                if status == want {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(format!("{path}: never {want}"))
+    };
+    eventually(format!("{url}/bridge4/eins/v4/info"), 200).await?;
+    let (status, _, _) = get(&format!("{url}/bridge4/zwei/v4/info"), &[]).await?;
+    assert_eq!(status, 404);
+    // A second network: the same gate (no restart) routes it within a moment; the first one is gone.
+    write_routes(&file, &Routes::new(vec![Route { key: "zwei".into(), port, web: true, bridge3: Vec::new() }])?)?;
+    eventually(format!("{url}/bridge4/zwei/v4/info"), 200).await?;
+    eventually(format!("{url}/bridge4/eins/v4/info"), 404).await?;
+    // A broken file changes nothing.
+    std::fs::write(&file, b"{kaputt").map_err(e)?;
+    tokio::time::sleep(bridge_gate::RELOAD_EVERY * 3).await;
+    let (status, _, _) = get(&format!("{url}/bridge4/zwei/v4/info"), &[]).await?;
+    assert_eq!(status, 200, "the old routes stay");
+    Ok(())
+}

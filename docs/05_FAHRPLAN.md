@@ -278,8 +278,10 @@ freigegeben).
    neben „Neue Version“; dazu pro Website der Link „Öffentlich ansehen“ (`…/bridge4/<netz>/web/<name>/`).
    **Gebaut 13.11.2026** (docs/07 §10, ADR 0028): Log-Art `retire`, `bridge-node app delete`, „Löschen“ und
    „Öffentlich“ in BridgeControll.
-2. **Öffentliche Eingänge auf PCs von Mitgliedern** (Manifest-Regel, der Owner erlaubt es): erst damit kann ein PC
-   außerhalb des LANs Speicher-Knoten, Empfänger oder zweiter Login-Knoten sein; das Tor ohne Neustart neu laden.
+2. **Öffentliche Eingänge auf PCs von Mitgliedern**: erst damit kann ein PC außerhalb des LANs Speicher-Knoten,
+   Empfänger oder zweiter Login-Knoten sein; das Tor ohne Neustart neu laden. **Gebaut 13.11.2026** (docs/11 §13):
+   „Erreichbar machen“ für Mitglieder-Knoten, Websites nur an Knoten mit Stufe 3 (statt einer Manifest-Regel – Stufe 3
+   vergibt ohnehin nur der Owner), Tor lädt Routen neu.
 3. **Gerät hinzufügen** (Bridge Login, Paddy 13.11.: ein Konto auf mehreren Geräten ohne Fenster für fremde Geräte):
    mehrere Passkeys je Konto (höchstens 8), jedes Gerät mit eigenem Passkey. Das angemeldete Gerät zeigt einen
    **Kopplungs-Code** (8 Zeichen ohne Verwechsler wie 0/O und 1/I, z. B. `K7QX-M3PA`, 5 Minuten, einmal, nach

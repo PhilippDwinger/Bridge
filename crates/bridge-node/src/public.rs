@@ -12,6 +12,9 @@
 //!   (`Cross-Origin-Opener-Policy: same-origin`).
 //! - Visitors from the Internet (requests through the trusted proxy) see apps only of owners with level ≥ 2 in a
 //!   network that forbids 18+ ([`Node::public_visible`]) - for the frame, the start page and `/app/…` alike.
+//! - Only a node sealed with **level 3** shows websites to the Internet ([`Node::website_entrance`], docs/11 §13): the
+//!   owner node, or a node the owner trusts that much. Any other public node (a member's PC behind its gate) is
+//!   reachable for the protocol only; its `/` says so, `/web/…` and `/app/…` are `404` for visitors from the Internet.
 
 use bridge_core::Id;
 use bridge_net::{Category, NameKind};
@@ -61,7 +64,15 @@ impl Node {
     /// network's own ways; through the trusted proxy (the Internet) only in a network that forbids 18+ and for an
     /// owner with level ≥ 2.
     pub(crate) fn public_visible(&self, request: &Request, owner: &Id, now: i64) -> bool {
-        !request.forwarded || self.with_core(|core| core.state.public_owner(owner, now)).unwrap_or(false)
+        !request.forwarded
+            || (self.website_entrance(now)
+                && self.with_core(|core| core.state.public_owner(owner, now)).unwrap_or(false))
+    }
+
+    /// Whether this node shows the network's websites to visitors from the Internet: a seal of level 3 (docs/11 §13).
+    pub(crate) fn website_entrance(&self, now: i64) -> bool {
+        let me = self.inner.identity.id();
+        self.with_core(|core| core.state.level(me, now).is_some_and(|level| level >= 3)).unwrap_or(false)
     }
 
     /// Whether `path` is one of the public pages (only with the reader `public`).
@@ -78,6 +89,14 @@ impl Node {
         let now = self.now();
         if let Err(refused) = self.inner.guard.admit_read(request.peer, now) {
             return NodeError::from(refused).to_response();
+        }
+        if !self.website_entrance(now) {
+            return page(
+                404,
+                "Keine Websites",
+                "<main><h1>Hier gibt es keine Websites</h1><p class=\"muted\">Dieser Knoten ist nur für das \
+                 Bridge-Protokoll erreichbar. Die Websites seines Netzes zeigen die Eingänge des Owners.</p></main>",
+            );
         }
         if request.path == "/" {
             return self.start_page(now);

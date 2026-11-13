@@ -61,8 +61,8 @@ async fn shop(apps: &AppNet, description: &str) -> Result<Identity, String> {
 }
 
 /// A node like BridgeControll starts one behind the gate: reader `public`, the local proxy trusted, its own loopback
-/// reader for this PC's browser.
-async fn public_node(net: &TestNet) -> Result<TestNode, String> {
+/// reader for this PC's browser; sealed with `level` (3: a website entrance, docs/11 §13; 0: no seal).
+async fn public_node(net: &TestNet, level: u8) -> Result<TestNode, String> {
     let dir = tempfile::tempdir().map_err(e)?;
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(e)?;
     let url = format!("http://{}", listener.local_addr().map_err(e)?);
@@ -73,6 +73,10 @@ async fn public_node(net: &TestNet) -> Result<TestNode, String> {
     let node = bridge_node::start(config, listener).await?;
     let public = TestNode { dir, node, url };
     net.synced(&public).await?;
+    if level > 0 {
+        net.admin.seal(&public.url, &public.id(), level, Services::NONE).await?;
+        net.synced(&public).await?;
+    }
     Ok(public)
 }
 
@@ -85,7 +89,7 @@ async fn a_public_node_shows_start_page_frame_and_apps_of_trusted_owners() -> Te
     let apps = AppNet::new(0).await?;
     seal_owner(&apps, 1).await?;
     let app = shop(&apps, "Ein <b>Laden</b> & \"mehr\"").await?;
-    let public = public_node(&apps.net).await?;
+    let public = public_node(&apps.net, 3).await?;
     let app_path = format!("/app/{}/", app.id());
     // Through the proxy (every request to the main port here) the app of an owner with level 1 is not shown ...
     let reader = public.node.reader_addr().ok_or("no loopback reader")?;
@@ -150,7 +154,7 @@ async fn a_network_that_allows_18_plus_shows_nothing_to_the_internet() -> TestRe
     let apps = AppNet::with_options(0, &options).await?;
     seal_owner(&apps, 2).await?;
     let app = shop(&apps, "Ein Laden").await?;
-    let public = public_node(&apps.net).await?;
+    let public = public_node(&apps.net, 3).await?;
     let app_path = format!("/app/{}/", app.id());
     let reader = public.node.reader_addr().ok_or("no loopback reader")?;
     served(&format!("http://{reader}{app_path}"), ENTRY).await?; // the own browser decides itself (Bridge-Browser)
@@ -161,4 +165,32 @@ async fn a_network_that_allows_18_plus_shows_nothing_to_the_internet() -> TestRe
     let (status, _, body) = get(&format!("{}/", public.url)).await?;
     assert!(status == 200 && !text(&body).contains("web/shop/"), "{}", text(&body));
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_level_3_node_shows_websites_to_the_internet() -> TestResult {
+    let apps = AppNet::new(0).await?;
+    seal_owner(&apps, 2).await?;
+    let app = shop(&apps, "Ein Laden").await?;
+    // A member's PC behind its own gate: reachable for the protocol, but no website entrance (level 2).
+    let member = public_node(&apps.net, 2).await?;
+    let app_path = format!("/app/{}/", app.id());
+    let (status, _, body) = get(&format!("{}/", member.url)).await?;
+    assert!(status == 404 && text(&body).contains("keine Websites"), "{status} {}", text(&body));
+    for path in ["/web/shop/", "/login.js", app_path.as_str()] {
+        let (status, _, _) = get(&format!("{}{path}", member.url)).await?;
+        assert_eq!(status, 404, "{path}");
+    }
+    let (status, _, _) = get(&format!("{}/v4/info", member.url)).await?;
+    assert_eq!(status, 200, "the protocol stays");
+    let reader = member.node.reader_addr().ok_or("no loopback reader")?;
+    served(&format!("http://{reader}{app_path}"), ENTRY).await?; // its own browser sees the app
+    // The owner trusts it with level 3: now it is a website entrance too.
+    apps.net.admin.seal(&member.url, &member.id(), 3, Services::NONE).await?;
+    served(&format!("{}{app_path}", member.url), ENTRY).await?;
+    eventually("start page", || async {
+        let (status, _, body) = get(&format!("{}/", member.url)).await?;
+        if status == 200 && text(&body).contains("web/shop/") { Ok(()) } else { Err(text(&body)) }
+    })
+    .await
 }

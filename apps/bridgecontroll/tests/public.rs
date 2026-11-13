@@ -237,12 +237,17 @@ async fn refusals_leave_the_node_as_it_was() -> TestResult {
     assert_eq!(status, 400);
     let (status, answer) = app.post(&format!("/api/nodes/{owner}/login-on"), &json!({})).await?;
     assert!(status == 400 && answer.to_string().contains("öffentliche Adresse"), "{status} {answer}");
-    // A member's node: only the owner decides whether the network goes public.
+    // A member's node: Funnel refused for it as well; login only at the owner node.
     let invite = app.ok(&format!("/api/nodes/{owner}/invite"), &json!({"uses": 5, "days": 30})).await?;
     let link = invite["link"].as_str().ok_or("no link")?.to_owned();
     let member = app.join(&link, "laptop").await?;
+    wait_for(60, "member ready", || async {
+        let row = app.row(&member).await?;
+        Ok((row["run"]["state"] == "ready" && row["net"].is_object()).then_some(()))
+    })
+    .await?;
     let (status, answer) = app.post(&format!("/api/nodes/{member}/public"), &json!({})).await?;
-    assert!(status == 400 && answer.to_string().contains("Nur der Owner"), "{status} {answer}");
+    assert!(status == 400 && answer.to_string().contains("Funnel is not enabled"), "{status} {answer}");
     let (status, answer) = app.post(&format!("/api/nodes/{member}/login-on"), &json!({})).await?;
     assert!(status == 400 && answer.to_string().contains("Owner-Knoten"), "{status} {answer}");
     app.shutdown().await;
@@ -257,5 +262,51 @@ async fn refusals_leave_the_node_as_it_was() -> TestResult {
     assert_eq!(app.row(&owner).await?["public"], Value::Null);
     assert!(calls(&logged_out).iter().all(|call| call.first().map(String::as_str) == Some("status")));
     app.shutdown().await;
+    Ok(())
+}
+
+/// A member's PC (its own BridgeControll and Tailscale) makes its node reachable (docs/11 §13): the protocol goes
+/// through its gate, websites do not (no level 3), the owner seals it again with the new address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_pc_makes_its_node_reachable() -> TestResult {
+    let owner_app = start_with(|options| options.poll_interval = Duration::from_millis(500)).await?;
+    let owner = net_with_site(&owner_app).await?;
+    let invite = owner_app.ok(&format!("/api/nodes/{owner}/invite"), &json!({"uses": 5, "days": 30})).await?;
+    let link = invite["link"].as_str().ok_or("no link")?.to_owned();
+
+    let fake = Arc::new(FakeTailscale { host: Some("laptop.tail1234.ts.net".into()), ..FakeTailscale::default() });
+    let shared = Arc::clone(&fake);
+    let member_app = start_with(move |options| {
+        options.poll_interval = Duration::from_millis(500);
+        options.tailscale = shared;
+    })
+    .await?;
+    let member = member_app.join(&link, "laptop").await?;
+    wait_for(60, "member ready", || async {
+        let row = member_app.row(&member).await?;
+        Ok((row["run"]["state"] == "ready" && row["net"].is_object()).then_some(()))
+    })
+    .await?;
+    let done = member_app.ok(&format!("/api/nodes/{member}/public"), &json!({"funnel_port": 443})).await?;
+    assert_eq!(done["url"], json!("https://laptop.tail1234.ts.net/bridge4/testnetz"), "{done}");
+    assert_eq!(done["sealed"], json!(false), "only the owner seals");
+    let (_, overview) = member_app.get("/api/overview").await?;
+    let gate = overview["public"]["gate_port"].as_u64().ok_or("no gate port")?;
+    let base = format!("http://127.0.0.1:{gate}/bridge4/testnetz");
+    wait_for(60, "protocol through the member's gate", || async {
+        let (status, info) = try_page(&format!("{base}/v4/info")).await?;
+        Ok((status == 200 && info.contains("\"card\"")).then_some(()))
+    })
+    .await?;
+    let (status, page) = get_page(&format!("{base}/")).await?;
+    assert!(status == 404 && page.contains("keine Websites"), "{status} {page}");
+    let (status, _) = get_page(&format!("{base}/web/testseite/")).await?;
+    assert_eq!(status, 404, "no website entrance without level 3");
+    // Its Ausweis now carries the public address - the owner seals it with that.
+    let (_, dash) = member_app.get(&format!("/api/nodes/{member}/dashboard")).await?;
+    assert!(dash["node"]["ausweis"].as_str().is_some_and(|ausweis| !ausweis.is_empty()), "{}", dash["node"]);
+    assert_eq!(dash["node"]["public"]["url"], json!("https://laptop.tail1234.ts.net/bridge4/testnetz"));
+    member_app.shutdown().await;
+    owner_app.shutdown().await;
     Ok(())
 }

@@ -99,8 +99,31 @@ impl Default for Limits {
     }
 }
 
+/// The routes the gate uses now - swapped whole when the route file changes (no restart, no dropped connection).
+#[derive(Clone, Default)]
+pub struct SharedRoutes(Arc<std::sync::RwLock<Arc<Routes>>>);
+
+impl SharedRoutes {
+    /// Routes to start with.
+    #[must_use]
+    pub fn new(routes: Routes) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(Arc::new(routes))))
+    }
+
+    /// The current routes.
+    #[must_use]
+    pub fn get(&self) -> Arc<Routes> {
+        Arc::clone(&self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+
+    /// Replaces the routes (requests already running keep the ones they started with).
+    pub fn set(&self, routes: Routes) {
+        *self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(routes);
+    }
+}
+
 struct State {
-    routes: Routes,
+    routes: SharedRoutes,
     limits: Limits,
     clients: Mutex<HashMap<IpAddr, usize>>,
 }
@@ -140,6 +163,16 @@ impl State {
 
 /// Serves the gate on `listener` until `shutdown` completes.
 pub async fn serve(listener: TcpListener, routes: Routes, limits: Limits, shutdown: impl Future<Output = ()>) {
+    serve_shared(listener, SharedRoutes::new(routes), limits, shutdown).await;
+}
+
+/// Like [`serve`], with routes that can change while it runs ([`SharedRoutes::set`]).
+pub async fn serve_shared(
+    listener: TcpListener,
+    routes: SharedRoutes,
+    limits: Limits,
+    shutdown: impl Future<Output = ()>,
+) {
     let state = Arc::new(State { routes, limits, clients: Mutex::new(HashMap::new()) });
     let connections = Arc::new(Semaphore::new(limits.max_connections));
     tokio::pin!(shutdown);
@@ -194,7 +227,8 @@ async fn handle(request: Request<Incoming>, peer: SocketAddr, state: Arc<State>)
         return page(StatusCode::TOO_MANY_REQUESTS, "Zu viele Anfragen", "Bitte gleich noch einmal versuchen.");
     };
     let target = request.uri().path_and_query().map_or("/", |pq| pq.as_str()).to_owned();
-    match decide(&state.routes, &target) {
+    let routes = state.routes.get();
+    match decide(&routes, &target) {
         Decision::Home => page(
             StatusCode::OK,
             "Bridge 4",
@@ -382,7 +416,7 @@ mod tests {
     #[test]
     fn slots_are_bounded_per_client_and_freed() {
         let limits = Limits { per_client: 2, ..Limits::default() };
-        let state = Arc::new(State { routes: Routes::default(), limits, clients: Mutex::new(HashMap::new()) });
+        let state = Arc::new(State { routes: SharedRoutes::default(), limits, clients: Mutex::new(HashMap::new()) });
         let ip = IpAddr::from([1, 2, 3, 4]);
         let first = state.enter(ip);
         let second = state.enter(ip);

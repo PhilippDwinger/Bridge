@@ -17,3 +17,8 @@
 - **Folgen**: Ein neues Netz braucht keine Tailscale-Änderung; Not-Aus wirkt sofort. Das Tor funktioniert genauso
   hinter anderen Tunneln oder einer eigenen Domain (später, optional). Alle öffentlichen Websites teilen eine Herkunft –
   deshalb bleiben Apps sandboxed ohne eigene Cookies; Konten kommen über Bridge Login (docs/11 §9).
+- **Nachtrag (Phase 8, 13.11.2026)**: Auch Knoten von Mitgliedern dürfen hinter ihrem eigenen Tor erreichbar sein
+  („Erreichbar machen“) – für das Protokoll, damit ein PC außerhalb des LANs Speicher-Knoten oder Empfänger sein kann.
+  **Websites** zeigt aber nur ein Knoten mit Siegel **Stufe 3** (der Knoten prüft das selbst). Statt einer neuen
+  Manifest-Regel genügt die Stufe: Stufe 3 vergibt nur der Owner (bzw. Mehr-Augen), sie heißt im Netz ohnehin
+  „vertraut“. Das Tor lädt geänderte Routen ohne Neustart (docs/11 §13).

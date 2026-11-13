@@ -145,7 +145,8 @@ impl Entrance {
 }
 
 /// A node with the public address `https://<host>/bridge4/testnetz` (its relying party) besides its loopback
-/// address, sealed `gateway,storage` at level 2 - a login node. `public`: with the public reader (frame pages).
+/// address, sealed `gateway,storage` at level 2 - a login node. `public`: with the public reader (frame pages) and
+/// level 3 (a website entrance).
 async fn login_node(net: &TestNet, host: &str, public: bool) -> Result<(TestNode, Entrance), String> {
     let dir = tempfile::tempdir().map_err(e)?;
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(e)?;
@@ -159,7 +160,14 @@ async fn login_node(net: &TestNet, host: &str, public: bool) -> Result<(TestNode
     let node = bridge_node::start(config, listener).await?;
     let node = TestNode { dir, node, url: url.clone() };
     net.synced(&node).await?;
-    net.seal_as(&node, "gateway,storage").await?;
+    if public {
+        // A website entrance needs level 3 (docs/11 §13).
+        let services = bridge_node::admin::parse_services("gateway,storage")?;
+        net.admin.seal(&node.url, &node.id(), 3, services).await?;
+        bridge_tests::net::wait_for("node is a gateway", || node.status().gateway).await?;
+    } else {
+        net.seal_as(&node, "gateway,storage").await?;
+    }
     let entrance = Entrance { url, rp_id: host.to_owned(), origin: format!("https://{host}") };
     eventually("login is on", || async {
         let info = entrance.info().await?;

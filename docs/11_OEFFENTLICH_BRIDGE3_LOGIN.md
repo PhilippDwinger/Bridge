@@ -100,6 +100,7 @@ den Knoten-Ports dieses PCs auf `127.0.0.1`.
 - **Besucher aus dem Internet** (Anfragen über den vertrauten Proxy, also über das Tor) bekommen Apps – Hülle,
   Startseite und `/app/…`, gehostet oder über den Leser – nur von Inhabern **ab Stufe 2** und nur in Netzen, die 18+
   verbieten (`NetState::public_owner`). Der eigene Browser (Loopback-Leser) sieht alles wie bisher.
+- *Phase 8*: Websites zeigt den Besuchern aus dem Internet nur ein Knoten mit **Siegel Stufe 3** (§13).
 
 ## 5. BridgeControll v2 (Schritt 1)
 
@@ -308,9 +309,26 @@ fremdes Konto übernehmen (`bridge-core::login`):
 ## 12. Offen
 - Ob Tailscale den Pfad `/bridge4` abschneidet, hängt von der Version ab – das Tor kann beides; Paddys erster Echttest
   zeigt es.
-- Öffentliche Knoten von Mitgliedern (z. B. ein zweiter PC als weiterer öffentlicher Eingang): erst mit einer
-  Manifest-Regel, mit der der Owner das erlaubt; bis dahin nur der Owner-Knoten. Mit der Kommandozeile kann jeder seinen
-  eigenen Knoten so starten – technisch verhindern lässt sich das nicht, er hat die Daten ja.
-- Das Tor startet bei jeder Änderung neu (kurz keine Verbindung); später ggf. Routen ohne Neustart neu laden.
+- ~~Öffentliche Knoten von Mitgliedern~~ und ~~Tor-Neustart bei jeder Änderung~~: gelöst in §13 (Phase 8).
 - App-API (`/app/<id>/api/…`) öffentlich nur, wenn der öffentliche Knoten die App selbst hostet (docs/09 §9 bleibt
   offen).
+
+## 13. Phase 8, Schritt 2: Eingänge auf PCs von Mitgliedern (gebaut 13.11.2026)
+Damit ein PC außerhalb des LANs dem Netz helfen kann (Speicher, Empfänger, zweiter Login-Knoten), müssen die anderen
+Knoten ihn erreichen. Dafür braucht er eine eigene öffentliche Adresse – Websites zu zeigen ist eine andere Sache.
+- **Erreichbar machen** (BridgeControll, Knoten eines Mitglieds): derselbe Ablauf wie „Öffentlich machen“ (§5) auf
+  dem eigenen PC – Tailscale Funnel `/bridge4` → Tor → Knoten, Adresse `https://<sein gerät>.ts.net/bridge4/<netz>`,
+  Leser `public`. Neu siegeln kann nur der Owner: das Mitglied schickt ihm seinen **Knoten-Ausweis** (enthält die neue
+  Adresse), der Owner siegelt damit („Knoten von einem anderen PC siegeln“), z. B. mit `storage` auf Stufe 2.
+- **Websites nur bei Stufe 3** (die Regel im Knoten, `Node::website_entrance`): Startseite, Hülle, `/login.js` und
+  `/app/…` für Besucher aus dem Internet gibt es nur an einem Knoten, dessen Siegel Stufe 3 hat – der Owner-Knoten oder
+  ein Knoten, dem der Owner so vertraut (Stufe 3 heißt im Netz „vertraut“). Jeder andere öffentliche Knoten ist nur für
+  das **Protokoll** (`/v4/…`) erreichbar; `/` sagt das („Hier gibt es keine Websites“). Bridge Login (`/v4/login/…`)
+  läuft auch an solchen Speicher-Knoten – Konten anlegen und anmelden lässt die Hülle aber nur an Website-Eingängen.
+  Ein Mitglied, das seinen Knoten von Hand anders startet, umgeht das nur auf dem eigenen PC (er hat die Daten ja);
+  das Netz zeigt seine Adresse erst, wenn der Owner sie siegelt.
+- **Das Tor lädt seine Routen ohne Neustart**: BridgeControll schreibt die Routen-Datei ganz (umbenennen), das laufende
+  Tor nimmt sie binnen einer halben Sekunde (laufende Anfragen behalten ihre Routen); eine kaputte Datei ändert nichts.
+  Neu gestartet wird es nur, wenn es nicht läuft.
+- Tests: e2e `phase7_public` (Stufe 2 nur Protokoll, mit Stufe 3 Websites), Tor (neue Routen ohne Neustart, kaputte
+  Datei), BridgeControll (zweiter PC macht seinen Knoten erreichbar: Protokoll durch sein Tor, keine Websites).

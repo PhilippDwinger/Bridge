@@ -187,11 +187,19 @@ pub async fn apply_gate(app: &App) -> Result<(), String> {
         let config = app.config.lock().await;
         (routes_of(&config), config.public.gate_port)
     };
-    app.supervisor.stop(GATE_ID).await;
-    let Some(gate_port) = gate_port.filter(|_| !routes.is_empty()) else { return Ok(()) };
+    let Some(gate_port) = gate_port.filter(|_| !routes.is_empty()) else {
+        app.supervisor.stop(GATE_ID).await;
+        return Ok(());
+    };
     let routes = Routes::new(routes)?;
     let file = routes_file(app);
     config::write_private(&file, routes.to_json().as_bytes())?;
+    // A running gate takes the new file by itself (docs/11 §3) - no restart, no dropped connection. Its port never
+    // changes once chosen; a gate that waits for its watchdog restart reads the new file then.
+    if matches!(app.supervisor.status(GATE_ID).state, RunState::Running | RunState::Waiting) {
+        return Ok(());
+    }
+    app.supervisor.stop(GATE_ID).await;
     app.supervisor.start(Launch {
         id: GATE_ID.to_owned(),
         mode: "gate",
@@ -217,16 +225,15 @@ fn network_key(config: &AppConfig, short: Option<&str>, net: &str) -> String {
     }
 }
 
-/// "Öffentlich machen" (docs/11 §5). `funnel_port`: 443, 8443 or 10000 (only before the first public node).
+/// "Öffentlich machen" (docs/11 §5) - for a member's node "Erreichbar machen" (§13). `funnel_port`: 443, 8443 or
+/// 10000 (only before the first public node).
 pub async fn make_public(app: &App, id: &str, funnel_port: Option<u16>) -> Result<Value, String> {
     let entry = entry_of(app, id).await?;
     if entry.public_key.is_some() {
         return Err("Dieser Knoten ist schon öffentlich.".into());
     }
-    if entry.role != NodeRole::Owner {
-        // The owner decides whether a network's websites go to the Internet (docs/11 §5) - not a member's PC.
-        return Err("Nur der Owner kann sein Netz öffentlich machen (auf dem PC mit dem Owner-Knoten).".into());
-    }
+    // A member's node may become reachable too (docs/11 §13): for the protocol of the other nodes (storage, gateway,
+    // logins); websites it shows only once the owner seals it with level 3 - the node itself decides that.
     let (net, short, adult) = {
         let cache = app.poller.cache(id);
         let cache = cache.read().await;
