@@ -109,6 +109,11 @@ paar Sekunden aus; startet die neue Version nicht, kommt die alte zurück. Unten
 aktualisieren“ und „Nach Updates suchen“. Veröffentlichen: Tag `bc-v<version>` pushen, dann
 `bridge-node release sign …` und die Datei committen (docs/12 §6).
 
+**Owner-Backup** (docs/12 §10): BridgeControll sichert die Schlüssel des Owner-Knotens (Owner-Knoten, Admin,
+App-Schlüssel) verschlüsselt im eigenen Netz – öffnen kann es nur, wer die 24 Wörter hat. Ist der PC kaputt: auf dem
+neuen PC „Netz wiederherstellen“, die 24 Wörter und die Adresse eines Mitglieds-PCs eingeben – der Owner-Knoten ist
+wieder da. Tipp: dem neuen PC in Tailscale denselben Namen geben, dann bleibt die Adresse gleich.
+
 ## Knoten starten
 ```
 bridge-node --data <ordner> --listen 127.0.0.1:7400 --name "Mein Knoten"

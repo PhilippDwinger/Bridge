@@ -80,6 +80,7 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
             None => Answer::error(400, "login_autostart fehlt"),
         },
         ["startmenu"] => result(ops::set_startmenu(app).await),
+        ["restore"] => result(crate::backup::restore(app, &body).await),
         ["update", "check"] => result(crate::update::check(app).await),
         ["update", "install"] => result(crate::update::install(app, false).await),
         ["update", "auto"] => match body.get("on").and_then(Value::as_bool) {
@@ -157,6 +158,7 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
             Answer::json(200, &json!({"ok": true}))
         }
         "settings" => result(ops::settings(app, id, body).await),
+        "backup" => result(crate::backup::backup_now(app, id, true).await),
         "delete" => result(ops::delete(app, id, text(body, "confirm")).await),
         "invite" => match (number(body, "uses", 5), number(body, "days", 30)) {
             (Ok(uses), Ok(days)) => result(ops::invite(app, id, uses, days).await),

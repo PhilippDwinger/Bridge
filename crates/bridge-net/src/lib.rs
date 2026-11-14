@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use bridge_core::{Id, KeyCard};
 
 pub mod apps;
+pub mod backup;
 pub mod blocklist;
 pub mod error;
 pub mod federation;
@@ -38,6 +39,7 @@ pub mod state;
 pub mod statements;
 
 pub use apps::{CheckedApp, check_app, check_standing, is_web_host, valid_hosts};
+pub use backup::Backup;
 pub use blocklist::{BlockEntry, Blocklist, Blocklists};
 /// Agent cards live in the core (the SDK checks them too, docs/10 §3).
 pub use bridge_core::agent::{Agent, Scope};

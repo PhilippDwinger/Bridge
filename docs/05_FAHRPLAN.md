@@ -296,6 +296,9 @@ freigegeben).
    zurück zur alten Version, wenn die neue nicht startet. Aktiv ab der ersten Version mit eingetragenem Schlüssel.
 5. **Owner-Backup im eigenen Netz**: App-Schlüssel und Einstellungen des Owners, verschlüsselt mit einem Schlüssel aus
    den 24 Wörtern, liegen auf den Speicher-Knoten; auf einem neuen PC stellen die 24 Wörter alles wieder her.
+   **Gebaut 14.11.2026** (docs/12 §10, ADR 0030): verschlüsselt für den Empfangs-Schlüssel des Hauptschlüssels (der PC
+   braucht die Wörter dafür nicht), als eigene App auf den Web-Hosts, Log-Eintrag `backup`; „Netz wiederherstellen“
+   holt den Owner-Knoten (erster Log-Führer) mit allen Schlüsseln zurück.
 6. Danach: Bridge Login auch im Bridge-Browser und unter „Ansehen“ (heute nur über die öffentliche Adresse),
    angemeldet bleiben, Zahl der Konten im Dashboard, Helfer im JavaScript-SDK; Speicher-Oberfläche in BridgeControll,
    App-API auch über den Leser; Bridge-3-Server als Name im Netz und auf anderen PCs; öffentliche Status-Seite

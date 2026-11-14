@@ -433,6 +433,7 @@
             h('div', { class: 'hs__actions' },
               h('a', { class: 'b-btn b-btn--sticker', href: '#/neu' }, icon('plus'), 'Neues BridgeNet'),
               h('a', { class: 'b-btn b-btn--ghost', href: '#/beitreten' }, icon('link'), 'Netz beitreten (Link)'),
+              h('button', { class: 'b-btn b-btn--ghost', type: 'button', onclick: restoreDialog }, icon('back'), 'Netz wiederherstellen'),
               data.nodes.some((n) => n.net) ? h('a', { class: 'b-btn b-btn--ghost', href: '#/browser' }, icon('globe'), 'Bridge-Browser') : null)),
           h('div', { class: 'bc-foot' },
             h('div', { class: 'start__foot' },
@@ -1165,6 +1166,7 @@
         h('aside', { class: 'bc-cols__side', 'aria-label': 'Mitglieder und Einladungen' },
           publicSection(data, id),
           abilitiesSection(data, id),
+          backupSection(data, id),
           invite,
           h('div', { class: 'bc-stack--tight' }, h('h2', { class: 'bc-h2', text: 'Mitglieder' }), field('member-search', 'Suchen', searchInput), members),
           rules, logBox, watch)));
@@ -1386,6 +1388,41 @@
       action = h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login braucht eine öffentliche Adresse – erst „Öffentlich machen“.' });
     }
     return h('div', { class: 'bc-stack--tight', id: 'abilities' }, h('h2', { class: 'bc-h2', text: 'Was kann mein Netz?' }), rows, action);
+  }
+
+  // Owner backup (docs/12 §10): when it was last saved, on how many hosts; "Jetzt sichern".
+  function backupSection(data, id) {
+    const b = data.backup;
+    if (!b) return null;
+    const when = b.at ? new Date(b.at).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : null;
+    const text = when
+      ? 'Gesichert am ' + when + ' auf ' + plural(b.hosts || 1, 'Host', 'Hosts') + '. Mit den 24 Wörtern holst du auf einem neuen PC alles zurück (Start → „Netz wiederherstellen“).'
+      : 'Noch nicht gesichert – BridgeControll sichert die Schlüssel des Owner-Knotens bald von selbst (verschlüsselt, nur mit den 24 Wörtern zu öffnen).';
+    const now = h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Jetzt sichern' });
+    now.addEventListener('click', () => act(now, () => api('POST', '/api/nodes/' + id + '/backup', {}), 'Owner-Backup gesichert').then(refresh));
+    return h('div', { class: 'bc-stack--tight', id: 'backup' },
+      h('div', { class: 'bc-row bc-row--between' }, h('h2', { class: 'bc-h2', text: 'Owner-Backup' }), when ? pill('ok', 'Gesichert') : pill('warn', 'Offen')),
+      h('p', { class: 'bc-muted bc-p0', text }),
+      b.error ? h('p', { class: 'bc-muted bc-p0', text: 'Zuletzt ging es nicht: ' + b.error }) : null,
+      h('div', { class: 'bc-row' }, now));
+  }
+
+  function restoreDialog() {
+    const words = h('textarea', { class: 'b-input b-input--mono', rows: '3', autocomplete: 'off', spellcheck: 'false', placeholder: 'wort1 wort2 … wort24' });
+    const address = h('input', { class: 'b-input b-input--mono', autocomplete: 'off', spellcheck: 'false', placeholder: 'https://pc.tail1234.ts.net/bridge4/meinnetz' });
+    const body = [
+      field('restore-words', 'Die 24 Wörter', words, 'Sie werden nicht gespeichert.'),
+      field('restore-address', 'Adresse eines Knotens des Netzes', address, 'Ein Einladungslink oder die öffentliche Adresse eines Mitglieds-PCs – oder deine alte Adresse, wenn der neue PC in Tailscale denselben Namen hat.'),
+      h('div', { class: 'b-banner b-banner--warn', role: 'note' }, icon('warn'),
+        h('span', { class: 'b-banner__text' }, h('b', { text: 'Nur, wenn der alte PC weg ist. ' }), 'Zwei Owner-Knoten mit demselben Schlüssel würden sich widersprechen.')),
+    ];
+    formDialog('Netz wiederherstellen', 'Holt den Owner-Knoten mit seinen Schlüsseln aus dem Backup im Netz zurück.', body, 'Wiederherstellen', async () => {
+      const result = await api('POST', '/api/restore', { words: words.value, address: address.value });
+      words.value = '';
+      toast('ok', 'Wiederhergestellt', 'Der Owner-Knoten startet und holt das Log.');
+      location.hash = '#/netz/' + result.node;
+      return true;
+    });
   }
 
   function deleteSiteDialog(ownerId, a) {

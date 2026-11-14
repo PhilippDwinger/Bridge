@@ -300,6 +300,22 @@ pub async fn publish(
     node_url: Option<&str>,
 ) -> Result<Done, String> {
     let (key, name) = load(data, app)?;
+    publish_key(data, &key, name, folder, hosts, entry, description, node_url).await
+}
+
+/// Like [`publish`] with the app key given (the owner backup keeps its own key, docs/12 §10).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn publish_key(
+    data: &Path,
+    key: &Identity,
+    name: String,
+    folder: &Path,
+    hosts: Vec<Id>,
+    entry: Option<&str>,
+    description: Option<&str>,
+    node_url: Option<&str>,
+) -> Result<Done, String> {
+    let app = key.id();
     let owner = Owner::open(data, node_url).await?;
     let current = owner.current(app).await;
     let hosts = if !hosts.is_empty() {
@@ -322,7 +338,7 @@ pub async fn publish(
     };
     let (client, host) = owner.client(&hosts).await?;
     let (statement, published) =
-        client.publish_folder(&key, folder, &draft).await.map_err(|e| format!("Veröffentlichen: {e}"))?;
+        client.publish_folder(key, folder, &draft).await.map_err(|e| format!("Veröffentlichen: {e}"))?;
     let (retired, unreached) = owner.retire(current.as_ref(), &statement, &hosts).await;
     let url = owner.url_of(&host).unwrap_or_default();
     Ok(Done { version: published.version, host, url, active: published.active, hosts, retired, unreached })

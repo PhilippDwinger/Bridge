@@ -90,11 +90,13 @@ pub enum Kind {
     Federation,
     /// An app deleted by its owner (docs/07 §10; log, app key and owner).
     Retire,
+    /// Where the owner's encrypted backup lies (docs/12 §10; log, net key or admin with `rules`).
+    Backup,
 }
 
 impl Kind {
     /// The kinds that are entries of the transparency log.
-    pub const LOG_KINDS: [Kind; 11] = [
+    pub const LOG_KINDS: [Kind; 12] = [
         Kind::Manifest,
         Kind::Delegation,
         Kind::Invite,
@@ -106,6 +108,7 @@ impl Kind {
         Kind::Label,
         Kind::Federation,
         Kind::Retire,
+        Kind::Backup,
     ];
 
     /// Wire name (`t`).
@@ -129,6 +132,7 @@ impl Kind {
             Self::Agent => "agent",
             Self::Federation => "federation",
             Self::Retire => "retire",
+            Self::Backup => "backup",
         }
     }
 
@@ -153,6 +157,7 @@ impl Kind {
             "agent" => Self::Agent,
             "federation" => Self::Federation,
             "retire" => Self::Retire,
+            "backup" => Self::Backup,
             _ => return None,
         })
     }

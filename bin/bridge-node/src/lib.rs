@@ -62,6 +62,7 @@ use tokio::net::TcpListener;
 pub mod agent;
 pub mod ai;
 pub mod apps;
+pub mod backup;
 pub mod blocklist;
 pub mod names;
 pub mod plugin;
@@ -135,6 +136,9 @@ pub const USAGE: &str = "Aufruf:
   bridge-node ai --key <datei> (--join <link> | --node-url <adresse>) --model <name> (--allow-members yes | --allow <id,…>)
                  [--backend http://127.0.0.1:11434] [--api ollama|openai] [--models a,b] [--allow-agents yes] [--rate 30]
                  (KI-Dienst mit einem Modell auf diesem PC, z. B. Ollama; --join nur beim ersten Start; docs/10 §4)
+  bridge-node backup make    --data <ordner> [--node <adresse>] [--force yes]
+                             (Owner-Backup: Schlüssel des Owner-Knotens, verschlüsselt für die 24 Wörter; docs/12 §10)
+  bridge-node backup restore --data <neuer ordner> --from <adresse eines knotens>   (fragt die 24 Wörter ab)
   bridge-node release keygen --out <datei>   (Veröffentlichungs-Schlüssel für BridgeControll-Updates; docs/12 §6)
   bridge-node release sign   --key <datei> --tag bc-v<version> [--notes <text>] --out <bridgecontroll.json>
                              (lädt die Dateien des GitHub-Release selbst, unterschreibt Größe und SHA-256)
@@ -786,6 +790,47 @@ async fn blocklist_command(command: &str, flags: &Flags) -> Result<(), String> {
     Ok(())
 }
 
+/// `bridge-node backup …` (docs/12 §10).
+async fn backup_command(command: &str, flags: &Flags) -> Result<(), String> {
+    match command {
+        "make" => {
+            flags.only(&["--data", "--node", "--force"])?;
+            let data = PathBuf::from(flags.need("--data")?);
+            let force = flags.one("--force") == Some("yes");
+            let made = backup::make(&data, &serde_json::json!({}), flags.one("--node"), force).await?;
+            if made.published {
+                println!("Owner-Backup gesichert (App {}, {} Hosts).", made.app, made.hosts);
+            } else {
+                println!("Owner-Backup unverändert (App {}).", made.app);
+            }
+            if made.statement {
+                println!("Der Log-Eintrag backup zeigt jetzt darauf.");
+            }
+        }
+        "restore" => {
+            flags.only(&["--data", "--from"])?;
+            let data = PathBuf::from(flags.need("--data")?);
+            let from = flags.need("--from")?.to_owned();
+            let master = read_master().await?;
+            let restored = backup::restore(&master, &from, &data).await?;
+            println!(
+                "Wiederhergestellt: {} Dateien in {} (Netz {}, Owner-Knoten {}).",
+                restored.files,
+                data.display(),
+                restored.net,
+                restored.node
+            );
+            println!(
+                "Starten: bridge-node --data {} --join-net {}",
+                data.display(),
+                JoinLink { net: restored.net, gateway: from, code: None, node: None, tls: None }.to_link()
+            );
+        }
+        other => return Err(format!("unbekannter Befehl backup {other}\n{USAGE}")),
+    }
+    Ok(())
+}
+
 /// `bridge-node release …` (docs/12 §6).
 async fn release_command(command: &str, flags: &Flags) -> Result<(), String> {
     match command {
@@ -1169,6 +1214,13 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
         let command = args.next().unwrap_or_default();
         match flags(args) {
             Ok(flags) => agent_command(&command, &Flags(flags)).await,
+            Err(message) => Err(message),
+        }
+    } else if args.peek().map(String::as_str) == Some("backup") {
+        args.next();
+        let command = args.next().unwrap_or_default();
+        match flags(args) {
+            Ok(flags) => backup_command(&command, &Flags(flags)).await,
             Err(message) => Err(message),
         }
     } else if args.peek().map(String::as_str) == Some("release") {

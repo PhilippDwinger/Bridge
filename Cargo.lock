@@ -283,6 +283,7 @@ dependencies = [
  "bridge-guard",
  "bridge-net",
  "bridge-node",
+ "bridge-node-bin",
  "bridge-sdk",
  "bridge-store",
  "bridge-transport",

@@ -161,6 +161,7 @@ Alle sind Aussagen nach 04 §3 mit `net` = Netz-ID. `exp` ist zugleich das Ablau
 | `name` | Name → Ziel, Art, Inhaber, Karten, Beschreibung, Schlagworte, Kategorie (08 §3) | der Inhaber (bei Apps mit dem App-Schlüssel, `sigs`) nach den Namensregeln (Phase 4) |
 | `label` | `{"target":"<name oder id>","category":"adult\|general","reason":"…"}` (08 §5) | Admin mit `seals` (Phase 4) |
 | `retire` | `{"app":"<app-id>","owner":"<mitglied-id>","card":<karte des app-schlüssels>,"owner_card":<karte des owners>}` – eine App löschen (07 §10, ADR 0028) | App-Schlüssel **und** Owner (`sigs`; der Owner ist Mitglied, keiner gesperrt), Laufzeit ≥ 1 Jahr; nicht widerrufbar (nur Hauptschlüssel) |
+| `backup` | `{"app":"<app-id>"}` – wo das verschlüsselte Owner-Backup liegt (12 §10) | Hauptschlüssel oder Admin mit `rules`, Laufzeit ≤ 1 Jahr + 1 Tag; der neueste gilt; widerrufbar von Hauptschlüssel, Unterzeichner oder Admin mit `rules` |
 
 - **Hash einer Aussage** = Base64url(SHA-256(kanonische Bytes der Aussage **ohne** `sig` bzw. `sigs`)). Er ist die
   Identität der Aussage für Widerruf (`revoke` mit `statement`), Ersetzen („neuer ersetzt älter“), Doppelte und

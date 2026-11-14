@@ -289,6 +289,21 @@ impl AdminClient {
         Ok(Self { identity: Identity::from_secret_bytes(&sign, &receive), net, node, url, http })
     }
 
+    /// The log of `net` at `url` - checked (entry 0 = genesis of `net`) and replayed - without any key: reading the
+    /// log needs none (docs/12 §10.4: a new PC with only the 24 words).
+    pub async fn load_state_from(url: &str, net: &Id) -> Result<(Log, NetState), String> {
+        let http = HttpClient::new(url, Duration::from_secs(30)).map_err(|e| format!("Adresse {url}: {e}"))?;
+        // Never signs anything: a throwaway key only fills the field.
+        let reader = Self {
+            identity: Identity::generate(&mut OsRng),
+            net: net.clone(),
+            node: net.clone(),
+            url: url.to_owned(),
+            http,
+        };
+        reader.load_state().await
+    }
+
     /// The admin's ID.
     #[must_use]
     pub fn admin_id(&self) -> &Id {

@@ -212,7 +212,7 @@ pub fn suggested_ports(config: &AppConfig) -> (u16, u16) {
 }
 
 /// A new local node ID (8 hex characters, unused, and no folder of that name).
-fn new_node_id(config: &AppConfig, app_dir: &Path) -> String {
+pub(crate) fn new_node_id(config: &AppConfig, app_dir: &Path) -> String {
     loop {
         let mut bytes = [0u8; 4];
         OsRng.fill_bytes(&mut bytes);
@@ -1000,10 +1000,14 @@ pub async fn overview(app: &App) -> Value {
         let mut row = overview_row(app, entry).await;
         if entry.role == NodeRole::Owner {
             let dir = app.node_dir(entry);
-            let apps = tokio::task::spawn_blocking(move || admin::hosted_apps(&dir, 1000).map(|apps| apps.len()))
-                .await
-                .ok()
-                .and_then(Result::ok);
+            let apps = tokio::task::spawn_blocking(move || {
+                let backup = bridge_node_cli::backup::app_of(&dir);
+                admin::hosted_apps(&dir, 1000)
+                    .map(|apps| apps.iter().filter(|hosted| Some(&hosted.app) != backup.as_ref()).count())
+            })
+            .await
+            .ok()
+            .and_then(Result::ok);
             row["apps"] = json!(apps);
         }
         rows.push(row);
@@ -1041,6 +1045,7 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
         return Ok(answer);
     }
     answer["bridge3"] = crate::bridge3::view(app, id).await;
+    answer["backup"] = crate::backup::status(app, &entry);
     let now = now_ms();
     let dir = app.node_dir(&entry);
     let locals = local_nodes(app).await;
@@ -1172,8 +1177,11 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
+    // The owner backup is an app too (docs/12 §10), but no website.
+    let backup = bridge_node_cli::backup::app_of(&dir);
     let apps: Vec<Value> = apps
         .iter()
+        .filter(|hosted| Some(&hosted.app) != backup.as_ref())
         .map(|hosted| {
             // Its address (the first name pointing to it) and - in a public network - the public frame with Bridge
             // Login (docs/07 §8a, docs/11 §9).

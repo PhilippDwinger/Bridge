@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod app;
+pub mod backup;
 pub mod blob;
 pub mod content;
 pub mod crypto;

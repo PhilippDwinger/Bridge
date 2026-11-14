@@ -82,6 +82,11 @@ pub fn load_or_create_tls(data_dir: &Path) -> Result<TlsIdentity, String> {
     Ok(identity)
 }
 
+/// The identity in the bytes of a secret file (`{"v":4,"t":"secret","sign","box"}`) - e.g. a restored backup.
+pub fn identity_of(bytes: &[u8]) -> Result<Identity, String> {
+    parse(bytes).map_err(|e| format!("keine Schlüssel-Datei ({e})"))
+}
+
 fn parse(bytes: &[u8]) -> Result<Identity, CoreError> {
     let Value::Object(object) = parse_strict(bytes, 1024)? else {
         return Err(CoreError::BadFormat("not an object".into()));

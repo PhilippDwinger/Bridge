@@ -554,6 +554,15 @@ def main():
             page.wait_for_selector(".srv:has-text('Meine Testseite')", state="detached", timeout=60000)
             shot("37-dashboard-geloescht")
 
+            # Owner backup (docs/12 §10): "Jetzt sichern" in the owner dashboard.
+            owner_id = page.evaluate("fetch('/api/overview').then((r) => r.json()).then((d) => d.nodes.find((n) => n.role === 'owner').id)")
+            page.evaluate(f"location.hash = '#/netz/{owner_id}'")
+            page.wait_for_selector("#backup button:has-text('Jetzt sichern')")
+            page.click("#backup button:has-text('Jetzt sichern')")
+            page.wait_for_selector("#backup :text('Gesichert am')", timeout=120000)
+            page.locator("#backup").scroll_into_view_if_needed()
+            shot("40-owner-backup")
+
             # Self-update (docs/12): back on the start page, look for updates - 9.9.9 is there; the dialog.
             page.evaluate("location.hash = '#/'")
             page.wait_for_selector("button:has-text('Nach Updates suchen')")
@@ -564,6 +573,12 @@ def main():
             page.wait_for_selector(".b-dialog :text('Auf 9.9.9 aktualisieren?')")
             shot("39-update-dialog", dialog=True)
             page.click(".b-dialog button:has-text('Abbrechen')")
+
+            # "Netz wiederherstellen" (docs/12 §10.4): the dialog only.
+            page.click("button:has-text('Netz wiederherstellen')")
+            page.wait_for_selector(".b-form :text('Die 24 Wörter')")
+            shot("41-netz-wiederherstellen", dialog=True)
+            page.click(".b-form button:has-text('Abbrechen')")
 
             page.evaluate("fetch('/api/quit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})")
             browser.close()

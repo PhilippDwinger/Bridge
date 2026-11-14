@@ -18,6 +18,7 @@
 pub mod api;
 pub mod assets;
 pub mod autostart;
+pub mod backup;
 pub mod bridge3;
 pub mod browser;
 pub mod config;
@@ -162,6 +163,8 @@ pub struct App {
     pub bridge3: bridge3::Checks,
     /// Self-update (docs/12).
     pub updater: update::Updater,
+    /// The last error of the owner backup per node (docs/12 §10).
+    pub backup_errors: backup::Errors,
 }
 
 impl App {
@@ -310,6 +313,7 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
         quit: Notify::new(),
         bridge3: bridge3::Checks::default(),
         updater: update::Updater::new(options.update.clone(), &options.app_dir),
+        backup_errors: backup::Errors::default(),
         options,
     });
     // The first start makes the start menu entry if there is none (nothing on the desktop is touched then).
@@ -344,6 +348,7 @@ pub async fn start_locked(options: Options, lock: InstanceLock) -> Result<Runnin
         http::serve(listener, Arc::clone(&app)),
         tokio::spawn(status_rounds(Arc::clone(&app))),
         tokio::spawn(update::background(Arc::clone(&app))),
+        tokio::spawn(backup::rounds(Arc::clone(&app))),
     ];
     tracing::info!(port = addr.port(), "BridgeControll bereit");
     Ok(Running { app, addr, tasks, _lock: lock })

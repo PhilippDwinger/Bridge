@@ -111,5 +111,72 @@ es liegt in jedem Release als `bridge-node-windows-x86_64.exe` und in den CI-Art
 - UI-Rauchtest Bilder 38–39 (Update da, Dialog) mit einer lokalen, echt unterschriebenen Ankündigung.
 
 ## 10. Owner-Backup (Schritt 5)
-Folgt (App-Schlüssel und Einstellungen des Owners, verschlüsselt mit einem Schlüssel aus den 24 Wörtern, auf den
-Speicher-Knoten).
+Paddy: „App-Schlüssel und Einstellungen des Owners, verschlüsselt mit einem Schlüssel aus den 24 Wörtern, liegen auf
+den Speicher-Knoten; auf einem neuen PC stellen die 24 Wörter alles wieder her.“
+
+### 10.1 Was gesichert wird
+Aus dem Ordner des Owner-Knotens: `node-key.json` (Schlüssel des Owner-Knotens – er ist der **erste Log-Führer**; ohne
+ihn steht das Log für immer, docs/06 §5), `node-tls.pem`, `admin-key.json`, alle App-Schlüssel `apps/<id>.json`; aus
+BridgeControll die Einstellungen dieses Knotens (Name, Ports, Leser, Autostart, öffentlich ja/nein). Nicht: das Log und
+die Dateien (die liegen im Netz), Pfade dieses PCs (Website-Ordner). Höchstens 1 MiB.
+
+### 10.2 Verschlüsselt für die 24 Wörter – ohne die Wörter zu kennen
+Der PC kennt die 24 Wörter nicht (sie werden nie gespeichert). Er verschlüsselt **für** den Empfangs-Schlüssel des
+Hauptschlüssels (X25519, steht in dessen Karte im Genesis-Manifest): X25519 mit einem Einmal-Schlüssel → HKDF-SHA256
+(`info = "bridge4/backup\n" ‖ Netz-ID`) → ChaCha20-Poly1305 (`bridge-core::backup`). Öffnen kann es nur, wer die
+24 Wörter hat. Format: `B4BACKUP1` ‖ Einmal-Schlüssel (32) ‖ Nonce (12) ‖ Chiffretext.
+
+### 10.3 Wo es liegt: als App, auf die das Log zeigt
+- Das Backup ist eine **Bridge-App** mit einer Datei `owner-backup.b4` (eigener App-Schlüssel `backup-app.json` im
+  Owner-Ordner, nicht in der Website-Liste). Hosts: der Owner-Knoten und alle anderen Knoten mit Siegel `web` (bis
+  zu 8, docs/07). Die App-Maschine der Knoten holt, prüft und hält die Datei – auch wenn der Owner-PC weg ist, bis die
+  Version abläuft (1 Jahr).
+- Ein neuer Log-Eintrag **`backup`** `{app}` (unterschrieben von einem Admin mit dem Recht `rules`, Laufzeit bis
+  1 Jahr) sagt, welche App das Backup ist; es gilt der neueste gültige. So findet ein neuer PC es nur mit den Wörtern
+  und einer Adresse des Netzes.
+- BridgeControll sichert 2 Minuten nach dem Start des Owner-Knotens und dann stündlich, **wenn sich etwas geändert
+  hat** (neue App, neuer Schlüssel, Einstellungen), sonst alle 30 Tage (damit die Version nicht abläuft). Der
+  `backup`-Eintrag wird nur neu geschrieben, wenn er fehlt oder älter als 180 Tage ist.
+
+### 10.4 Wiederherstellen auf einem neuen PC
+BridgeControll: **„Netz wiederherstellen (24 Wörter)“** – die Wörter und die Adresse eines Knotens des Netzes (ein
+Einladungslink oder eine öffentliche Adresse eines Mitglieds-PCs; die eigene alte Adresse, wenn der neue PC in
+Tailscale denselben Namen hat).
+1. Aus den Wörtern: Hauptschlüssel → Netz-ID. Das Log von der Adresse holen, prüfen (Eintrag 0 = Genesis dieses
+   Netzes) und abspielen → neuester `backup`-Eintrag → App → die Datei bei einem ihrer Hosts holen (jedes Stück gegen
+   seinen Hash) → mit dem Hauptschlüssel öffnen.
+2. Ein neuer Owner-Knoten-Ordner mit den gesicherten Schlüsseln, dazu die Mitgliedschaft (Netz-ID, Start-Adresse =
+   die angegebene). Beim Start holt der Knoten das bezeugte Log von dort und ist wieder Log-Führer.
+3. Ein Eintrag in BridgeControll mit den gesicherten Einstellungen; der Knoten startet.
+Nur, wenn der alte PC **weg** ist: zwei Owner-Knoten mit demselben Schlüssel würden sich widersprechen (der zweite
+würde als Log-Führer abgesetzt). BridgeControll fragt das ausdrücklich ab und verweigert die Wiederherstellung, wenn
+der Owner-Knoten unter seiner Adresse noch antwortet.
+
+### 10.5 Werkzeuge und Oberfläche
+- `bridge-node backup make --data <ordner> [--node <adresse>] [--force yes]` und `bridge-node backup restore --data
+  <neuer ordner> --from <adresse>` (fragt die 24 Wörter ab wie `net rescue`); Code: `bin/bridge-node/src/backup.rs`.
+- BridgeControll: sichert jeden laufenden Owner-Knoten 2 Minuten nach dem Start und dann stündlich; im
+  Owner-Dashboard der Kasten **„Owner-Backup“** („Gesichert am … auf n Hosts“, „Jetzt sichern“ =
+  `POST /api/nodes/<id>/backup`); auf der Startseite **„Netz wiederherstellen“** (`POST /api/restore {words,
+  address}`; ein Einladungslink zählt als Adresse, wenn er zu den Wörtern passt). Der neue Owner-Knoten bekommt die
+  gesicherten Einstellungen (Name, Netzname) und einen freien Port; „Öffentlich machen“ danach neu.
+- Hat der Owner-Knoten noch nicht den Dienst `web`, bekommt er ihn fürs Backup (neues Siegel, Stufe 3 – wie bei der
+  ersten Website). Die Backup-App steht nicht in der Liste der Apps.
+
+### 10.6 Grenzen
+- Einträge, die der alte Owner-Knoten in seinen letzten Sekunden angenommen, aber nicht mehr bezeugt bekommen hat, sind
+  verloren.
+- Hat der neue PC eine **andere Adresse**, finden die anderen Knoten den Log-Führer erst, wenn sie die neue Adresse
+  kennen – am einfachsten: in Tailscale dem neuen PC denselben Gerätenamen geben (dann bleibt die Adresse gleich).
+- Ohne erreichbaren Host mit dem Backup (alle Knoten mit `web` aus) geht es nicht; das Backup selbst ist ohne die
+  Wörter wertlos.
+
+### 10.7 Abnahme Schritt 5
+- Kern: verschlüsseln/öffnen, falsche Wörter, anderes Netz, verändert, abgeschnitten, zu groß.
+- `bridge-net`: Eintrag `backup` (nur Admin mit `rules`, Laufzeit, der neueste gilt, Widerruf).
+- e2e: Owner sichert, sein Ordner geht verloren, ein neuer Ordner wird aus Wörtern + Adresse eines Mitglieds
+  wiederhergestellt, der Knoten läuft wieder als Log-Führer (nimmt Einträge an), die App-Schlüssel gehen (neue Version
+  einer Website), falsche Wörter → nichts.
+- BridgeControll (zwei Apps = zwei PCs): „Jetzt sichern“ (2 Hosts), falsche Wörter und laufender alter Owner →
+  abgelehnt, nichts halb angelegt; nach dem Stopp des alten Owner-Knotens kommt er auf dem neuen PC zurück und ist
+  Log-Führer; die Wörter stehen nirgends im App-Ordner. UI-Rauchtest Bilder 40–41.

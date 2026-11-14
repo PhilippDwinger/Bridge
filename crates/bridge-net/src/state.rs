@@ -74,6 +74,7 @@ use bridge_core::statement::MAX_STATEMENT_LIFETIME_MS;
 use bridge_core::{CLOCK_SKEW_MS, Id, KeyCard, Statement};
 
 use crate::Cards;
+use crate::backup::{Backup, MAX_BACKUP_LIFETIME_MS};
 use crate::error::{NetError, NetResult};
 use crate::federation::{Federation, MAX_FEDERATIONS};
 use crate::log::{Head, MAX_ENTRY_BYTES, WitnessedHead, parse_entry, verify_head};
@@ -177,6 +178,8 @@ enum Key {
     Label(LabelTarget),
     Federation(Id),
     Retire(Id),
+    /// The owner backup (docs/12 §10): one per network.
+    Backup,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -212,6 +215,10 @@ enum Data {
     /// An app deleted by its owner (docs/07 §10).
     Retire {
         owner: Id,
+    },
+    /// The app holding the owner backup (docs/12 §10).
+    Backup {
+        app: Id,
     },
 }
 
@@ -295,6 +302,8 @@ struct Grants {
     federations: BTreeMap<Id, Grant>,
     /// Deleted apps (`retire`), by app ID.
     retired: BTreeMap<Id, Grant>,
+    /// The owner backup (`backup`).
+    backup: Option<Grant>,
     /// Labels of names and of IDs (two maps, so a lookup needs no allocation).
     name_labels: BTreeMap<String, Grant>,
     id_labels: BTreeMap<Id, Grant>,
@@ -332,6 +341,7 @@ impl Grants {
             Key::Label(LabelTarget::Id(id)) => self.id_labels.get(id),
             Key::Federation(peer) => self.federations.get(peer),
             Key::Retire(app) => self.retired.get(app),
+            Key::Backup => self.backup.as_ref(),
         }
     }
 
@@ -363,6 +373,7 @@ impl Grants {
             Key::Label(LabelTarget::Id(id)) => self.id_labels.insert(id, grant),
             Key::Federation(peer) => self.federations.insert(peer, grant),
             Key::Retire(app) => self.retired.insert(app, grant),
+            Key::Backup => self.backup.replace(grant),
         };
         old
     }
@@ -384,6 +395,7 @@ impl Grants {
             Key::Label(LabelTarget::Id(id)) => self.id_labels.remove(id),
             Key::Federation(peer) => self.federations.remove(peer),
             Key::Retire(app) => self.retired.remove(app),
+            Key::Backup => self.backup.take(),
         }?;
         if let (Key::Name(name), Data::Name(data)) = (key, &grant.data) {
             if self.name_skeletons.get(&data.skeleton) == Some(name) {
@@ -839,6 +851,7 @@ impl NetState {
             Kind::Label => self.check_label(statement, &signers, at)?,
             Kind::Federation => self.check_federation(statement, &signers, at)?,
             Kind::Retire => self.check_retire(statement, &signers, at)?,
+            Kind::Backup => self.check_backup(statement, &signers, at)?,
             Kind::Head | Kind::Cosign | Kind::Home | Kind::App | Kind::Blocklist | Kind::Agent => {
                 return Err(NetError::format("entry: not a log kind"));
             }
@@ -1218,6 +1231,7 @@ impl NetState {
                     Key::Seal(..) | Key::Name(_) | Key::Label(_) => rights.has(Right::Seals),
                     Key::Ban(..) => rights.has(Right::Bans),
                     Key::Federation(_) | Key::Retire(_) => false, // the net key only
+                    Key::Backup => rights.has(Right::Rules),
                 };
                 if matches!(key, Key::Retire(_)) && !by_master {
                     return Err(NetError::forbidden("revoke: a deleted app stays deleted"));
@@ -1251,6 +1265,21 @@ impl NetState {
                 Ok(Effect::RevokeIdentity { id, cascade, by_master })
             }
         }
+    }
+
+    /// Where the owner backup lies (docs/12 §10): the net key or an admin with `rules`, at most a year; a newer one
+    /// replaces the one in effect.
+    fn check_backup(&self, statement: &Statement, signers: &[Id], at: i64) -> NetResult<Effect> {
+        let issuer = one_signer(signers)?;
+        self.require_right(issuer, Right::Rules, at)?;
+        let body = Backup::from_body(statement.body())?;
+        let (iat, exp) = statement.times();
+        if exp.saturating_sub(iat) > MAX_BACKUP_LIFETIME_MS {
+            return Err(NetError::forbidden("backup: at most a year"));
+        }
+        let grant = self.new_grant(statement, signers, Data::Backup { app: body.app });
+        self.check_replace(&Key::Backup, &grant, 0, 1)?;
+        Ok(Effect::Grant(Key::Backup, grant))
     }
 
     /// A deletion of an app (docs/07 §10): app key and owner sign, the owner is a member, neither is banned, the
@@ -1693,6 +1722,18 @@ impl NetState {
     #[must_use]
     pub fn is_member(&self, id: &Id, at: i64) -> bool {
         !self.excluded(id, at) && self.grants.members.get(id).is_some_and(|grant| grant.active(at))
+    }
+
+    /// The app holding the owner backup and when its `backup` statement was issued, if one holds at `at`
+    /// (docs/12 §10).
+    #[must_use]
+    pub fn backup_app(&self, at: i64) -> Option<(Id, i64)> {
+        match self.grants.backup.as_ref() {
+            Some(grant @ Grant { data: Data::Backup { app }, .. }) if grant.active(at) => {
+                Some((app.clone(), grant.iat))
+            }
+            _ => None,
+        }
     }
 
     /// Whether `app` was deleted by its owner and the deletion holds at `at` (docs/07 §10).
