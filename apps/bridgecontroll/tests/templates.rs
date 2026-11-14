@@ -10,17 +10,32 @@ use std::time::Duration;
 use common::{TestResult, start_with, wait_for};
 use serde_json::{Value, json};
 
+/// A GET of the site; a `429` (requests per visitor, docs/04 §7) is waited out like in [`post_json`].
 async fn get_page(url: &str) -> Result<(u16, String), String> {
-    let answer = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    let status = answer.status().as_u16();
-    Ok((status, answer.text().await.map_err(|e| e.to_string())?))
+    for _ in 0..20 {
+        let answer = reqwest::get(url).await.map_err(|e| e.to_string())?;
+        let status = answer.status().as_u16();
+        if status != 429 {
+            return Ok((status, answer.text().await.map_err(|e| e.to_string())?));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Err(format!("{url}: still rate limited after 20 s"))
 }
 
+/// A POST to the site's built-in `records`. The node limits requests per visitor (docs/04 §7) and this test is one
+/// visitor asking a lot: a `429` is waited out (as a browser would try again), up to 20 s.
 async fn post_json(url: &str, body: &Value) -> Result<(u16, Value), String> {
-    let answer = reqwest::Client::new().post(url).body(body.to_string()).send().await.map_err(|e| e.to_string())?;
-    let status = answer.status().as_u16();
-    let text = answer.text().await.map_err(|e| e.to_string())?;
-    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+    for _ in 0..20 {
+        let answer = reqwest::Client::new().post(url).body(body.to_string()).send().await.map_err(|e| e.to_string())?;
+        let status = answer.status().as_u16();
+        let text = answer.text().await.map_err(|e| e.to_string())?;
+        if status != 429 {
+            return Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Err(format!("{url}: still rate limited after 20 s"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -131,12 +146,8 @@ async fn a_guest_book_from_a_template() -> TestResult {
     let (status, refused) = app.post(&remove, &json!({"app": app_id, "c": "pub-eintraege", "id": "kaputt"})).await?;
     assert_eq!(status, 400, "{refused}");
     app.ok(&remove, &json!({"app": app_id, "c": "pub-eintraege", "id": entry_id})).await?;
-    // (Reads are rate limited per visitor - this test is one visitor asking a lot.)
-    wait_for(20, "gone for visitors", || async {
-        let (_, entries) = post_json(&format!("{api}list"), &json!({"c": "pub-eintraege"})).await?;
-        Ok((entries["total"] == 0).then_some(()))
-    })
-    .await?;
+    let (_, entries) = post_json(&format!("{api}list"), &json!({"c": "pub-eintraege"})).await?;
+    assert_eq!(entries["total"], 0, "gone for visitors");
     let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
     assert_eq!(dash["app_keys"][0]["records"], true);
 

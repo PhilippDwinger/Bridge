@@ -97,6 +97,12 @@ qrcodegen = "1.8"
 # std's File::lock needs Rust 1.89, the MSRV is 1.85).
 fs4 = { version = "1", default-features = false, features = ["sync"] }
 
+# Dev and test builds without debug info - exactly as Claude builds and tests (CI too): the programs stay small (the
+# self-update test serves the real program, at most 256 MiB, docs/12 §3), builds and the CI cache are faster. Panic
+# messages still name file and line.
+[profile.dev]
+debug = 0
+
 # Tests verify many signatures; unoptimized curve arithmetic makes each check ~10 ms in debug builds. Optimize only
 # these crypto dependencies in dev/test builds (Bridge's own code and release builds are unchanged).
 [profile.dev.package.curve25519-dalek]

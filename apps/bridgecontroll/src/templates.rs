@@ -656,7 +656,47 @@ pub fn forget(dir: &Path, app: &Id) {
 }
 
 /// Writes `files` into a new folder below `dir/templates/`.
+/// Most leftover build folders removed in one go.
+const MAX_SWEPT: usize = 16;
+
+/// Removes a build folder; on Windows a virus scanner may still hold a file a moment, so it tries a few times.
+fn remove_build(folder: &Path) {
+    for attempt in 0..10 {
+        if std::fs::remove_dir_all(folder).is_ok() || !folder.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 * (attempt + 1)));
+    }
+    tracing::warn!(folder = %folder.display(), "build folder of a template not removed (tried again next time)");
+}
+
+/// A build folder older than this is a leftover (a publish takes far less) - younger ones may be in use.
+const LEFTOVER_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Removes build folders an earlier publish left behind - at least `min_age` old, at most [`MAX_SWEPT`].
+fn sweep_builds(dir: &Path, min_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir.join(TEMPLATES_DIR)) else { return };
+    let old = |entry: &std::fs::DirEntry| {
+        entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|time| time.elapsed().ok())
+            .is_some_and(|age| age >= min_age)
+    };
+    let leftovers = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("build-"))
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(old)
+        .take(MAX_SWEPT);
+    for entry in leftovers {
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
 fn build(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<PathBuf, String> {
+    sweep_builds(dir, LEFTOVER_AGE);
     let folder = dir.join(TEMPLATES_DIR).join(format!("build-{}", random_hex()));
     std::fs::create_dir_all(&folder).map_err(|e| format!("Ordner für die Vorlage: {e}"))?;
     for (path, bytes) in files {
@@ -722,7 +762,7 @@ pub async fn publish(app: &App, id: &str, body: &Map<String, Value>) -> Result<V
         crate::sites::publish_folder(app, id, checked, &folder, &info, START).await
     };
     let cleanup = folder.clone();
-    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(cleanup)).await;
+    let _ = tokio::task::spawn_blocking(move || remove_build(&cleanup)).await;
     let mut done = result?;
     let app_id = done["app"].as_str().and_then(|raw| Id::parse(raw).ok()).ok_or("keine App-ID")?;
     let saved = json!({
@@ -1002,6 +1042,12 @@ mod tests {
         // A build folder holds exactly the files.
         let (_, config) = spec("umfrage").ok_or("no umfrage")?.check(&Map::new())?;
         let files = site_files("umfrage", "dunkel", &config)?;
+        let stale = dir.path().join(TEMPLATES_DIR).join("build-alt");
+        std::fs::create_dir_all(&stale).map_err(|e| e.to_string())?;
+        let folder = build(dir.path(), &files)?;
+        assert!(stale.exists(), "a young build folder may be in use - kept");
+        sweep_builds(dir.path(), std::time::Duration::ZERO);
+        assert!(!stale.exists() && !folder.exists(), "leftovers are swept");
         let folder = build(dir.path(), &files)?;
         let info = crate::sites::scan(&folder, START)?;
         assert_eq!((info.files, info.problems(START)), (files.len(), Vec::<String>::new()));

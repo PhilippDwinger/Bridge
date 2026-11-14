@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+#[cfg(debug_assertions)]
 use bridge_core::encoding::b64_fixed;
 use bridge_core::release::{MAX_ANNOUNCEMENT_BYTES, Release, Version, verify_announcement};
 use bridge_transport::download::{self, HostRule};

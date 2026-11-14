@@ -6,16 +6,14 @@
 mod common;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bridge_core::crypto::sha256;
-use bridge_core::encoding::b64;
 use bridge_core::release::{Release, ReleaseFile, ReleaseKey, Version};
 use bridge_transport::{Handler, Request, Response, RunningServer, ServerConfig, serve};
 use bridgecontroll::update::{self, Source};
-use common::{TestResult, node_exe, start_with};
+use common::{TestResult, start_with};
 use rand_core::OsRng;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -152,101 +150,121 @@ async fn only_a_newer_version_paddy_signed_is_taken() -> TestResult {
 }
 
 // ---- As real processes ----------------------------------------------------------------------------------------------
+// Unix only: the program is started and stopped as a real process (SIGINT) and replaced while it runs.
 
 #[cfg(unix)]
-fn free_port() -> Result<u16, String> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    Ok(listener.local_addr().map_err(|e| e.to_string())?.port())
-}
+mod processes {
+    use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-fn read_json(path: &Path) -> Option<Value> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
-}
+    use bridge_core::encoding::b64;
+    use bridge_core::release::MAX_FILE_BYTES;
 
-#[cfg(unix)]
-async fn wait_until(what: &str, app_dir: &Path, mut check: impl FnMut() -> bool) -> TestResult {
-    for _ in 0..600 {
-        if check() {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    use super::*;
+    use crate::common::node_exe;
+
+    fn free_port() -> Result<u16, String> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        Ok(listener.local_addr().map_err(|e| e.to_string())?.port())
     }
-    let log = std::fs::read_to_string(app_dir.join("bridgecontroll.log")).unwrap_or_default();
-    let tail: String = log.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-    Err(format!("{what} - never happened. Log:\n{tail}"))
-}
 
-/// Ends the app named in `instance.json` (SIGINT = Ctrl+C) and waits until it is gone.
-#[cfg(unix)]
-async fn stop_running(app_dir: &Path) -> TestResult {
-    let instance = read_json(&app_dir.join("instance.json")).ok_or("no instance.json")?;
-    let pid = instance["pid"].as_u64().ok_or("no pid")?;
-    std::process::Command::new("kill").args(["-INT", &pid.to_string()]).status().map_err(|e| e.to_string())?;
-    wait_until("the app ended", app_dir, || !app_dir.join("instance.json").exists()).await
-}
+    fn read_json(path: &Path) -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
 
-#[cfg(unix)]
-fn start_program(program: &Path, app_dir: &Path, server: &Server, fake: &str) -> Result<std::process::Child, String> {
-    let test = json!({"base": server.base, "key": b64(&server.key.public()), "first_check_ms": 300});
-    std::process::Command::new(program)
-        .args(["--data", &app_dir.display().to_string(), "--port", &free_port()?.to_string(), "--no-browser"])
-        .env("BRIDGECONTROLL_UPDATE_TEST", test.to_string())
-        .env("BRIDGECONTROLL_TEST_VERSION", fake)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())
-}
+    async fn wait_until(what: &str, app_dir: &Path, mut check: impl FnMut() -> bool) -> TestResult {
+        for _ in 0..600 {
+            if check() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let log = std::fs::read_to_string(app_dir.join("bridgecontroll.log")).unwrap_or_default();
+        let tail: String =
+            log.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        Err(format!("{what} - never happened. Log:\n{tail}"))
+    }
 
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_program_replaces_itself_and_goes_back_if_the_new_one_fails() -> TestResult {
-    let server = Server::start().await?;
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let (bin, app_dir) = (dir.path().join("bin"), dir.path().join("app"));
-    std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
-    let program: PathBuf = bin.join("bridgecontroll");
-    let real = std::fs::read(node_exe()).map_err(|e| e.to_string())?;
-    std::fs::copy(node_exe(), &program).map_err(|e| e.to_string())?;
-    let own = env!("CARGO_PKG_VERSION");
+    /// Ends the app named in `instance.json` (SIGINT = Ctrl+C) and waits until it is gone.
+    async fn stop_running(app_dir: &Path) -> TestResult {
+        let instance = read_json(&app_dir.join("instance.json")).ok_or("no instance.json")?;
+        let pid = instance["pid"].as_u64().ok_or("no pid")?;
+        std::process::Command::new("kill").args(["-INT", &pid.to_string()]).status().map_err(|e| e.to_string())?;
+        wait_until("the app ended", app_dir, || !app_dir.join("instance.json").exists()).await
+    }
 
-    // The program pretends to be 0.0.1; the announced version is this build (with the same file).
-    server.put("/files/new", real.clone());
-    server.announce(&server.release(own, "new", &real, sha256(&real))?, &server.key)?;
-    let mut first = start_program(&program, &app_dir, &server, "0.0.1")?;
-    let state = app_dir.join(update::STATE_FILE);
-    wait_until("the new version runs", &app_dir, || {
-        read_json(&app_dir.join("instance.json")).is_some_and(|i| i["version"] == json!(own))
-            && read_json(&state).is_some_and(|s| s["last"]["ok"] == json!(true))
-    })
-    .await?;
-    let saved = read_json(&state).ok_or("no update.json")?;
-    assert_eq!((saved["last"]["from"].clone(), saved["last"]["to"].clone()), (json!("0.0.1"), json!(own)));
-    wait_until("the old version ended", &app_dir, || first.try_wait().ok().flatten().is_some()).await?;
-    assert!(!update::beside(&program, ".old").exists(), "the new version removed the old file");
-    assert_eq!(std::fs::read(&program).map_err(|e| e.to_string())?, real);
-    stop_running(&app_dir).await?;
+    fn start_program(
+        program: &Path,
+        app_dir: &Path,
+        server: &Server,
+        fake: &str,
+    ) -> Result<std::process::Child, String> {
+        let test = json!({"base": server.base, "key": b64(&server.key.public()), "first_check_ms": 300});
+        std::process::Command::new(program)
+            .args(["--data", &app_dir.display().to_string(), "--port", &free_port()?.to_string(), "--no-browser"])
+            .env("BRIDGECONTROLL_UPDATE_TEST", test.to_string())
+            .env("BRIDGECONTROLL_TEST_VERSION", fake)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())
+    }
 
-    // A newer version that does not start (exits at once): the old one comes back and notes it.
-    let broken = b"#!/bin/sh\nexit 3\n".to_vec();
-    server.put("/files/broken", broken.clone());
-    server.announce(&server.release("9.9.9", "broken", &broken, sha256(&broken))?, &server.key)?;
-    let mut second = start_program(&program, &app_dir, &server, "0.1.5")?;
-    wait_until("back on the old version", &app_dir, || {
-        read_json(&state).is_some_and(|s| s["failed"] == json!("9.9.9") && s["last"]["ok"] == json!(false))
-            && read_json(&app_dir.join("instance.json")).is_some_and(|i| i["version"] == json!("0.1.5"))
-    })
-    .await?;
-    assert_eq!(std::fs::read(&program).map_err(|e| e.to_string())?, real, "the old program is in place again");
-    assert_eq!(std::fs::read(update::beside(&program, ".bad")).map_err(|e| e.to_string())?, broken);
-    wait_until("the version that went back ended", &app_dir, || second.try_wait().ok().flatten().is_some()).await?;
-    // The version that failed is not tried again automatically (the restored one checks right away).
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let instance = read_json(&app_dir.join("instance.json")).ok_or("restored app gone")?;
-    assert_eq!(instance["version"], json!("0.1.5"));
-    stop_running(&app_dir).await?;
-    server.running.shutdown().await;
-    Ok(())
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_program_replaces_itself_and_goes_back_if_the_new_one_fails() -> TestResult {
+        let server = Server::start().await?;
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let (bin, app_dir) = (dir.path().join("bin"), dir.path().join("app"));
+        std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+        let program: PathBuf = bin.join("bridgecontroll");
+        let real = std::fs::read(node_exe()).map_err(|e| e.to_string())?;
+        // The real program is served as the new version - it must fit the limit of an announcement (docs/12 §3).
+        if real.len() as u64 > MAX_FILE_BYTES {
+            return Err(format!(
+                "the test program has {} bytes, more than an update may have - build tests without debug info \
+                 ([profile.dev] debug = 0 in Cargo.toml)",
+                real.len()
+            ));
+        }
+        std::fs::copy(node_exe(), &program).map_err(|e| e.to_string())?;
+        let own = env!("CARGO_PKG_VERSION");
+
+        // The program pretends to be 0.0.1; the announced version is this build (with the same file).
+        server.put("/files/new", real.clone());
+        server.announce(&server.release(own, "new", &real, sha256(&real))?, &server.key)?;
+        let mut first = start_program(&program, &app_dir, &server, "0.0.1")?;
+        let state = app_dir.join(update::STATE_FILE);
+        wait_until("the new version runs", &app_dir, || {
+            read_json(&app_dir.join("instance.json")).is_some_and(|i| i["version"] == json!(own))
+                && read_json(&state).is_some_and(|s| s["last"]["ok"] == json!(true))
+        })
+        .await?;
+        let saved = read_json(&state).ok_or("no update.json")?;
+        assert_eq!((saved["last"]["from"].clone(), saved["last"]["to"].clone()), (json!("0.0.1"), json!(own)));
+        wait_until("the old version ended", &app_dir, || first.try_wait().ok().flatten().is_some()).await?;
+        assert!(!update::beside(&program, ".old").exists(), "the new version removed the old file");
+        assert_eq!(std::fs::read(&program).map_err(|e| e.to_string())?, real);
+        stop_running(&app_dir).await?;
+
+        // A newer version that does not start (exits at once): the old one comes back and notes it.
+        let broken = b"#!/bin/sh\nexit 3\n".to_vec();
+        server.put("/files/broken", broken.clone());
+        server.announce(&server.release("9.9.9", "broken", &broken, sha256(&broken))?, &server.key)?;
+        let mut second = start_program(&program, &app_dir, &server, "0.1.5")?;
+        wait_until("back on the old version", &app_dir, || {
+            read_json(&state).is_some_and(|s| s["failed"] == json!("9.9.9") && s["last"]["ok"] == json!(false))
+                && read_json(&app_dir.join("instance.json")).is_some_and(|i| i["version"] == json!("0.1.5"))
+        })
+        .await?;
+        assert_eq!(std::fs::read(&program).map_err(|e| e.to_string())?, real, "the old program is in place again");
+        assert_eq!(std::fs::read(update::beside(&program, ".bad")).map_err(|e| e.to_string())?, broken);
+        wait_until("the version that went back ended", &app_dir, || second.try_wait().ok().flatten().is_some()).await?;
+        // The version that failed is not tried again automatically (the restored one checks right away).
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let instance = read_json(&app_dir.join("instance.json")).ok_or("restored app gone")?;
+        assert_eq!(instance["version"], json!("0.1.5"));
+        stop_running(&app_dir).await?;
+        server.running.shutdown().await;
+        Ok(())
+    }
 }

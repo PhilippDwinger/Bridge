@@ -149,7 +149,7 @@ async fn make_a_network_public_switch_websites_off_and_back() -> TestResult {
     assert_eq!(again["already"], json!(true));
     // The website's public link (with Bridge Login) in the dashboard.
     let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
-    assert_eq!(dash["apps"][0]["public"], json!(format!("https://pc.tail1234.ts.net/bridge4/testnetz/web/testseite/")));
+    assert_eq!(dash["apps"][0]["public"], json!("https://pc.tail1234.ts.net/bridge4/testnetz/web/testseite/"));
     // The seal kept level and the other services (the website still runs).
     let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
     let me =
