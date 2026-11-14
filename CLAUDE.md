@@ -33,3 +33,6 @@ Zuerst lesen: `docs/00_GRUNDSAETZE.md` (Zero Trust Z1–Z10, Struktur S1–S6, C
 - Lizenz PolyForm Shield 1.0.0 (`LICENSE`).
 - Fahrplan und Abnahme-Kriterien: `docs/05_FAHRPLAN.md`.
 - Windows-Programme baut die CI (`.github/workflows/`); lokal auf Paddys PC ist kein Rust installiert.
+- Die CI nutzt **fest Rust 1.97.0** (wie Claudes Cloud-Umgebung), nicht „stable“: eine neue Rust-Version bringt neue
+  clippy-Regeln und darf einen fertigen Commit nicht über Nacht rot machen. Hochziehen nur bewusst, zusammen mit dem
+  Code (ci.yml und release.yml).

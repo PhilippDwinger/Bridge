@@ -19,29 +19,14 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned (not "stable"): CI checks with exactly the Rust Claude builds and tests with - a new Rust brings new
+      # clippy lints and must not turn a finished commit red overnight. Raise it on purpose, together with the code.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      # ADR 0011: TLS only with rustls + ring - aws-lc must never come in (on any target).
-      - name: No aws-lc (ADR 0011)
-        shell: bash
-        run: |
-          for crate in aws-lc-rs aws-lc-sys; do
-            if out=$(cargo tree --workspace --target all -i "$crate" 2>&1); then
-              echo "$crate is in the dependency tree (ADR 0011 forbids aws-lc):"
-              echo "$out"
-              exit 1
-            fi
-            if ! grep -q "did not match any packages" <<< "$out"; then
-              echo "cargo tree failed:"
-              echo "$out"
-              exit 1
-            fi
-          done
-      # Programs first, so the artifacts exist even when a test fails (Paddy can test meanwhile).
+      # Programs first, so the artifacts exist even when fmt, clippy or a test fails (Paddy can test meanwhile).
       - name: Build node program (release)
         run: cargo build --release -p bridge-node-bin
       - uses: actions/upload-artifact@v6
@@ -61,6 +46,24 @@ jobs:
             target/release/bridgecontroll
             target/release/bridgecontroll.exe
           if-no-files-found: error
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # ADR 0011: TLS only with rustls + ring - aws-lc must never come in (on any target).
+      - name: No aws-lc (ADR 0011)
+        shell: bash
+        run: |
+          for crate in aws-lc-rs aws-lc-sys; do
+            if out=$(cargo tree --workspace --target all -i "$crate" 2>&1); then
+              echo "$crate is in the dependency tree (ADR 0011 forbids aws-lc):"
+              echo "$out"
+              exit 1
+            fi
+            if ! grep -q "did not match any packages" <<< "$out"; then
+              echo "cargo tree failed:"
+              echo "$out"
+              exit 1
+            fi
+          done
       # All tests run (no fail-fast); failures are written as annotations so they can be read without signing in.
       - name: Tests
         shell: bash
@@ -83,7 +86,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
       - uses: Swatinem/rust-cache@v2
       - name: Vectors are up to date
         run: cargo test -p bridge-tests --test sdk_vectors

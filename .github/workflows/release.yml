@@ -48,7 +48,9 @@ jobs:
             ext: ""
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master  # pinned like ci.yml
+        with:
+          toolchain: 1.97.0
       - name: Build (release)
         run: cargo build --release -p bridgecontroll -p bridge-node-bin
       - name: Upload to the release
