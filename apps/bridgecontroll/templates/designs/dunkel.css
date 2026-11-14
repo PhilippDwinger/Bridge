@@ -1,0 +1,13 @@
+/* Design „Dunkel“ (docs/13 §3). */
+:root {
+  --bg: #0f141d;
+  --fg: #e8edf5;
+  --muted: #9aa6b8;
+  --accent: #5b9cff;
+  --on-accent: #0b1220;
+  --card: #18202c;
+  --line: #2a3546;
+  --radius: 14px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-head: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}

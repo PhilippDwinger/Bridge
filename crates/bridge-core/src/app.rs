@@ -200,6 +200,9 @@ pub struct AppFile {
     pub kind: FileType,
 }
 
+/// Built-in server building blocks a version may name instead of a `.wasm` file (docs/13 §4): `builtin:records`.
+pub const BUILTIN_SERVERS: [&str; 1] = ["builtin:records"];
+
 /// One version of an app (the body of an `app` statement).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppManifest {
@@ -223,7 +226,8 @@ pub struct AppManifest {
     pub card: KeyCard,
     /// Key card of the owner (role `client` or `node`, ID = `owner`).
     pub owner_card: KeyCard,
-    /// Server code (docs/09 §13): path of a `.wasm` file of this version that hosts run for `/app/<id>/api/…`.
+    /// Server code (docs/09 §13): path of a `.wasm` file of this version that hosts run for `/app/<id>/api/…` - or a
+    /// built-in building block of [`BUILTIN_SERVERS`] (docs/13 §4).
     pub server: Option<String>,
 }
 
@@ -352,8 +356,9 @@ impl AppManifest {
             None => None,
             Some(value) => {
                 let path = value.as_str().ok_or_else(|| CoreError::format("server: a path"))?;
-                if !path.ends_with(".wasm") || !paths.contains(path) {
-                    return Err(CoreError::format("server: a .wasm file of this version"));
+                let built_in = BUILTIN_SERVERS.contains(&path);
+                if !built_in && (!path.ends_with(".wasm") || !paths.contains(path)) {
+                    return Err(CoreError::format("server: a .wasm file of this version or a built-in server"));
                 }
                 Some(path.to_owned())
             }
@@ -600,6 +605,15 @@ mod tests {
         let mut missing = valid.clone();
         missing.as_object_mut().map(|object| object.remove("description"));
         assert!(AppManifest::from_body(&missing).is_err());
+        // Server: a .wasm file of the version or a built-in building block (docs/13 §4) - nothing else.
+        let mut built_in = valid.clone();
+        built_in["server"] = json!("builtin:records");
+        assert_eq!(AppManifest::from_body(&built_in)?.server.as_deref(), Some("builtin:records"));
+        for bad in ["builtin:chat", "builtin:", "server.wasm", "index.html", "records"] {
+            let mut value = valid.clone();
+            value["server"] = json!(bad);
+            assert!(AppManifest::from_body(&value).is_err(), "{bad}");
+        }
         // Total size over 4 GiB.
         let mut big = valid.clone();
         big["files"][0]["size"] = json!(MAX_BLOB_BYTES);

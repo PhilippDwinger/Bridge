@@ -96,8 +96,12 @@ async fn upload_a_website_and_a_new_version() -> TestResult {
         Ok((status == 200 && body.contains("Version zwei")).then_some(()))
     })
     .await?;
-    let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
-    assert_eq!(dash["apps"][0]["address"], json!("testseite.testnetz"));
+    // The dashboard's network view is polled (once a second here) - under load the name may come a moment later.
+    let dash = wait_for(30, "address in the dashboard", || async {
+        let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+        Ok((dash["apps"][0]["address"] == json!("testseite.testnetz")).then_some(dash))
+    })
+    .await?;
     assert_eq!(dash["apps"][0]["public"], json!(null), "no public link while the network is not public");
 
     // Löschen (docs/07 §10): gone in the whole network, the address free, the key gone - for good.

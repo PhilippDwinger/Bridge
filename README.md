@@ -51,6 +51,14 @@ App-Ordner: `%APPDATA%\BridgeControll2` (Windows) bzw. `~/.local/share/bridgecon
 Knoten (Schlüssel, Datenbank; der Owner-Ordner hat `admin-key.json`), `logs/`, `backup/` (gelöschte Knoten). Die alte
 BridgeControll (Python) bleibt für Bridge-3-Server. UI-Rauchtest: `python3 apps/bridgecontroll/tests/ui/smoke.py`.
 
+## Website aus Vorlage (Phase 9, docs/13)
+Im Dashboard bei „Apps“: **Website aus Vorlage** → Vorlage wählen (Visitenkarte, Gästebuch, Umfrage, Termine, Anmeldung, Ideen sammeln,
+Countdown, Rezept), Felder
+ausfüllen, Design wählen (Hell, Dunkel, Bunt), Adresse vergeben, „Veröffentlichen“. Kein Ordner, kein Code – der
+Owner-Knoten hostet die Seite. Einträge (Grüße, Stimmen, Zusagen) speichert der eingebaute Baustein `builtin:records`
+bei den Hosts. „Bearbeiten“ ändert die Einstellungen später (neue Version, gleiche Adresse, Einträge bleiben).
+Abstimmen und Zusagen gehen mit Bridge Login – also über die Adresse der Website im Bridge-Rahmen.
+
 ## Öffentlich machen (Phase 7, docs/11)
 
 Im Netz-Dashboard von BridgeControll v2 unter **„Öffentlich“** → **„Öffentlich machen“**: Websites und Apps des Netzes

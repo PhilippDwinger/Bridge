@@ -78,6 +78,24 @@ impl Host for AppHost {
     }
 }
 
+/// The built-in `records` (docs/13 §4) reads the newest events and appends like server code does.
+impl crate::records::EventLog for AppHost {
+    fn newest(&self, limit: usize) -> Vec<crate::records::Event> {
+        let rows = self.store.app_events_newest(self.app.as_str(), limit).unwrap_or_default();
+        rows.iter()
+            .filter_map(|row| event_data(&row.statement).map(|data| crate::records::Event { t: row.iat, data }))
+            .collect()
+    }
+
+    fn count(&self) -> u64 {
+        Host::event_count(self)
+    }
+
+    fn append(&mut self, data: &[u8]) -> Result<(), String> {
+        Host::event_append(self, data)
+    }
+}
+
 /// The data of a stored event statement.
 fn event_data(bytes: &[u8]) -> Option<Vec<u8>> {
     let statement = Statement::parse(bytes).ok()?;
@@ -120,6 +138,9 @@ impl Node {
             return Err(NodeError::new(413, "TOO_LARGE", "request too large"));
         }
         let server = version.manifest.server.as_deref().ok_or_else(NodeError::not_found)?;
+        if server == crate::records::RECORDS {
+            return self.records_api(request, app, path, now).await;
+        }
         let file = version.manifest.file(server).ok_or_else(NodeError::not_found)?;
         if file.size > bridge_wasm::MAX_MODULE_BYTES as u64 {
             return Err(NodeError::forbidden("server code too large"));
@@ -174,6 +195,42 @@ impl Node {
             b64_var(answer.get("body").and_then(Value::as_str).unwrap_or_default(), "body", bridge_wasm::MAX_IO_BYTES)?;
         let mut response = Response::ok(body).with_header("content-type", kind.to_owned());
         response.status = u16::try_from(status).unwrap_or(500);
+        Ok(response)
+    }
+
+    /// `POST /app/<id>/api/<path>` of an app with the built-in `records` (docs/13 §4): same slot, same login check,
+    /// same event log as server code - only the code is Bridge's own.
+    async fn records_api(&self, request: &Request, app: &Id, path: &str, now: i64) -> NodeResult<Response> {
+        if request.body.len() > crate::records::MAX_BODY {
+            return Err(NodeError::new(413, "TOO_LARGE", "request too large"));
+        }
+        let slot = Arc::clone(&self.inner.plugin_calls).try_acquire_owned().map_err(|_| NodeError {
+            retry_after: Some(1),
+            ..NodeError::new(429, "RATE_LIMITED", "too many calls at once")
+        })?;
+        let caller = self
+            .app_login(request, app, now)?
+            .map(|(user, name)| crate::records::Caller { user: user.to_string(), name });
+        let (sign, receive) = self.inner.identity.secret_bytes();
+        let mut host = AppHost {
+            store: Arc::clone(&self.inner.store),
+            identity: Identity::from_secret_bytes(&sign, &receive),
+            net: self.inner.net.clone(),
+            app: app.clone(),
+            appended: 0,
+            now,
+        };
+        let (path, body) = (path.to_owned(), request.body.to_vec());
+        let (status, answer) = tokio::task::spawn_blocking(move || {
+            let result = crate::records::handle(&path, &body, caller.as_ref(), now, &mut host);
+            drop(slot);
+            result
+        })
+        .await
+        .map_err(|_| NodeError::unavailable())?;
+        let mut response =
+            Response::ok(answer.to_string().into_bytes()).with_header("content-type", "application/json");
+        response.status = status;
         Ok(response)
     }
 

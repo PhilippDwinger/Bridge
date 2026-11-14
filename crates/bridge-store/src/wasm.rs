@@ -117,6 +117,24 @@ impl Store {
         Ok(count as u64)
     }
 
+    /// The newest `limit` events of `app`, newest first (the agreed order `(iat, host, seq)` backwards; docs/13 §4).
+    pub fn app_events_newest(&self, app: &str, limit: usize) -> StoreResult<Vec<EventRow>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT host, seq, iat, statement FROM app_events WHERE app = ?1 ORDER BY iat DESC, host DESC, seq DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![app, i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok(EventRow {
+                host: row.get(0)?,
+                seq: row.get::<_, i64>(1)? as u64,
+                iat: row.get(2)?,
+                statement: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Event number `index` of `app` in the agreed order `(iat, host, seq)`.
     pub fn app_event_at(&self, app: &str, index: u64) -> StoreResult<Option<EventRow>> {
         Ok(self

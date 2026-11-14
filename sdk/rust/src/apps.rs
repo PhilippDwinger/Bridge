@@ -36,6 +36,8 @@ pub const APP_LIFETIME_MS: i64 = bridge_core::app::MAX_APP_LIFETIME_MS;
 
 /// The server code of an app version, if it has a file of this name at its top (docs/09 §13).
 pub const SERVER_FILE: &str = "server.wasm";
+/// A file of this name at the top of a version asks for the built-in building block `records` instead (docs/13 §4).
+pub const RECORDS_FILE: &str = "server.records";
 
 fn untrusted(what: impl Into<String>) -> SdkError {
     SdkError::Untrusted(what.into())
@@ -534,10 +536,15 @@ impl Client {
     }
 
     /// Signs a version (app key + this client as owner, valid for one year from now). A file `server.wasm` at the top
-    /// of the version is its server code (docs/09 §13).
+    /// of the version is its server code (docs/09 §13); else a file `server.records` asks for the built-in `records`
+    /// (docs/13 §4).
     pub fn sign_app(&self, app: &Identity, draft: &AppDraft, files: Vec<AppFile>) -> SdkResult<Statement> {
         let net = self.net.as_ref().ok_or_else(|| untrusted("not connected"))?;
-        let server = files.iter().any(|file| file.path == SERVER_FILE).then(|| SERVER_FILE.to_owned());
+        let server = if files.iter().any(|file| file.path == SERVER_FILE) {
+            Some(SERVER_FILE.to_owned())
+        } else {
+            files.iter().any(|file| file.path == RECORDS_FILE).then(|| "builtin:records".to_owned())
+        };
         let manifest = AppManifest {
             app: app.id().clone(),
             owner: self.identity.id().clone(),

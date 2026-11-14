@@ -1,0 +1,13 @@
+{
+  "name": "Umfrage",
+  "description": "Eine Frage, mehrere Antworten – jede Person mit Bridge Login hat eine Stimme.",
+  "records": true,
+  "fields": [
+    {"key": "question", "label": "Frage", "type": "text", "max": 200, "required": true,
+     "default": "Wann treffen wir uns?"},
+    {"key": "text", "label": "Erklärung", "type": "area", "max": 1000},
+    {"key": "answers", "label": "Antworten", "type": "list", "min": 2, "max": 8, "line_max": 100, "required": true,
+     "default": ["Freitag", "Samstag", "Sonntag"], "hint": "Je Zeile eine Antwort (2–8). Ändern sich Frage oder Antworten, beginnt die Umfrage neu."},
+    {"key": "show_results", "label": "Ergebnis vor dem Abstimmen zeigen", "type": "switch", "default": false}
+  ]
+}

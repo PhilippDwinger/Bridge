@@ -41,6 +41,7 @@ pub async fn route(app: &App, call: &Call<'_>) -> Answer {
         return match parts.as_slice() {
             ["overview"] => Answer::json(200, &ops::overview(app).await),
             ["update"] => Answer::json(200, &app.updater.status()),
+            ["templates"] => Answer::json(200, &crate::templates::list()),
             ["browser"] => Answer::json(200, &browser::nodes(app).await),
             ["nodes", id, "dashboard"] => result(ops::dashboard(app, id, call.query).await),
             ["nodes", id, "log"] => log(app, id, call.query),
@@ -191,6 +192,8 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
         "site-check" => result(crate::sites::check(app, id, body).await),
         "site-publish" => result(crate::sites::publish(app, id, body).await),
         "site-delete" => result(crate::sites::delete(app, id, body).await),
+        "template-publish" => result(crate::templates::publish(app, id, body).await),
+        "template-load" => result(crate::templates::load(app, id, body).await),
         _ => Answer::error(404, "Nicht gefunden"),
     }
 }

@@ -32,6 +32,7 @@ pub mod sites;
 pub mod startmenu;
 pub mod status;
 pub mod supervisor;
+pub mod templates;
 pub mod update;
 pub mod wizard;
 

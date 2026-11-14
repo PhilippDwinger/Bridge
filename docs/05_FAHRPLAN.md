@@ -303,12 +303,19 @@ freigegeben).
    angemeldet bleiben, Zahl der Konten im Dashboard, Helfer im JavaScript-SDK; Speicher-Oberfläche in BridgeControll,
    App-API auch über den Leser; Bridge-3-Server als Name im Netz und auf anderen PCs; öffentliche Status-Seite
    (`…/bridge4/<netz>/status`) und Windows-Benachrichtigung bei neuer Meldung oder ausgefallenem Knoten.
+   **Gebaut 14.11.2026**: Status-Seite (docs/11 §15), Zahl der Konten im Dashboard, angemeldet bleiben (HttpOnly-Cookie,
+   docs/11 §16), `bridgeLogin` im JavaScript-SDK (docs/11 §17). Offen: Login im Bridge-Browser/„Ansehen“,
+   Speicher-Oberfläche, App-API über den Leser, Bridge-3-Server als Name, Windows-Benachrichtigungen.
 
 ## Phase 9 – Vorlagen und Design-Plugins (Paddy 13.11.2026)
 - **Viele Vorlagen** (Paddy: „ganz wichtig, dass es da viele gibt“): Bridge soll auf vielen Geräten laufen, auch bei
   Freunden, die nicht programmieren können. In „Website hochladen“ fertige, **einstellbare** Vorlagen (z. B.
   Gästebuch, Chat, Umfrage, Terminliste, später viele mehr); der eigene PC hostet sie. Sie nutzen Bridge Login und den
   Server-Code der Apps.
+  **Gebaut 14.11.2026** (docs/13, ADR 0031): „Website aus Vorlage“ in BridgeControll mit acht Vorlagen (Visitenkarte,
+  Gästebuch, Umfrage, Termine, Anmeldung, Ideen sammeln, Countdown, Rezept), drei Designs, „Bearbeiten“; der eingebaute Server-Baustein `builtin:records` speichert die
+  Einträge auf dem Ereignis-Log der App (bei allen Hosts gleich). Nächste Vorlagen: Wunschliste, Pinnwand, Fotoalbum,
+  Chat.
 - **Design-Plugins** (später): laufen lokal; bei einer Vorlage wählt man als Design ein selbst gemachtes Design-Plugin,
   das das Aussehen der Website übernimmt.
 - **Bridge Drive**: geteilte Ordner über die Speicher-Knoten, beim Besitzer verschlüsselt, mit anderen Konten teilbar.

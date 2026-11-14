@@ -1225,7 +1225,16 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
     let link = app.links.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).cloned();
     // Names, Meldeweg and the operator's member key (docs/08 §12).
     let names = crate::moderation::names_view(state, now);
-    let app_keys = crate::moderation::app_keys(&dir).await;
+    let mut app_keys = crate::moderation::app_keys(&dir).await;
+    {
+        let (template_dir, mut keys) = (dir.clone(), std::mem::take(&mut app_keys));
+        app_keys = tokio::task::spawn_blocking(move || {
+            crate::templates::annotate(&template_dir, &mut keys);
+            keys
+        })
+        .await
+        .unwrap_or_default();
+    }
     let operator = crate::moderation::operator_id(&dir);
     answer["net"] = json!({
         "id": view.net.as_str(),

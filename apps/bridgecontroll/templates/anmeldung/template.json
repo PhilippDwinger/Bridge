@@ -1,0 +1,14 @@
+{
+  "name": "Anmeldung",
+  "description": "Wer kommt mit wie vielen Leuten? Eine Teilnehmerliste mit Bridge Login.",
+  "records": true,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Sommerfest"},
+    {"key": "date", "label": "Datum", "type": "date"},
+    {"key": "time", "label": "Uhrzeit", "type": "time"},
+    {"key": "place", "label": "Ort", "type": "text", "max": 120},
+    {"key": "text", "label": "Text", "type": "area", "max": 1500,
+     "default": "Melde dich an, damit wir wissen, wie viele kommen."},
+    {"key": "message", "label": "Nachricht bei der Anmeldung erlauben", "type": "switch", "default": true}
+  ]
+}

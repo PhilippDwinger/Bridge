@@ -1,0 +1,43 @@
+/* The layout of every template (docs/13 §3). Colors, corners and fonts come only from the variables of design.css -
+   a design plugin changes the look without touching this file. Classes for templates: .b-card, .b-btn, .b-list. */
+*, *::before, *::after { box-sizing: border-box; }
+html { background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 16px; line-height: 1.55; }
+body { margin: 0; min-height: 100vh; }
+.b-page { max-width: 720px; margin: 0 auto; padding: 32px 16px 56px; display: flex; flex-direction: column; gap: 18px; }
+.b-page--narrow { max-width: 520px; }
+h1, h2, h3 { font-family: var(--font-head); line-height: 1.2; margin: 0; }
+h1 { font-size: clamp(26px, 5vw, 36px); }
+h2 { font-size: 20px; }
+p { margin: 0; }
+a { color: var(--accent); }
+.b-text { white-space: pre-line; overflow-wrap: anywhere; }
+.b-muted { color: var(--muted); font-size: 14px; }
+.b-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px;
+  display: flex; flex-direction: column; gap: 12px; }
+.b-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; padding: 8px 18px;
+  border-radius: calc(var(--radius) * 0.7); border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent);
+  font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
+.b-btn:hover { filter: brightness(1.08); }
+.b-btn:disabled { opacity: 0.55; cursor: default; filter: none; }
+.b-btn--quiet { background: transparent; color: var(--accent); }
+.b-btn--small { min-height: 32px; padding: 4px 12px; font-size: 14px; }
+.b-btn:focus-visible, .b-input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.b-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.b-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.b-row--between { justify-content: space-between; }
+.b-input { width: 100%; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 0.6); padding: 10px 12px; }
+textarea.b-input { min-height: 96px; resize: vertical; }
+.b-label { font-weight: 600; font-size: 14px; }
+.b-bar { height: 10px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.b-bar > span { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
+.b-login { display: flex; justify-content: flex-end; gap: 10px; align-items: center; font-size: 14px; color: var(--muted); min-height: 32px; }
+.b-error { color: #c2333b; font-size: 14px; }
+.b-avatar { width: 88px; height: 88px; border-radius: 50%; background: var(--accent); color: var(--on-accent);
+  display: flex; align-items: center; justify-content: center; font-family: var(--font-head); font-size: 40px; font-weight: 700; }
+.b-center { text-align: center; align-items: center; }
+.b-choice { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 0.6); cursor: pointer; }
+.b-choice:has(input:checked) { border-color: var(--accent); }
+.b-past { opacity: 0.55; }
+.b-foot { text-align: center; color: var(--muted); font-size: 13px; padding-top: 12px; }

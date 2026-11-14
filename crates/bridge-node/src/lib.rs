@@ -33,6 +33,7 @@ mod network;
 pub mod plugins;
 mod public;
 mod reader;
+mod records;
 mod remember;
 mod reports;
 mod sessions;

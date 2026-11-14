@@ -116,3 +116,24 @@
   .bc-grid3, .bc-grid2 { grid-template-columns: minmax(0, 1fr); }
 }
 .bc-err-text { color: var(--err); }
+
+/* Website aus Vorlage (docs/13) - built from the design system's tokens. */
+.bc-tpls { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.bc-tpl { gap: 16px; }
+.bc-tpl__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.bc-tpl .bc-tpl__name { font-size: var(--fs-h2); }
+.bc-tpl__text { font-size: 14px; color: var(--text-2); }
+.bc-tpl-area { min-height: 84px; resize: vertical; padding-top: 10px; padding-bottom: 10px; }
+.bc-designs { display: flex; flex-wrap: wrap; gap: 12px; }
+.bc-design { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
+.bc-design input { position: absolute; opacity: 0; pointer-events: none; }
+.bc-design__swatch { width: 96px; height: 64px; border-radius: var(--r-m, 10px); border: 2px solid var(--line); display: flex; align-items: center;
+  justify-content: center; box-sizing: border-box; transition: border-color var(--dur-2); }
+.bc-design__card { width: 64px; height: 36px; border-radius: 6px; border: 1px solid; display: flex; flex-direction: column; justify-content: center;
+  gap: 6px; padding: 0 8px; box-sizing: border-box; }
+.bc-design__line { height: 4px; width: 70%; border-radius: 2px; opacity: 0.8; }
+.bc-design__dot { height: 8px; width: 24px; border-radius: 4px; }
+.bc-design__name { font-size: 14px; color: var(--text-2); }
+.bc-design input:checked + .bc-design__swatch { border-color: var(--accent); }
+.bc-design input:checked ~ .bc-design__name { color: var(--text); font-weight: 600; }
+.bc-design input:focus-visible + .bc-design__swatch { box-shadow: var(--focus-ring); }

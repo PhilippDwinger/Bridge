@@ -1091,7 +1091,8 @@
     const sorted = data.nodes.slice().sort((a, b) => rank(b) - rank(a) || (a.name || a.id).localeCompare(b.name || b.id));
     const nodeRows = sorted.map((n, index) => dashNodeRow(id, n, index, net));
     const appRows = data.apps.length ? data.apps.map((a, index) => {
-      const own = data.app_keys.some((k) => k.id === a.id);
+      const key = data.app_keys.find((k) => k.id === a.id) || {};
+      const own = !!key.id;
       const serving = !a.banned && a.state === 'serving';
       return h('div', { class: 'srv', 'data-app': a.id },
         h('span', { class: 'srv__nr', text: nr(index) }),
@@ -1101,13 +1102,15 @@
         h('div', { class: 'srv__actions' },
           serving && a.public ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.public, target: '_blank', rel: 'noopener noreferrer', title: 'Über die öffentliche Adresse – mit Bridge Login' }, icon('globe'), 'Öffentlich') : null,
           serving && a.view ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.view, target: '_blank', rel: 'noopener noreferrer', title: 'Auf diesem PC (ohne Login)' }, icon('external'), 'Ansehen') : null,
-          !a.banned && own ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Neue Version',
-            onclick: () => siteDialog(id, data, data.app_keys.find((k) => k.id === a.id)) }) : null,
+          !a.banned && own && key.template ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Bearbeiten',
+            onclick: (event) => templateEdit(id, data, key, event.currentTarget) }) : null,
+          !a.banned && own && !key.template ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Neue Version',
+            onclick: () => siteDialog(id, data, key) }) : null,
           own ? h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Löschen', onclick: () => deleteSiteDialog(id, a) })
             : (a.banned ? null : h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Sperren',
               onclick: () => banDialog(id, a.id, a.name || 'diese App', true) })))); }) : [h('p', { class: 'bc-empty-line', text: data.app_keys.length
       ? 'Keine App auf dem Owner-Knoten. Deine Apps (' + data.app_keys.map((a) => a.name).join(', ') + ') liegen auf anderen Hosts – im Bridge-Browser findest du sie über ihre Namen.'
-      : 'Noch keine Website. Mit „Website hochladen“ wird ein Ordner auf diesem PC zu einer Website in deinem Netz.' })];
+      : 'Noch keine Website. „Website aus Vorlage“ macht eine fertige Seite (Gästebuch, Umfrage, Termine …) mit ein paar Feldern; „Website hochladen“ macht einen Ordner auf diesem PC zur Website.' })];
 
     const searchInput = h('input', { class: 'b-input', id: 'member-search', placeholder: 'Name oder ID', value: search, autocomplete: 'off', spellcheck: 'false' });
     let searchTimer = null;
@@ -1158,7 +1161,9 @@
           h('h2', { class: 'bc-h2 bc-list-title', text: 'Knoten' }), h('div', { class: 'bc-list' }, nodeRows),
           h('div', { class: 'bc-row bc-list-after' }, h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', onclick: () => sealDialog(id, null) }, icon('plus'), 'Knoten von einem anderen PC siegeln (Ausweis)')),
           h('div', { class: 'bc-row bc-row--between bc-section-gap' }, h('h2', { class: 'bc-h2 bc-list-title', text: 'Apps' }),
-            h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', onclick: () => siteDialog(id, data, null) }, icon('plus'), 'Website hochladen')),
+            h('div', { class: 'bc-row' },
+              h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', onclick: () => siteDialog(id, data, null) }, icon('plus'), 'Website hochladen'),
+              h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', onclick: (event) => templateChooser(id, data, event.currentTarget) }, icon('plus'), 'Website aus Vorlage'))),
           h('div', { class: 'bc-list' }, appRows),
           bridge3Section(data, id),
           reportsSection(data, id),
@@ -1637,6 +1642,157 @@
       h('div', { class: 'b-dialog__btns' }, view, ok));
     close = openDialog(dialog);
     ok.addEventListener('click', () => close());
+  }
+
+  // ---------- Website aus Vorlage (docs/13) ----------
+
+  let templateCache = null;
+  async function templateList() {
+    if (!templateCache) templateCache = await api('GET', '/api/templates');
+    return templateCache;
+  }
+
+  async function templateChooser(ownerId, data, button) {
+    const list = await act(button, () => templateList());
+    if (!list) return;
+    let close = () => {};
+    const rows = list.templates.map((t, index) => h('a', { class: 'area bc-tpl', href: '#', role: 'button', 'data-template': t.id,
+      onclick: (event) => { event.preventDefault(); close(); templateDialog(ownerId, data, list, t, null, null); } },
+      h('span', { class: 'area__nr', text: nr(index) }),
+      h('span', { class: 'bc-tpl__body' }, h('span', { class: 'area__name bc-tpl__name', text: t.name }),
+        h('span', { class: 'bc-tpl__text', text: t.description })),
+      t.records ? chip('mit Einträgen') : null, h('span', { class: 'area__go' }, icon('arrow'))));
+    const dialog = h('div', { class: 'b-dialog bc-dialog-wide', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'tpl-title' },
+      h('h3', { id: 'tpl-title', text: 'Website aus Vorlage' }),
+      h('p', { class: 'bc-muted bc-p0', text: 'Wähl eine Vorlage, füll ein paar Felder aus, fertig – ohne Ordner und ohne Code. Dein Owner-Knoten hostet sie.' }),
+      h('div', { class: 'bc-tpls' }, rows),
+      h('div', { class: 'b-dialog__btns' }, h('button', { class: 'b-btn b-btn--secondary', type: 'button', text: 'Abbrechen', onclick: () => close() })));
+    close = openDialog(dialog);
+  }
+
+  async function templateEdit(ownerId, data, appKey, button) {
+    const both = await act(button, async () => [await templateList(),
+      await api('POST', '/api/nodes/' + ownerId + '/template-load', { app: appKey.id })]);
+    if (!both) return;
+    const [list, saved] = both;
+    const template = list.templates.find((t) => t.id === saved.template);
+    if (!template) { toast('err', 'Vorlage fehlt', 'Diese Vorlage gibt es in dieser Version nicht mehr.'); return; }
+    templateDialog(ownerId, data, list, template, appKey, saved);
+  }
+
+  function templateInput(f, id, value) {
+    const shown = value === undefined || value === null ? '' : value;
+    if (f.type === 'switch') return h('input', { type: 'checkbox', id, checked: shown === true });
+    if (f.type === 'area' || f.type === 'list') {
+      return h('textarea', { class: 'b-input bc-tpl-area', id, rows: f.type === 'list' ? 4 : 3, maxlength: f.type === 'area' ? f.max : null,
+        value: Array.isArray(shown) ? shown.join('\n') : String(shown), spellcheck: f.line === 'link' ? 'false' : null });
+    }
+    if (f.type === 'choice') {
+      return h('select', { class: 'b-input', id }, f.options.map((o) => h('option', { value: o.value, text: o.label, selected: o.value === shown ? true : null })));
+    }
+    const attrs = { class: 'b-input', id, autocomplete: 'off', value: String(shown) };
+    if (f.type === 'text') attrs.maxlength = f.max;
+    if (f.type === 'date') attrs.type = 'date';
+    if (f.type === 'time') attrs.type = 'time';
+    if (f.type === 'link') Object.assign(attrs, { type: 'url', placeholder: 'https://…', spellcheck: 'false', class: 'b-input b-input--mono' });
+    return h('input', attrs);
+  }
+
+  function templateDialog(ownerId, data, list, template, appKey, saved) {
+    const net = data.net;
+    const values = saved ? saved.settings || {} : {};
+    const inputs = {};
+    const fieldEls = template.fields.map((f) => {
+      const id = 'tpl-' + f.key;
+      const value = Object.prototype.hasOwnProperty.call(values, f.key) ? values[f.key] : f.default;
+      const input = templateInput(f, id, value);
+      inputs[f.key] = input;
+      const hint = f.hint || (f.type === 'list' ? 'Je Zeile ein Eintrag, höchstens ' + f.max + '.' : '');
+      if (f.type === 'switch') {
+        const box = h('label', { class: 'b-switch' }, input, h('span', { class: 'b-switch__track' }, h('span', { class: 'b-switch__knob' })), f.label);
+        return h('div', { class: 'b-field' }, box, h('span', { class: 'b-hint', id: id + '-hint', text: hint, hidden: hint ? null : true }));
+      }
+      if (f.type === 'choice') {
+        const wrap = field(id, f.label, input, hint);
+        input.replaceWith(h('div', { class: 'b-selectwrap' }, input, icon('chevron')));
+        return wrap;
+      }
+      return field(id, f.label + (f.required ? '' : ' (optional)'), input, hint);
+    });
+    let design = saved && list.designs.some((d) => d.id === saved.design) ? saved.design : list.designs[0].id;
+    const designs = h('div', { class: 'bc-designs', role: 'radiogroup', 'aria-labelledby': 'tpl-design-label' }, list.designs.map((d) => {
+      const radio = h('input', { type: 'radio', name: 'tpl-design', value: d.id, checked: d.id === design, onchange: () => { design = d.id; } });
+      const [bg, card, fg, accent] = d.preview;
+      const swatch = h('span', { class: 'bc-design__swatch', 'aria-hidden': 'true' });
+      swatch.style.background = bg;
+      const inner = h('span', { class: 'bc-design__card' });
+      inner.style.background = card;
+      inner.style.borderColor = accent;
+      const line = h('span', { class: 'bc-design__line' });
+      line.style.background = fg;
+      const dot = h('span', { class: 'bc-design__dot' });
+      dot.style.background = accent;
+      inner.append(line, dot);
+      swatch.append(inner);
+      return h('label', { class: 'bc-design' }, radio, swatch, h('span', { class: 'bc-design__name', text: d.name }));
+    }));
+    const name = h('input', { class: 'b-input', maxlength: '64', autocomplete: 'off', value: appKey ? appKey.name : template.name });
+    const description = h('input', { class: 'b-input', maxlength: '500', autocomplete: 'off', placeholder: 'optional, öffentlich' });
+    const address = h('input', { class: 'mono', id: 'tpl-address', maxlength: '40', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: 'meineseite' });
+    const addressField = h('div', { class: 'b-field' }, h('label', { for: 'tpl-address', text: template.records ? 'Adresse' : 'Adresse (optional)' }),
+      h('div', { class: 'b-wrap' }, address, net.short ? h('span', { class: 'b-affix', text: '.' + net.short }) : null),
+      h('span', { class: 'b-hint', id: 'tpl-address-hint', text: template.records
+        ? 'Über die Adresse öffnen andere die Website im Bridge-Rahmen – nur dort gibt es Bridge Login (zum Abstimmen, Zusagen …). 2–40 Zeichen a–z, 0–9 und -.'
+        : 'Unter dieser Adresse findet man die Website im Bridge-Browser. 2–40 Zeichen a–z, 0–9 und -.' }));
+    const slug = (text) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss')
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+    let suggested = '';
+    const suggest = () => {
+      const next = slug(name.value);
+      if (address.value === suggested) address.value = next;
+      suggested = next;
+    };
+    name.addEventListener('input', suggest);
+    if (!appKey) suggest();
+    const general = h('p', { class: 'b-hint b-hint--err bc-p0', hidden: true });
+    const body = [
+      h('p', { class: 'bc-muted bc-p0' }, chip(template.name), ' ', template.description),
+      fieldEls,
+      h('div', { class: 'b-field' }, h('span', { class: 'b-flabel', id: 'tpl-design-label', text: 'Design' }), designs),
+      appKey ? h('p', { class: 'bc-muted bc-p0', text: 'Neue Version von „' + appKey.name + '“ – dieselbe Adresse, Einträge bleiben.' }) : field('tpl-name', 'Name der Website', name),
+      appKey ? null : addressField,
+      field('tpl-description', 'Beschreibung', description),
+      template.records ? h('p', { class: 'bc-muted bc-p0', text: 'Einträge (Grüße, Stimmen, Zusagen) speichern die Hosts der Website im Netz; alle, die die Website sehen, sehen sie auch.' }) : null,
+      general,
+    ];
+    formDialog(appKey ? 'Website bearbeiten' : 'Website aus Vorlage', null, body, appKey ? 'Speichern' : 'Veröffentlichen', async () => {
+      const ids = ['tpl-name', 'tpl-address'].concat(template.fields.map((f) => 'tpl-' + f.key));
+      ids.forEach((id) => setFieldError(id, null));
+      general.hidden = true;
+      const settings = {};
+      for (const f of template.fields) {
+        const input = inputs[f.key];
+        settings[f.key] = f.type === 'switch' ? input.checked : input.value;
+      }
+      const payload = { template: template.id, design, settings, description: description.value.trim() };
+      if (appKey) payload.app = appKey.id;
+      else Object.assign(payload, { name: name.value.trim(), address: address.value.trim().toLowerCase() });
+      let result;
+      try {
+        result = await api('POST', '/api/nodes/' + ownerId + '/template-publish', payload);
+      } catch (error) {
+        const message = error.message || '';
+        const hit = template.fields.find((f) => message.startsWith(f.label + ':') || message.startsWith(f.label + ','));
+        if (hit && hit.type !== 'switch') setFieldError('tpl-' + hit.key, message);
+        else if (/^Adresse/.test(message)) setFieldError('tpl-address', message);
+        else if (/^Name der Website/.test(message)) setFieldError('tpl-name', message);
+        else { general.replaceChildren(icon('err'), message); general.hidden = false; }
+        return false;
+      }
+      refresh();
+      siteDone(ownerId, result);
+      return true;
+    }, { wide: true });
   }
 
   function nameDialog(ownerId, data) {

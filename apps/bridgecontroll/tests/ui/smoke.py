@@ -447,6 +447,101 @@ def main():
             other.wait_for_selector("h1:has-text('Hallo von der Testseite')", timeout=30000)
             other.close()
 
+            # "Website aus Vorlage" (docs/13): a guest book from a few fields and a design - no folder, no code.
+            def from_template(template, fill):
+                page.goto(base + "/" + owner_hash)
+                page.wait_for_selector("button:has-text('Website aus Vorlage')")
+                page.click("button:has-text('Website aus Vorlage')")
+                page.wait_for_selector(f".bc-tpl[data-template='{template}']")
+                if template == "gaestebuch":
+                    shot("42-vorlage-waehlen", dialog=True)
+                page.click(f".bc-tpl[data-template='{template}']")
+                page.wait_for_selector(".b-form #tpl-name")
+                fill()
+                page.click(".b-form button[type=submit]")
+                page.wait_for_selector("text=Website ist online", timeout=90000)
+                url = page.get_attribute(".b-dialog a:has-text('Ansehen')", "href")
+                page.click(".b-dialog button:has-text('Fertig')")
+                return url
+
+            def fill_book():
+                page.fill("#tpl-title", "Gästebuch der Testseite")
+                page.fill("#tpl-welcome", "Schön, dass ihr da seid!\nSchreibt uns einen Gruß.")
+                page.click("label.b-switch:has(#tpl-login_only)")
+                page.click("label.bc-design:has-text('Bunt')")
+                page.fill("#tpl-name", "Unser Gästebuch")
+                assert page.input_value("#tpl-address") == "unser-gastebuch", page.input_value("#tpl-address")
+                shot("43-vorlage-einstellen", dialog=True)
+
+            book = from_template("gaestebuch", fill_book)
+            page.wait_for_selector(".srv:has-text('Unser Gästebuch') button:has-text('Bearbeiten')", timeout=30000)
+
+            def site_page(url):
+                view_page = browser.new_page(viewport={"width": 900, "height": 760})
+                view_page.on("pageerror", lambda e: console.append(f"pageerror (Vorlage): {e}"))
+                view_page.goto(url)
+                return view_page
+
+            guest = site_page(book)
+            guest.wait_for_selector("h1:has-text('Gästebuch der Testseite')", timeout=30000)
+            guest.wait_for_selector("input[placeholder='Dein Name']", timeout=15000)
+            guest.fill("input[placeholder='Dein Name']", "Ben")
+            guest.fill("textarea", "Hallo aus dem Rauchtest!")
+            guest.click("button:has-text('Eintragen')")
+            guest.wait_for_selector("li:has-text('Hallo aus dem Rauchtest!')", timeout=15000)
+            guest.wait_for_timeout(300)
+            guest.screenshot(path=os.path.join(args.shots, "44-vorlage-gaestebuch.png"), full_page=True)
+            guest.close()
+            # Bearbeiten: the saved settings come back; a new version keeps the entries.
+            page.click(".srv:has-text('Unser Gästebuch') button:has-text('Bearbeiten')")
+            page.wait_for_selector(".b-form #tpl-title")
+            assert page.input_value("#tpl-title") == "Gästebuch der Testseite", page.input_value("#tpl-title")
+            assert page.is_checked("input[name='tpl-design'][value='bunt']")
+            shot("45-vorlage-bearbeiten", dialog=True)
+            page.fill("#tpl-title", "Unser Gästebuch, Version 2")
+            page.click(".b-form button[type=submit]")
+            page.wait_for_selector("text=Neue Version ist online", timeout=90000)
+            page.click(".b-dialog button:has-text('Fertig')")
+            guest = site_page(book)
+            deadline = time.time() + 30
+            while not guest.locator("h1:has-text('Version 2')").count():
+                if time.time() > deadline:
+                    raise AssertionError("Version 2 der Vorlage nicht da")
+                guest.wait_for_timeout(500)
+                guest.reload()
+            guest.wait_for_selector("li:has-text('Hallo aus dem Rauchtest!')", timeout=15000)
+            guest.close()
+            # A poll and dates: without a login the page says how to log in.
+            def fill_poll():
+                page.click("label.bc-design:has-text('Dunkel')")
+                page.fill("#tpl-name", "Unsere Umfrage")
+
+            poll = site_page(from_template("umfrage", fill_poll))
+            poll.wait_for_selector("text=Zum Abstimmen bitte mit Bridge anmelden – öffne die Seite", timeout=30000)
+            poll.screenshot(path=os.path.join(args.shots, "46-vorlage-umfrage.png"), full_page=True)
+            poll.close()
+
+            def fill_dates():
+                page.fill("#tpl-name", "Unsere Termine")
+
+            dates = site_page(from_template("termine", fill_dates))
+            dates.wait_for_selector("h2:has-text('Spieleabend')", timeout=30000)
+            dates.screenshot(path=os.path.join(args.shots, "47-vorlage-termine.png"), full_page=True)
+            dates.close()
+            # The other templates render without script errors (defaults only).
+            for number, template, name, ready in (
+                    (48, "anmeldung", "Sommerfest", "text=Noch niemand angemeldet"),
+                    (49, "ideen", "Ideen", "text=Noch keine Ideen"),
+                    (50, "countdown", "Countdown", "text=Sekunden"),
+                    (51, "rezept", "Apfelkuchen", "text=Bei 180 °C 45 Minuten backen.")):
+                def fill_name(name=name):
+                    page.fill("#tpl-name", name)
+                other = site_page(from_template(template, fill_name))
+                other.wait_for_selector(ready, timeout=30000)
+                other.wait_for_timeout(300)
+                other.screenshot(path=os.path.join(args.shots, f"{number}-vorlage-{template}.png"), full_page=True)
+                other.close()
+
             # "Öffentlich machen" (docs/11 §5): the gate on one Tailscale port, the website public in the frame.
             page.goto(base + "/" + owner_hash)
             page.wait_for_selector("button:has-text('Öffentlich machen')")

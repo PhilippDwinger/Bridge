@@ -286,10 +286,28 @@ async fn web_host_ready(entry: &NodeEntry, admin: &AdminClient) -> Result<bool, 
 /// `POST /api/nodes/<id>/site-publish` `{"folder","name"|"app","entry"?,"description"?,"address"?}`: a new app from
 /// the folder (`name`) or a new version of an app of the owner folder (`app`); optionally a name for it.
 pub async fn publish(app: &App, id: &str, body: &Map<String, Value>) -> Result<Value, String> {
+    let checked = checked_request(app, id, body).await?;
+    let (folder, info, start) = checked_folder(app, body).await?;
+    if let Some(problem) = info.problems(&start).into_iter().next() {
+        return Err(problem);
+    }
+    publish_folder(app, id, checked, &folder, &info, &start).await
+}
+
+/// What a publish request names besides the folder, checked: description, address, existing app or new name.
+pub(crate) struct Checked {
+    description: String,
+    address: String,
+    existing: Option<Id>,
+    name: String,
+}
+
+/// Checks the inputs of a publish request (`description`, `address`, `app` of the owner folder, else `name`) -
+/// nothing changes in the network for a form with a mistake.
+pub(crate) async fn checked_request(app: &App, id: &str, body: &Map<String, Value>) -> Result<Checked, String> {
     let entry = entry_of(app, id).await?;
-    let admin = admin_client(app, &entry)?;
+    admin_client(app, &entry)?;
     let dir = app.node_dir(&entry);
-    // Everything the user typed first - nothing changes in the network for a form with a mistake.
     let description = text(body, "description").trim().to_owned();
     check_text(&description, 0, MAX_APP_DESCRIPTION_CHARS, false, "description")
         .map_err(|_| "Beschreibung: höchstens 500 Zeichen, eine Zeile".to_owned())?;
@@ -317,12 +335,23 @@ pub async fn publish(app: &App, id: &str, body: &Map<String, Value>) -> Result<V
             return Err(format!("Name der Website: 1-{MAX_APP_NAME_CHARS} Zeichen"));
         }
     }
-    let (folder, info, start) = checked_folder(app, body).await?;
-    if let Some(problem) = info.problems(&start).into_iter().next() {
-        return Err(problem);
-    }
+    Ok(Checked { description, address, existing, name })
+}
 
-    // The network side: member key level 2, the owner node a web host, then the app key and the upload.
+/// The network side of a publish: member key level 2, the owner node a web host, then the app key, the upload of
+/// `folder` (start file `start`) and the address.
+pub(crate) async fn publish_folder(
+    app: &App,
+    id: &str,
+    checked: Checked,
+    folder: &Path,
+    info: &FolderInfo,
+    start: &str,
+) -> Result<Value, String> {
+    let Checked { description, address, existing, name } = checked;
+    let entry = entry_of(app, id).await?;
+    let admin = admin_client(app, &entry)?;
+    let dir = app.node_dir(&entry);
     crate::moderation::operator_ready(app, &entry, &admin).await?;
     let resealed = web_host_ready(&entry, &admin).await?;
     let (app_id, new) = match existing {
@@ -338,7 +367,7 @@ pub async fn publish(app: &App, id: &str, body: &Map<String, Value>) -> Result<V
     let url = entry.local_url();
     let described = (!description.is_empty()).then_some(description.as_str());
     let done = patient(|| {
-        bridge_node_cli::apps::publish(&dir, &app_id, &folder, Vec::new(), Some(&start), described, Some(&url))
+        bridge_node_cli::apps::publish(&dir, &app_id, folder, Vec::new(), Some(start), described, Some(&url))
     })
     .await
     .map_err(|error| {
@@ -394,6 +423,7 @@ pub async fn delete(app: &App, id: &str, body: &Map<String, Value>) -> Result<Va
     }
     let url = entry.local_url();
     let names = patient(|| bridge_node_cli::apps::delete(&dir, &app_id, Some(&url))).await?;
+    crate::templates::forget(&dir, &app_id);
     Ok(json!({"ok": true, "app": app_id.as_str(), "names": names}))
 }
 

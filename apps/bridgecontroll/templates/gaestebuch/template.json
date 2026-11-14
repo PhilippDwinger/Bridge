@@ -1,0 +1,12 @@
+{
+  "name": "Gästebuch",
+  "description": "Besucher schreiben dir einen Gruß – alle sehen die Einträge.",
+  "records": true,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Mein Gästebuch"},
+    {"key": "welcome", "label": "Begrüßung", "type": "area", "max": 1000,
+     "default": "Schön, dass du da bist! Schreib mir einen Gruß."},
+    {"key": "login_only", "label": "Nur mit Bridge Login schreiben", "type": "switch", "default": true,
+     "hint": "Aus: jeder kann schreiben – auch Fremde, wenn die Website öffentlich ist."}
+  ]
+}

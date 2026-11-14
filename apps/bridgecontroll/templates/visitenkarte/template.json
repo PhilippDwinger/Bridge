@@ -1,0 +1,12 @@
+{
+  "name": "Visitenkarte",
+  "description": "Eine Seite über dich: Name, ein paar Sätze und deine Links.",
+  "records": false,
+  "fields": [
+    {"key": "name", "label": "Name", "type": "text", "max": 60, "required": true, "default": "Mein Name"},
+    {"key": "subtitle", "label": "Untertitel", "type": "text", "max": 100, "hint": "z. B. „Fotograf aus Köln“"},
+    {"key": "text", "label": "Über mich", "type": "area", "max": 2000},
+    {"key": "links", "label": "Links", "type": "list", "line": "link", "max": 12,
+     "hint": "Je Zeile ein Titel und eine Adresse, z. B. „Mein Blog https://example.org“."}
+  ]
+}

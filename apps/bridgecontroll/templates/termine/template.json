@@ -1,0 +1,13 @@
+{
+  "name": "Termine",
+  "description": "Deine nächsten Termine – mit „Ich komme“ für alle mit Bridge Login.",
+  "records": true,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Unsere Termine"},
+    {"key": "text", "label": "Text", "type": "area", "max": 1000},
+    {"key": "dates", "label": "Termine", "type": "list", "line": "date", "max": 30, "required": true,
+     "default": ["2026-12-05 19:00 Spieleabend", "2026-12-19 Weihnachtsfeier"],
+     "hint": "Je Zeile: Datum (JJJJ-MM-TT), optional Uhrzeit (HH:MM), dann der Titel."},
+    {"key": "rsvp", "label": "„Ich komme“ zeigen", "type": "switch", "default": true}
+  ]
+}

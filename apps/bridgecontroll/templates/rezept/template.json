@@ -1,0 +1,16 @@
+{
+  "name": "Rezept",
+  "description": "Dein Lieblingsrezept zum Teilen: Zutaten und Schritte.",
+  "records": false,
+  "fields": [
+    {"key": "title", "label": "Name des Rezepts", "type": "text", "max": 100, "required": true, "default": "Omas Apfelkuchen"},
+    {"key": "text", "label": "Ein paar Worte dazu", "type": "area", "max": 1000},
+    {"key": "portions", "label": "Menge", "type": "text", "max": 60, "default": "für 12 Stücke"},
+    {"key": "time", "label": "Dauer", "type": "text", "max": 60, "default": "1 Stunde"},
+    {"key": "ingredients", "label": "Zutaten", "type": "list", "max": 40, "line_max": 120, "required": true,
+     "default": ["200 g Mehl", "100 g Butter", "80 g Zucker", "4 Äpfel"], "hint": "Je Zeile eine Zutat."},
+    {"key": "steps", "label": "Schritte", "type": "list", "max": 30, "line_max": 400, "required": true,
+     "default": ["Mehl, Butter und Zucker verkneten.", "Äpfel schälen und in Spalten schneiden.", "Bei 180 °C 45 Minuten backen."],
+     "hint": "Je Zeile ein Schritt – sie werden durchnummeriert."}
+  ]
+}

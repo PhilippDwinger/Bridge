@@ -1,0 +1,12 @@
+{
+  "name": "Countdown",
+  "description": "Zählt die Tage bis zu deinem großen Tag – Geburtstag, Urlaub, Party.",
+  "records": false,
+  "fields": [
+    {"key": "title", "label": "Worauf wartest du?", "type": "text", "max": 80, "required": true, "default": "Bald ist Weihnachten"},
+    {"key": "date", "label": "Datum", "type": "date", "required": true, "default": "2026-12-24"},
+    {"key": "time", "label": "Uhrzeit", "type": "time", "default": "18:00"},
+    {"key": "text", "label": "Text", "type": "area", "max": 1000},
+    {"key": "done", "label": "Text, wenn es so weit ist", "type": "text", "max": 120, "default": "Es ist so weit!"}
+  ]
+}

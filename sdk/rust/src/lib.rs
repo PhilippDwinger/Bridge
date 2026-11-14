@@ -39,8 +39,9 @@ pub mod compute;
 pub mod storage;
 
 pub use apps::{
-    Announced, AppDraft, AppVersion, BlobSource, DownloadReport, FolderFile, Published, announce_app, download_blob,
-    fetch_app, fetch_blob, fetch_hash_list, pick_host, reach_host, reachable_hosts, scan_app_folder,
+    Announced, AppDraft, AppVersion, BlobSource, DownloadReport, FolderFile, Published, RECORDS_FILE, SERVER_FILE,
+    announce_app, download_blob, fetch_app, fetch_blob, fetch_hash_list, pick_host, reach_host, reachable_hosts,
+    scan_app_folder,
 };
 
 /// Errors of the SDK.

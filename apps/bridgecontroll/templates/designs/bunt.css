@@ -1,0 +1,13 @@
+/* Design „Bunt“ (docs/13 §3). */
+:root {
+  --bg: #fff4e8;
+  --fg: #2b1b3d;
+  --muted: #6e5a7e;
+  --accent: #e4407b;
+  --on-accent: #ffffff;
+  --card: #ffffff;
+  --line: #f1d9c4;
+  --radius: 22px;
+  --font: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+  --font-head: Georgia, "Times New Roman", serif;
+}

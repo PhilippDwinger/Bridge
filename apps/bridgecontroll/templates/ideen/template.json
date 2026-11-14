@@ -1,0 +1,10 @@
+{
+  "name": "Ideen sammeln",
+  "description": "Alle schlagen Ideen vor und geben ihren Favoriten ein Herz – die besten stehen oben.",
+  "records": true,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Was machen wir am Wochenende?"},
+    {"key": "text", "label": "Erklärung", "type": "area", "max": 1000,
+     "default": "Schreib deine Idee auf und gib den anderen ein Herz, wenn sie dir gefallen."}
+  ]
+}
