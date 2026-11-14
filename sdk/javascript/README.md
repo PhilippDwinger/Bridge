@@ -20,3 +20,16 @@ await client.send(karteInB, 'Hallo Netz B', '<netz B>');                        
 
 Tests: `npm test` (= `node --test`; der Live-Test braucht `cargo build -p bridge-tests --bin sdk-fixture`).
 Doppelte werden im Speicher erkannt (100.000); dauerhaft speichern ist Sache der App.
+
+## Bridge Login in einer App (docs/11 §17)
+Eine App läuft in Bridges Hülle (`/web/<name>/`) und fragt sie, wer angemeldet ist. `src/login.js` hat keine
+Abhängigkeiten – einfach neben die `index.html` der App kopieren:
+
+```js
+import { bridgeLogin } from './login.js';
+const login = bridgeLogin({ onChange: (user) => render(user) }); // user: {id, name, token, exp} oder null
+const user = await login.ready;               // null: niemand angemeldet (oder nicht in Bridge)
+anmelden.onclick = () => login.ask();         // öffnet das Anmelde-Fenster der Hülle
+const notes = await login.api('api/notes', { text: 'Hallo' }); // POST an den Server-Code, mit X-Bridge-Login
+```
+Nur Nachrichten der Hülle (`window.parent`) zählen, jede wird geprüft; `id` ist die Nutzer-ID nur für diese App.

@@ -194,3 +194,29 @@ async fn only_a_level_3_node_shows_websites_to_the_internet() -> TestResult {
     })
     .await
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_page_shows_the_network_on_every_public_node() -> TestResult {
+    let apps = AppNet::new(0).await?;
+    // Also at a node that is no website entrance (level 2): the status is no website (docs/11 §15).
+    let member = public_node(&apps.net, 2).await?;
+    let (status, headers, body) = get(&format!("{}/status", member.url)).await?;
+    let page = text(&body);
+    assert_eq!(status, 200, "{page}");
+    assert!(header(&headers, "content-type").starts_with("text/html"));
+    assert!(header(&headers, "content-security-policy").contains("default-src 'none'"), "no scripts");
+    for expected in
+        ["Testnetz", "Transparenz-Log", "Einträge, zuletzt bezeugt vor", "Nachrichten", "Geht, aber schwach", "Fehlt"]
+    {
+        assert!(page.contains(expected), "{expected}: {page}");
+    }
+    assert!(!page.contains("Log-Führer"), "the member's node is not the operator");
+    assert!(
+        !page.contains(apps.net.owner.url.as_str()) && !page.contains(&apps.owner().id().to_string()),
+        "no addresses or IDs"
+    );
+    // A node without the public reader has no status page either.
+    let (status, _, _) = get(&format!("{}/status", apps.net.owner.url)).await?;
+    assert_eq!(status, 404);
+    Ok(())
+}

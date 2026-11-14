@@ -401,10 +401,17 @@ impl Node {
                 .ok_or_else(|| NodeError::forbidden("no device waits for this code"))?
         };
         let approval = self.approval_of(body, &entry.approval_challenge()?, now)?;
+        // The new device's passkey: B gets it back with its session (for "angemeldet bleiben", docs/11 §16).
+        let new_cred = match &entry {
+            Entry::Add { credential, .. } => b64(&credential.id),
+            _ => String::new(),
+        };
         let next = self.apply_entry(&with_approval(entry, approval)).await?;
         let session = self.session_token(&next.id, now)?;
         if let Some(pairing) = lock(&self.inner.login.devices.open).pairings.get_mut(&code) {
-            pairing.done = Some(json!({"account": next.id.as_str(), "name": next.name, "session": session}));
+            pairing.done = Some(json!({
+                "account": next.id.as_str(), "name": next.name, "session": session, "credential_id": new_cred,
+            }));
         }
         Ok(devices_of(&next))
     }

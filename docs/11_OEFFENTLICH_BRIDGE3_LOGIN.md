@@ -395,3 +395,43 @@ denselben Eingang benutzen.
   `429`, ohne Sitzung `401`).
 - In Chromium mit zwei virtuellen Authenticatoren geprüft (A zeigt Code und QR-Code, B öffnet `#koppeln=…`, gleiche
   Prüfzahl, A bestätigt, beide Apps sehen dieselbe Nutzer-ID, B meldet sich neu an, A entfernt „Handy“).
+
+## 15. Phase 8, Schritt 6: Status-Seite und Zahl der Konten (gebaut 14.11.2026)
+- **Status-Seite** `…/bridge4/<netz>/status` (`GET /status` am Knoten, nur mit Leser `public`): Netzname, „Dieser
+  Eingang läuft“ (beim Log-Führer mit Hinweis), das Transparenz-Log (Größe des neuesten bezeugten Kopfes und wie alt er
+  ist) und die Ampel „Was kann das Netz?“ (§9.1). Keine Adressen, keine IDs, keine Mitglieder, kein Skript (CSP der
+  Seiten). Sie ist **keine Website**: jeder öffentliche Knoten zeigt sie (auch einer mit Stufe 2), und das Tor leitet
+  sie auch beim Not-Aus weiter. Die Startseite verlinkt sie, BridgeControll unter „Öffentlich“ ebenso.
+- **Zahl der Konten** im Owner-Dashboard (Kasten „Was kann mein Netz?“), wenn Login am Owner-Knoten läuft
+  (`admin::login_accounts`, nur lokal aus der Datenbank des Knotens; nicht auf der Status-Seite).
+- Tests: e2e `phase7_public` (Status an einem Knoten mit Stufe 2, ohne Adressen/IDs; ohne Leser `public` 404), Tor
+  (`/status` beim Not-Aus), BridgeControll `public.rs` (Konten 0 nach „Login hier einschalten“).
+
+## 16. Phase 8, Schritt 6: Angemeldet bleiben (gebaut 14.11.2026)
+Bisher lag die Sitzung nur im Speicher der Hülle – nach jedem Neuladen wieder den Passkey. Jetzt:
+- Im Anmelde-Fenster **„Angemeldet bleiben“** (Standard an). Dann gibt der Eingang nach einer erfolgreichen Zeremonie
+  (`assert`, `register`, `recover`, `pair/wait` mit `"remember": true`) einen **Merk-Schlüssel** aus: 32 Byte Zufall als
+  Cookie `bl_remember` – `HttpOnly` (kein Skript kann ihn lesen), `Secure`, `SameSite=Strict`, `Path` = Pfad der
+  öffentlichen Adresse des Knotens (z. B. `/bridge4/testnetz/`: jedes Netz hinter dem Tor hat seinen eigenen),
+  `Max-Age` 30 Tage. Der Knoten speichert nur seinen SHA-256 (Schema 16 `login_remember`) mit Konto, Gerät (Passkey)
+  und Ablauf; höchstens 16 je Konto, 100.000 je Netz (die ältesten gehen).
+- Beim Laden fragt die Hülle `POST /v4/login/resume`: gilt der Merk-Schlüssel (nicht abgelaufen, das Gerät gehört noch
+  zum Konto – nach „Entfernen“ oder einer Wiederherstellung nicht mehr), gibt es eine neue Sitzung und einen **neuen**
+  Merk-Schlüssel (der alte ist damit verbraucht, wieder 30 Tage). Sonst `401` und das Cookie wird gelöscht. Nur mit
+  `Sec-Fetch-Site: same-origin`, wenn der Browser es schickt (Apps laufen in einer eigenen, undurchsichtigen Herkunft).
+- **Abmelden** (`POST /v4/login/logout`) löscht Merk-Schlüssel und Cookie.
+- Restrisiko (wie §9.5): Ein Skript auf demselben Ursprung (eine Bridge-3-Seite dieses PCs) kann `resume` selbst
+  aufrufen und bekäme eine Sitzung. Bridge-3-Server des PCs gelten als vertrauenswürdig; wer das nicht will, nimmt den
+  Haken weg. Apps können es nicht (Sandbox ohne `allow-same-origin`, `SameSite=Strict`, keine CORS-Freigabe mit
+  Cookies).
+- Tests: e2e `phase8_remember` (Cookie-Eigenschaften, Pfad, einmal verwendbar, neuer Schlüssel, `cross-site` → 403,
+  kaputte Cookies, Abmelden, Wiederherstellung beendet es, keine CORS-Freigabe), Speicher (einmal, Ablauf, 16 je Konto),
+  in Chromium geprüft (Konto anlegen → Neuladen: angemeldet, die App kennt den Nutzer; Abmelden → Neuladen: abgemeldet,
+  `document.cookie` leer).
+
+## 17. Phase 8, Schritt 6: Helfer für Apps im JavaScript-SDK (gebaut 14.11.2026)
+`sdk/javascript/src/login.js` (`bridgeLogin`, ohne Abhängigkeiten, zum Kopieren in eine App oder Vorlage): fragt die
+Hülle per `postMessage`, nimmt nur Nachrichten von `window.parent` und nur geprüfte Werte (Nutzer-ID Base32 ≤ 64,
+Name ≤ 40 Zeichen, Zeichen Base64url ≤ 4 KiB, `exp` Zahl; ein ungültiger Nutzer wird ignoriert, nicht als „abgemeldet“
+gewertet), `ready` (erste Antwort, nach 3 s `null`), `ask()` (Anmelde-Fenster), `fetch`/`api` mit `X-Bridge-Login`.
+Tests: `sdk/javascript/test/login.test.js`.

@@ -1260,10 +1260,14 @@ pub async fn dashboard(app: &App, id: &str, query: &str) -> Result<Value, String
         })
         .collect();
     answer["abilities"] = json!(abilities);
-    answer["login"] = json!({
-        "here": state.login_nodes(now).iter().any(|(node, _)| node == &owner_id),
-        "public": entry.public_key.is_some(),
-    });
+    let here = state.login_nodes(now).iter().any(|(node, _)| node == &owner_id);
+    let accounts = if here {
+        let (login_dir, net) = (dir.clone(), view.net.clone());
+        tokio::task::spawn_blocking(move || admin::login_accounts(&login_dir, &net)).await.ok().and_then(Result::ok)
+    } else {
+        None
+    };
+    answer["login"] = json!({"here": here, "public": entry.public_key.is_some(), "accounts": accounts});
     answer["names"] = names;
     answer["app_keys"] = json!(app_keys);
     answer["operator"] = json!(operator.as_ref().map(|id| json!({

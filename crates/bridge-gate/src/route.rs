@@ -359,6 +359,7 @@ mod tests {
             assert_eq!(d("/zu/app"), Decision::Off);
             assert_eq!(d("/zu/login.js"), Decision::Off);
             assert_eq!(d("/zu/v4/poll"), forward(7402, "/v4/poll"));
+            assert_eq!(d("/zu/status"), forward(7402, "/status"), "the status page is no website");
             // Bridge 3 servers of a network (also with its websites off).
             assert_eq!(d("/testnetz/bridge3/spiel/client/login?x=1"), forward(7801, "/client/login?x=1"));
             assert_eq!(d("/testnetz/bridge3/spiel/"), forward(7801, "/"));

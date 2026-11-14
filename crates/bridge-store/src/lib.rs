@@ -189,6 +189,11 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX login_credentials_account ON login_credentials (net, account);
      INSERT INTO login_credentials (net, cred_id, account) SELECT net, cred_id, account FROM login_accounts;
      DROP INDEX login_accounts_cred;",
+    // 16: "angemeldet bleiben" (docs/11 §16): the hashes of remember keys, each for one device of an account.
+    "CREATE TABLE login_remember (net TEXT NOT NULL, hash BLOB NOT NULL, account TEXT NOT NULL, cred_id BLOB NOT NULL,
+                                  exp INTEGER NOT NULL, PRIMARY KEY (net, hash)) WITHOUT ROWID;
+     CREATE INDEX login_remember_account ON login_remember (net, account, exp);
+     CREATE INDEX login_remember_exp ON login_remember (net, exp);",
 ];
 
 /// An identity counts as idle (its card may be forgotten when the table is full) after one day without login.

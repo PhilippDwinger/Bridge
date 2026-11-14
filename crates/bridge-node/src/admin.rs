@@ -856,6 +856,13 @@ pub fn hosted_apps(data_dir: &Path, max: usize) -> Result<Vec<HostedApp>, String
     Ok(apps)
 }
 
+/// How many Bridge Login accounts the node in `data_dir` keeps for `net` (docs/11 §9; owner dashboard).
+pub fn login_accounts(data_dir: &Path, net: &Id) -> Result<u64, String> {
+    let store = open_existing(data_dir)?;
+    let count = store.login_accounts_count(net.as_str()).map_err(|e| format!("Datenbank: {e}"))?;
+    Ok(u64::try_from(count).unwrap_or(0))
+}
+
 /// The key cards the node in `data_dir` knows for `ids` (from logins and exchanged `home` entries), for names in
 /// BridgeControll's member list. Unknown IDs are left out; at most 1,024 IDs are looked up.
 pub fn known_cards(data_dir: &Path, ids: &[Id]) -> Result<Vec<KeyCard>, String> {

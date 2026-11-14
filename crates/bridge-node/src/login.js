@@ -17,6 +17,7 @@
   var asked = false;
   var dialog = null;
   var mine = null; // the passkey this page logged in with (Base64url)
+  var remember = true; // "Angemeldet bleiben" (docs/11 §16)
   var polling = 0; // the poll running now (a new dialog stops the old one)
   var pairFromLink = null; // a pairing code from #koppeln=… (QR code)
 
@@ -83,12 +84,13 @@
     return new Uint8Array(await crypto.subtle.digest("SHA-256", all));
   }
 
-  async function call(path, body) {
+  // `cookies`: only the calls of "angemeldet bleiben" (docs/11 §16) send and take the HttpOnly cookie of this entrance.
+  async function call(path, body, cookies) {
     var response = await fetch(API + path, {
       method: body === undefined ? "GET" : "POST",
       headers: body === undefined ? {} : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: "omit",
+      credentials: cookies ? "same-origin" : "omit",
       cache: "no-store",
     });
     var answer = {};
@@ -143,7 +145,8 @@
     var made = await newPasskey(name);
     made.name = name;
     made.recovery = b64(await recoveryHash(code));
-    var answer = await call("register", made);
+    made.remember = remember;
+    var answer = await call("register", made, true);
     mine = made.credential.id;
     await loggedIn(answer);
     showCode(answer.account, code);
@@ -154,12 +157,17 @@
       publicKey: { challenge: await challenge(), rpId: info.rp_id, userVerification: "preferred", timeout: 120000 },
     });
     var response = credential.response;
-    var answer = await call("assert", {
-      credential_id: b64(credential.rawId),
-      client_data: b64(response.clientDataJSON),
-      auth_data: b64(response.authenticatorData),
-      signature: b64(response.signature),
-    });
+    var answer = await call(
+      "assert",
+      {
+        credential_id: b64(credential.rawId),
+        client_data: b64(response.clientDataJSON),
+        auth_data: b64(response.authenticatorData),
+        signature: b64(response.signature),
+        remember: remember,
+      },
+      true,
+    );
     mine = b64(credential.rawId);
     await loggedIn(answer);
     closeDialog();
@@ -200,7 +208,8 @@
     made.account = account;
     made.code = b64(old);
     made.recovery = b64(await recoveryHash(code));
-    var answer = await call("recover", made);
+    made.remember = remember;
+    var answer = await call("recover", made, true);
     mine = made.credential.id;
     await loggedIn(answer);
     showCode(answer.account, code);
@@ -214,7 +223,9 @@
     await tell();
   }
 
-  function logout() {
+  // `forget`: the user logged out - the remembered login of this device goes too (not when a session merely ended).
+  function logout(forget) {
+    if (forget === true) call("logout", {}, true).catch(function () {});
     session = null;
     who = null;
     cached = null;
@@ -253,7 +264,9 @@
       root.appendChild(devices);
       var out = el("button", "bl-link", "Abmelden");
       out.type = "button";
-      out.addEventListener("click", logout);
+      out.addEventListener("click", function () {
+        logout(true);
+      });
       root.appendChild(out);
     } else {
       var button = el("button", "bl-link", "Anmelden");
@@ -311,6 +324,16 @@
     } else {
       var intro = "Mit Passkey – ohne Passwort, ohne E-Mail. Gilt für alle Seiten dieses Netzes.";
       box.appendChild(el("p", "bl-muted", intro));
+      var keep = el("input");
+      keep.type = "checkbox";
+      keep.checked = remember;
+      keep.addEventListener("change", function () {
+        remember = keep.checked;
+      });
+      var keepLabel = el("label", "bl-check");
+      keepLabel.appendChild(keep);
+      keepLabel.appendChild(document.createTextNode("Angemeldet bleiben (30 Tage auf diesem Gerät)"));
+      box.appendChild(keepLabel);
       box.appendChild(action("Mit Passkey anmelden", signIn, error));
       box.appendChild(el("h3", "", "Neues Konto"));
       var name = el("input");
@@ -429,7 +452,7 @@
       while (mineNow === polling) {
         await wait(2000);
         if (mineNow !== polling) return;
-        var answer = await call("pair/wait", { ticket: joinedAnswer.ticket });
+        var answer = await call("pair/wait", { ticket: joinedAnswer.ticket, remember: remember }, true);
         if (answer.state === "done") {
           mine = made.credential.id;
           await loggedIn(answer);
@@ -669,8 +692,19 @@
       info = answer;
       if (info.enabled) {
         bar();
-        tell();
-        if (pairFromLink && !session) openDialog();
+        // Still remembered from last time? (An HttpOnly cookie - only the entrance can read it.)
+        return call("resume", {}, true)
+          .then(function (answer) {
+            mine = answer.credential_id;
+            return loggedIn(answer);
+          })
+          .catch(function () {
+            return tell();
+          })
+          .catch(function () {})
+          .then(function () {
+            if (pairFromLink && !session) openDialog();
+          });
       }
     })
     .catch(function () {

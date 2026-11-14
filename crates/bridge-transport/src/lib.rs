@@ -106,7 +106,15 @@ pub struct Request {
     pub forwarded: bool,
     /// A Bridge Login app token from `X-Bridge-Login` (docs/11 §9.4; at most [`MAX_LOGIN_HEADER`] bytes), if any.
     pub login: Option<String>,
+    /// The `Cookie` header (at most [`MAX_COOKIE_HEADER`] bytes; longer ones are dropped), if any - only Bridge Login's
+    /// "angemeldet bleiben" uses one (docs/11 §16).
+    pub cookies: Option<String>,
+    /// `Sec-Fetch-Site` as the browser sent it (at most 32 bytes, lower case), if any.
+    pub fetch_site: Option<String>,
 }
+
+/// Longest `Cookie` header taken.
+pub const MAX_COOKIE_HEADER: usize = 4096;
 
 /// Longest `X-Bridge-Login` header taken.
 pub const MAX_LOGIN_HEADER: usize = 4096;
@@ -723,6 +731,16 @@ async fn read_and_handle<H: Handler>(
         Some(Ok(token)) if token.len() <= MAX_LOGIN_HEADER => Some(token.to_owned()),
         Some(_) => return refuse(400, "BAD_FORMAT", "X-Bridge-Login: too long or not text"),
     };
+    let cookies = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|cookies| cookies.len() <= MAX_COOKIE_HEADER)
+        .map(str::to_owned);
+    let fetch_site = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .filter(|site| site.len() <= 32)
+        .map(str::to_ascii_lowercase);
     let reading = Limited::new(request.into_body(), config.max_body_bytes).collect();
     let body = match tokio::time::timeout(config.body_timeout, reading).await {
         Ok(Ok(collected)) => collected.to_bytes(),
@@ -732,7 +750,7 @@ async fn read_and_handle<H: Handler>(
         Ok(Err(_)) => return refuse(400, "BAD_FORMAT", "could not read the request body"),
         Err(_) => return refuse(408, "BAD_FORMAT", "request body too slow"),
     };
-    handler.handle(Request { method, path, peer, bearer, body, host, forwarded, login }).await
+    handler.handle(Request { method, path, peer, bearer, body, host, forwarded, login, cookies, fetch_site }).await
 }
 
 /// The body of this request was (partly) not read: the connection cannot be reused, tell the client.

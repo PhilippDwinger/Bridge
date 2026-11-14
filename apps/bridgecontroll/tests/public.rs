@@ -121,7 +121,7 @@ async fn make_a_network_public_switch_websites_off_and_back() -> TestResult {
     let login =
         |dash: &Value| dash["abilities"].as_array().and_then(|list| list.iter().find(|a| a["key"] == "login").cloned());
     assert_eq!(login(&dash).map(|a| a["status"].clone()), Some(json!("red")), "{}", dash["abilities"]);
-    assert_eq!(dash["login"], json!({"here": false, "public": true}));
+    assert_eq!(dash["login"], json!({"here": false, "public": true, "accounts": null}));
     let (_, info) = get_page(&format!("{base}/v4/login/info")).await?;
     assert!(info.contains("\"enabled\":false"), "{info}");
     app.ok(&format!("/api/nodes/{owner}/login-on"), &json!({})).await?;
@@ -130,6 +130,8 @@ async fn make_a_network_public_switch_websites_off_and_back() -> TestResult {
         Ok((dash["login"]["here"] == true && login(&dash).is_some_and(|a| a["status"] == "yellow")).then_some(()))
     })
     .await?;
+    let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+    assert_eq!(dash["login"]["accounts"], 0, "no accounts yet");
     let info: Value = wait_for(30, "login through the gate", || async {
         let (status, info) = try_page(&format!("{base}/v4/login/info")).await?;
         Ok(serde_json::from_str::<Value>(&info).ok().filter(|info| status == 200 && info["enabled"] == true))

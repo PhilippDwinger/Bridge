@@ -33,6 +33,7 @@ mod network;
 pub mod plugins;
 mod public;
 mod reader;
+mod remember;
 mod reports;
 mod sessions;
 mod storage;
@@ -505,6 +506,10 @@ impl Handler for Node {
         let path = request.path.clone();
         if request.method == Method::Options {
             return preflight(&path);
+        }
+        // "Angemeldet bleiben" (docs/11 §16): these answers may carry a cookie - and never go to other origins.
+        if remember::PATHS.contains(&path.as_str()) && request.method == Method::Post {
+            return self.login_with_cookie(request, self.now()).await;
         }
         let response = match self.route(request).await {
             Ok(body) => Response::ok(body),

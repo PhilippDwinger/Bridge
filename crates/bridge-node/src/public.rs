@@ -44,7 +44,8 @@ const FRAME_SANDBOX: &str = "allow-scripts allow-forms allow-popups";
 const STYLE: &str = "html,body{margin:0;height:100%}body{font:15px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;\
 color:#1d2433;background:#f6f7fb}main{max-width:44rem;margin:0 auto;padding:2rem 1rem}h1{font-size:1.6rem;margin:0 0 \
 .25rem}h2{font-size:1.1rem;margin:2rem 0 .5rem}ul{padding-left:1.2rem}li{margin:.35rem 0}a{color:#2448c8}.muted{color:\
-#5b6475}footer{margin-top:2.5rem;font-size:.9rem;color:#5b6475}.frame{display:flex;flex-direction:column;height:100%}\
+#5b6475}footer{margin-top:2.5rem;font-size:.9rem;color:#5b6475}table{border-collapse:collapse;width:100%}td{padding:.35rem \
+.5rem .35rem 0;border-bottom:1px solid #e3e6ee}.ok{color:#1b7a3a}.warn{color:#8a5a00}.bad{color:#b3261e}.frame{display:flex;flex-direction:column;height:100%}\
 .bar{display:flex;flex-wrap:wrap;gap:.25rem 1rem;align-items:center;padding:.4rem .8rem;background:#1d2433;color:#fff;\
 font-size:.85rem}.bar a{color:#cfd8ff}.bar .end{margin-left:auto}iframe{flex:1;border:0;width:100%;background:#fff}.bl{display:inline-flex;gap:.5rem;\
 align-items:center}.bl-link{background:none;border:0;padding:0;color:#cfd8ff;font:inherit;cursor:pointer;\
@@ -60,7 +61,7 @@ word-break:break-all;background:#f0f2f7;padding:.4rem;border-radius:6px;margin:.
 .bl-close{color:#2448c8;margin-top:.5rem}.bl-big{font:700 1.6rem ui-monospace,monospace;letter-spacing:.08em;\
 text-align:center;margin:.6rem 0}.bl-qr{display:block;width:180px;height:180px;margin:.4rem auto}.bl-dev{display:flex;\
 gap:.6rem;align-items:center;padding:.45rem 0;border-bottom:1px solid #e3e6ee}.bl-dev span:first-child{flex:1}\
-.bl-danger{color:#b3261e}.bl-choice .bl-btn{margin-top:.2rem}";
+.bl-danger{color:#b3261e}.bl-check{display:flex;gap:.45rem;align-items:center;margin:.3rem 0 .4rem;font-size:.9rem}.bl-choice .bl-btn{margin-top:.2rem}";
 
 impl Node {
     /// Whether the app of `owner` may go to this request (docs/11 §4): always for callers on this PC and in the
@@ -81,7 +82,7 @@ impl Node {
     /// Whether `path` is one of the public pages (only with the reader `public`).
     pub(crate) fn is_public_page(&self, path: &str) -> bool {
         self.inner.reader.access() == ReaderAccess::Public
-            && (path == "/" || path == "/login.js" || path.starts_with("/web/"))
+            && (path == "/" || path == "/login.js" || path == "/status" || path.starts_with("/web/"))
     }
 
     /// `GET /` and `GET /web/<name>[/]` (see module docs).
@@ -92,6 +93,10 @@ impl Node {
         let now = self.now();
         if let Err(refused) = self.inner.guard.admit_read(request.peer, now) {
             return NodeError::from(refused).to_response();
+        }
+        // The status page is no website: every public node of the network shows it (docs/11 §15).
+        if request.path == "/status" {
+            return self.status_page(now);
         }
         if !self.website_entrance(now) {
             return page(
@@ -117,6 +122,53 @@ impl Node {
             }
             Some((name, "")) if valid_web_name(name) => self.frame_page(name, now),
             _ => not_found_page(),
+        }
+    }
+
+    /// `GET /status` (docs/11 §15): what the network can do and whether its log is witnessed - nothing secret, no
+    /// names of members, no addresses.
+    fn status_page(&self, now: i64) -> Response {
+        let me = self.inner.identity.id().clone();
+        let content = self.with_core(|core| {
+            let state = &core.state;
+            let looks = |status: &str| match status {
+                "green" => ("ok", "Bereit"),
+                "yellow" => ("warn", "Geht, aber schwach"),
+                _ => ("bad", "Fehlt"),
+            };
+            let rows: String = state
+                .abilities(now)
+                .iter()
+                .map(|ability| {
+                    let (class, text) = looks(ability.status());
+                    format!(
+                        "<tr><td>{}</td><td class=\"{class}\">{text}</td><td class=\"muted\">{} von {}</td></tr>",
+                        escape(ability.name),
+                        ability.have,
+                        ability.green
+                    )
+                })
+                .collect();
+            let witnessed = core.best_witnessed().map(|witnessed| (witnessed.head.size(), witnessed.head.times().0));
+            let log = match witnessed {
+                Some((size, at)) => {
+                    format!("{size} Einträge, zuletzt bezeugt {}", ago(now.saturating_sub(at)))
+                }
+                None => "noch nicht bezeugt".to_owned(),
+            };
+            let operator = state.manifest().logs.first().is_some_and(|id| id == &me);
+            format!(
+                "<main><h1>{}</h1><p class=\"muted\">Status des BridgeNetzes</p>\
+                 <h2>Dieser Eingang</h2><p class=\"ok\">läuft{}</p>\
+                 <h2>Transparenz-Log</h2><p>{log}</p>\
+                 <h2>Was kann das Netz?</h2><table>{rows}</table></main>",
+                escape(&state.manifest().name),
+                if operator { " – Log-Führer" } else { "" },
+            )
+        });
+        match content {
+            Ok(content) => page(200, "Status", &content).with_header("cache-control", "no-cache"),
+            Err(_) => page(503, "Status", "<main><h1>Status</h1><p>Der Knoten lädt das Log noch.</p></main>"),
         }
     }
 
@@ -146,7 +198,7 @@ impl Node {
             };
             format!(
                 "<main><h1>{}</h1><p class=\"muted\">Ein öffentliches BridgeNet (Bridge 4).</p><h2>Websites</h2>{list}\
-                 <footer>Problem melden: {}</footer></main>",
+                 <footer>Problem melden: {} · <a href=\"status\">Status</a></footer></main>",
                 escape(&manifest.name),
                 contact_html(manifest.contact.as_deref())
             )
@@ -234,6 +286,17 @@ fn page(status: u16, title: &str, content: &str) -> Response {
         .with_header("content-security-policy", PAGE_CSP)
         .with_header("x-frame-options", "DENY")
         .with_header("referrer-policy", "no-referrer")
+}
+
+/// "vor 12 s", "vor 5 min", "vor 3 h", "vor 2 Tagen".
+fn ago(ms: i64) -> String {
+    let seconds = ms.max(0) / 1000;
+    match seconds {
+        0..60 => format!("vor {seconds} s"),
+        60..3600 => format!("vor {} min", seconds / 60),
+        3600..86_400 => format!("vor {} h", seconds / 3600),
+        _ => format!("vor {} Tagen", seconds / 86_400),
+    }
 }
 
 /// HTML-escapes text (also quotes, so it is safe in attributes).

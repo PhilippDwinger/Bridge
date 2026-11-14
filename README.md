@@ -91,6 +91,8 @@ Speicher-Knoten (anderer PC, beim Siegeln „Speicher“ ankreuzen) wird die Amp
 **Weitere Geräte** (docs/11 §14): angemeldet auf „Geräte“ → „Gerät hinzufügen“ zeigt einen Code (und QR-Code); auf dem
 Handy dieselbe Website öffnen → Anmelden → „Verbinden“, Code eingeben, eigenen Passkey anlegen, auf beiden Geräten
 dieselbe Prüfzahl vergleichen und am ersten Gerät bestätigen. Dort lassen sich Geräte auch wieder entfernen.
+**Angemeldet bleiben** (docs/11 §16, Haken im Anmelde-Fenster, Standard an): 30 Tage ohne erneuten Passkey auf diesem
+Gerät, über ein Cookie, das kein Skript lesen kann; „Abmelden“ beendet es. Jede Status-Seite: `…/bridge4/<netz>/status`.
 Eine App fragt die Leiste per `postMessage` und bekommt eine Nutzer-ID nur für sich plus ein Zeichen für ihren
 Server-Code:
 

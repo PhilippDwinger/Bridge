@@ -1349,7 +1349,8 @@
     const parts = [title,
       h('div', { class: 'bc-row' }, pub.web ? pill('ok', 'Websites öffentlich', 'live') : pill('warn', 'Websites aus (Not-Aus)')),
       copyField(base, 'Öffentliche Adresse'),
-      h('p', { class: 'bc-muted bc-p0' }, h('a', { href: base, target: '_blank', rel: 'noopener noreferrer', text: 'Startseite öffnen' }),
+      h('p', { class: 'bc-muted bc-p0' }, h('a', { href: base, target: '_blank', rel: 'noopener noreferrer', text: 'Startseite öffnen' }), ' · ',
+        h('a', { href: base.replace(/\/$/, '') + '/status', target: '_blank', rel: 'noopener noreferrer', text: 'Status' }),
         summary.funnel_port && summary.funnel_port !== 443 ? ' · Port ' + summary.funnel_port : '')];
     parts.push(h('div', { class: 'bc-row' },
       pub.web
@@ -1378,7 +1379,8 @@
     const login = data.login || {};
     let action = null;
     if (login.here) {
-      action = h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login läuft an der öffentlichen Adresse dieses Knotens: Besucher legen dort Konten mit Passkey an (ohne Passwort, ohne E-Mail).' });
+      const count = typeof login.accounts === 'number' ? ' ' + plural(login.accounts, 'Konto', 'Konten') + ' bisher.' : '';
+      action = h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login läuft an der öffentlichen Adresse dieses Knotens: Besucher legen dort Konten mit Passkey an (ohne Passwort, ohne E-Mail).' + count });
     } else if (login.public) {
       action = h('div', { class: 'bc-stack--tight' },
         h('p', { class: 'bc-muted bc-p0', text: 'Bridge Login: der Owner-Knoten wird zusätzlich Speicher-Knoten und hält die Konten der Besucher. Mit einem zweiten Speicher-Knoten (anderer PC) gehen sie nicht verloren.' }),

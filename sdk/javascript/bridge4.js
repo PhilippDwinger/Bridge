@@ -10,6 +10,7 @@ export { BridgeError, NodeError, Untrusted } from './src/errors.js';
 export { canonical, canonicalText, parseStrict } from './src/json.js';
 export { Identity, KeyCard } from './src/keys.js';
 export { JoinLink } from './src/link.js';
+export { bridgeLogin, userOf } from './src/login.js';
 export { Puzzle } from './src/pow.js';
 export { SignedRequest } from './src/request.js';
 export { Statement } from './src/statement.js';
