@@ -511,6 +511,14 @@ def main():
                 guest.reload()
             guest.wait_for_selector("li:has-text('Hallo aus dem Rauchtest!')", timeout=15000)
             guest.close()
+            # Moderation (docs/13 §6): "Einträge" lists the entry, "Löschen" removes it at every host.
+            page.click(".srv:has-text('Unser Gästebuch') button:has-text('Einträge')")
+            page.wait_for_selector(".b-dialog .srv:has-text('Hallo aus dem Rauchtest!')", timeout=15000)
+            shot("57-vorlage-eintraege", dialog=True)
+            page.click(".b-dialog .srv:has-text('Hallo aus dem Rauchtest!') button:has-text('Löschen')")
+            page.click(".b-dialog .srv:has-text('Hallo aus dem Rauchtest!') button:has-text('Wirklich löschen?')")
+            page.wait_for_selector(".b-dialog .srv:has-text('Hallo aus dem Rauchtest!')", state="detached", timeout=15000)
+            page.click(".b-dialog button:has-text('Fertig')")
             # A poll and dates: without a login the page says how to log in.
             def fill_poll():
                 page.click("label.bc-design:has-text('Dunkel')")
@@ -533,7 +541,12 @@ def main():
                     (48, "anmeldung", "Sommerfest", "text=Noch niemand angemeldet"),
                     (49, "ideen", "Ideen", "text=Noch keine Ideen"),
                     (50, "countdown", "Countdown", "text=Sekunden"),
-                    (51, "rezept", "Apfelkuchen", "text=Bei 180 °C 45 Minuten backen.")):
+                    (51, "rezept", "Apfelkuchen", "text=Bei 180 °C 45 Minuten backen."),
+                    (52, "wunschliste", "Wunschliste", "text=Ein gutes Buch"),
+                    (53, "pinnwand", "Pinnwand", "text=Noch keine Zettel."),
+                    (54, "faq", "Fragen", "summary:has-text('Was kostet das?')"),
+                    (55, "speisekarte", "Karte", "text=Apfelkuchen"),
+                    (56, "infoseite", "Verein", "text=Wann wir uns treffen")):
                 def fill_name(name=name):
                     page.fill("#tpl-name", name)
                 other = site_page(from_template(template, fill_name))

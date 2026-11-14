@@ -212,17 +212,23 @@ const MAX_COUNTED: usize = 32;
 /// Most distinct values counted per collection.
 const MAX_VALUES: usize = 100;
 
-/// The live entries of each wanted collection (newest first), in one pass over the newest events: removals and older
-/// votes of a user are out.
-fn live_in(wanted: &[(&str, Kind)], log: &dyn EventLog) -> HashMap<String, Vec<Entry>> {
+/// The live entries of each wanted collection (`None`: of every collection), newest first, in one pass over the
+/// newest events: removed entries (by their author or by moderation) and older votes of a user are out. A moderated
+/// vote also hides the user's older votes in that collection (until they vote again).
+fn live_in(wanted: Option<&[(&str, Kind)]>, log: &dyn EventLog) -> HashMap<String, Vec<Entry>> {
     let mut removed: HashSet<(String, String, String)> = HashSet::new();
+    let mut moderated: HashSet<(String, String)> = HashSet::new();
     let mut voted: HashSet<(String, String)> = HashSet::new();
     let mut out: HashMap<String, Vec<Entry>> =
-        wanted.iter().map(|(collection, _)| ((*collection).to_owned(), Vec::new())).collect();
+        wanted.unwrap_or_default().iter().map(|(collection, _)| ((*collection).to_owned(), Vec::new())).collect();
     for event in log.newest(MAX_SCANNED) {
         let Ok(Value::Object(data)) = serde_json::from_slice::<Value>(&event.data) else { continue };
         let Some(collection) = data.get("c").and_then(Value::as_str) else { continue };
-        let Some(&(_, kind)) = wanted.iter().find(|(wanted, _)| *wanted == collection) else { continue };
+        let kind = match wanted {
+            Some(wanted) => wanted.iter().find(|(wanted, _)| *wanted == collection).map(|(_, kind)| *kind),
+            None => kind_of(collection),
+        };
+        let Some(kind) = kind else { continue };
         let collection = collection.to_owned();
         let id = data.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
         let user = data.get("u").and_then(Value::as_str).map(str::to_owned);
@@ -232,7 +238,16 @@ fn live_in(wanted: &[(&str, Kind)], log: &dyn EventLog) -> HashMap<String, Vec<E
                     removed.insert((collection, id, user));
                 }
             }
+            Some("mod") => {
+                moderated.insert((collection, id));
+            }
             Some("add") => {
+                if moderated.contains(&(collection.clone(), id.clone())) {
+                    if let (Kind::Vote, Some(user)) = (kind, user) {
+                        voted.insert((collection, user));
+                    }
+                    continue;
+                }
                 if let Some(user) = &user
                     && removed.contains(&(collection.clone(), id, user.clone()))
                 {
@@ -241,9 +256,7 @@ fn live_in(wanted: &[(&str, Kind)], log: &dyn EventLog) -> HashMap<String, Vec<E
                 if kind == Kind::Vote && !user.is_some_and(|user| voted.insert((collection.clone(), user))) {
                     continue; // anonymous, or an older vote of this user
                 }
-                if let Some(entries) = out.get_mut(&collection) {
-                    entries.push((event, data));
-                }
+                out.entry(collection).or_default().push((event, data));
             }
             _ => {}
         }
@@ -252,7 +265,46 @@ fn live_in(wanted: &[(&str, Kind)], log: &dyn EventLog) -> HashMap<String, Vec<E
 }
 
 fn live(collection: &str, kind: Kind, log: &dyn EventLog) -> Vec<Entry> {
-    live_in(&[(collection, kind)], log).remove(collection).unwrap_or_default()
+    live_in(Some(&[(collection, kind)]), log).remove(collection).unwrap_or_default()
+}
+
+/// The newest live entries of every collection for moderation (docs/13 §6): `{"entries": [{"c","id","t","u","n","f"}],
+/// "total", "next"}` - at most `limit` (≤ 100) older than `before`.
+pub(crate) fn entries(log: &dyn EventLog, before: Option<i64>, limit: usize) -> Value {
+    let mut all: Vec<(String, Entry)> = live_in(None, log)
+        .into_iter()
+        .flat_map(|(collection, entries)| entries.into_iter().map(move |entry| (collection.clone(), entry)))
+        .collect();
+    all.sort_by_key(|(_, (event, _))| std::cmp::Reverse(event.t));
+    let total = all.len();
+    let limit = limit.clamp(1, MAX_LIST);
+    let shown: Vec<Value> = all
+        .iter()
+        .filter(|(_, (event, _))| before.is_none_or(|before| event.t < before))
+        .take(limit)
+        .map(|(collection, (event, data))| {
+            json!({
+                "c": collection, "id": data.get("id").cloned().unwrap_or(Value::Null), "t": event.t,
+                "u": data.get("u").cloned().unwrap_or(Value::Null), "n": data.get("n").cloned().unwrap_or(Value::Null),
+                "f": data.get("f").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let next = if shown.len() == limit { shown.last().and_then(|entry| entry.get("t").cloned()) } else { None };
+    json!({"entries": shown, "total": total, "next": next})
+}
+
+/// Removes an entry of anybody (moderation, docs/13 §6): appends `{"k":"mod","c","id"}`. Only the node's admin path
+/// calls this - the app's `api/` never writes `mod`.
+pub(crate) fn moderate(log: &mut dyn EventLog, collection: &str, id: &str) -> Result<(), String> {
+    if kind_of(collection).is_none() {
+        return Err("c: pub-…, user-… or vote-…".into());
+    }
+    if id.len() != 12 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err("id: an entry (12 hex characters)".into());
+    }
+    let event = json!({"k": "mod", "c": collection, "id": id});
+    log.append(event.to_string().as_bytes())
 }
 
 /// How many `entries` have each value of the field `by`; `mine`: the value of the caller's newest entry.
@@ -312,7 +364,7 @@ fn counts(request: &Map<String, Value>, caller: Option<&Caller>, log: &dyn Event
             wanted.push((name, kind));
         }
     }
-    let live = live_in(&wanted, log);
+    let live = live_in(Some(&wanted), log);
     let out: Map<String, Value> =
         live.iter().map(|(collection, entries)| (collection.clone(), tally(entries, by, caller))).collect();
     answer(200, json!({"counts": out}))
@@ -486,5 +538,43 @@ mod tests {
         let first_t = page["records"][0]["t"].as_i64().unwrap_or(0);
         let (_, next) = call(&mut log, "list", json!({"c": "vote-frage", "limit": 1, "before": first_t}), None);
         assert_eq!(next["records"][0]["f"]["a"], 2);
+    }
+
+    /// Moderation (docs/13 §6): the host's admin path removes anybody's entry; the app's own API cannot.
+    #[test]
+    fn moderation_removes_any_entry() -> Result<(), String> {
+        let mut log = Memory::default();
+        let (anna, ben) = (caller("Anna"), caller("Ben"));
+        let (_, spam) = call(&mut log, "add", json!({"c": "pub-buch", "f": {"text": "Spam!"}}), None);
+        call(&mut log, "add", json!({"c": "pub-buch", "f": {"text": "Hallo"}}), Some(&anna));
+        call(&mut log, "add", json!({"c": "vote-frage", "f": {"a": 1}}), Some(&ben));
+        let (_, vote) = call(&mut log, "add", json!({"c": "vote-frage", "f": {"a": 2}}), Some(&ben));
+        let listed = entries(&log, None, 100);
+        assert_eq!(listed["total"], 3, "Ben's older vote does not count: {listed}");
+        assert_eq!(listed["entries"][0]["c"], "vote-frage", "newest first, every collection");
+        let id = |answer: &Value| answer["id"].as_str().unwrap_or_default().to_owned();
+        moderate(&mut log, "pub-buch", &id(&spam))?;
+        moderate(&mut log, "vote-frage", &id(&vote))?;
+        let (_, book) = call(&mut log, "list", json!({"c": "pub-buch"}), None);
+        assert_eq!((book["total"].clone(), book["records"][0]["f"]["text"].clone()), (json!(1), json!("Hallo")));
+        let (_, counted) = call(&mut log, "count", json!({"c": "vote-frage", "by": "a"}), None);
+        assert_eq!(counted["total"], 0, "a moderated vote does not bring back the older one");
+        call(&mut log, "add", json!({"c": "vote-frage", "f": {"a": 3}}), Some(&ben));
+        assert_eq!(call(&mut log, "count", json!({"c": "vote-frage", "by": "a"}), None).1["total"], 1, "voting again");
+        assert_eq!(entries(&log, None, 100)["total"], 2);
+        // Paging.
+        let first = entries(&log, None, 1);
+        assert!(first["next"].is_i64());
+        let rest = entries(&log, first["next"].as_i64(), 100);
+        assert_eq!(rest["entries"].as_array().map(Vec::len), Some(1));
+        // Attacks: bad collections and ids are refused; the app's API knows no `mod`.
+        for (collection, bad) in [("buch", "000000000000"), ("pub-buch", "xyz"), ("pub-buch", "ABCDEF123456")] {
+            assert!(moderate(&mut log, collection, bad).is_err(), "{collection} {bad}");
+        }
+        assert_eq!(call(&mut log, "mod", json!({"c": "pub-buch", "id": id(&spam)}), Some(&anna)).0, 404);
+        let (_, made) = call(&mut log, "add", json!({"c": "pub-buch", "f": {"k": "mod", "id": "x"}}), None);
+        assert_eq!(made["id"].as_str().map(str::len), Some(12), "a field named k is just a field");
+        assert_eq!(call(&mut log, "list", json!({"c": "pub-buch"}), None).1["total"], 2);
+        Ok(())
     }
 }

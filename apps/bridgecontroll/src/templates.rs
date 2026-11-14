@@ -98,6 +98,31 @@ static TEMPLATES: &[Embedded] = &[
         spec: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/rezept/template.json")),
         files: &[("app.js", bytes!("rezept/app.js"))],
     },
+    Embedded {
+        id: "wunschliste",
+        spec: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/wunschliste/template.json")),
+        files: &[("app.js", bytes!("wunschliste/app.js"))],
+    },
+    Embedded {
+        id: "pinnwand",
+        spec: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/pinnwand/template.json")),
+        files: &[("app.js", bytes!("pinnwand/app.js"))],
+    },
+    Embedded {
+        id: "faq",
+        spec: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/faq/template.json")),
+        files: &[("app.js", bytes!("faq/app.js"))],
+    },
+    Embedded {
+        id: "speisekarte",
+        spec: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/speisekarte/template.json")),
+        files: &[("app.js", bytes!("speisekarte/app.js"))],
+    },
+    Embedded {
+        id: "infoseite",
+        spec: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/infoseite/template.json")),
+        files: &[("app.js", bytes!("infoseite/app.js"))],
+    },
 ];
 
 /// One built-in design: its CSS and the colors for the preview in the dialog (background, card, text, accent).
@@ -144,6 +169,8 @@ enum Line {
     Link,
     /// "JJJJ-MM-TT [HH:MM] Titel" → `{date, time, title}`.
     Date,
+    /// "Teil 1 | Teil 2 | …" → a list of exactly that many texts (the first one needed, the last one takes the rest).
+    Parts(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +276,7 @@ impl Spec {
                         "text" => Line::Text,
                         "link" => Line::Link,
                         "date" => Line::Date,
+                        "parts" => Line::Parts(spec_number(field, "parts", 2, 2, 4)?),
                         other => return Err(format!("{key}: line {other:?}")),
                     };
                     let line_max = spec_number(field, "line_max", 120, 1, 400)?;
@@ -325,12 +353,13 @@ impl Spec {
                     Kind::Text { max } => ("text", json!({"max": max})),
                     Kind::Area { max } => ("area", json!({"max": max})),
                     Kind::List { min, max, line_max, line } => {
-                        let line = match line {
-                            Line::Text => "text",
-                            Line::Link => "link",
-                            Line::Date => "date",
+                        let (line, parts) = match line {
+                            Line::Text => ("text", 1),
+                            Line::Link => ("link", 1),
+                            Line::Date => ("date", 1),
+                            Line::Parts(parts) => ("parts", *parts),
                         };
-                        ("list", json!({"min": min, "max": max, "line_max": line_max, "line": line}))
+                        ("list", json!({"min": min, "max": max, "line_max": line_max, "line": line, "parts": parts}))
                     }
                     Kind::Choice { options } => (
                         "choice",
@@ -480,6 +509,15 @@ impl Field {
                             }
                             json!({"date": date, "time": time, "title": title})
                         }
+                        Line::Parts(count) => {
+                            let mut parts: Vec<String> =
+                                text.splitn(*count, '|').map(|part| part.trim().to_owned()).collect();
+                            if parts.first().is_none_or(String::is_empty) {
+                                return Err(format!("{label}, Zeile {nr}: vorne etwas vor dem ersten „|“"));
+                            }
+                            parts.resize(*count, String::new());
+                            json!(parts)
+                        }
                     });
                 }
                 Ok((json!(lines.join("\n")), json!(values)))
@@ -598,15 +636,17 @@ pub fn saved(dir: &Path, app: &Id) -> Option<Value> {
     Some(Value::Object(saved))
 }
 
-/// Puts the template id (or `null`) on every app key `{id, name}` of the dashboard.
+/// Puts the template id (or `null`) on every app key `{id, name}` of the dashboard, and whether it has entries.
 pub fn annotate(dir: &Path, app_keys: &mut [Value]) {
     for key in app_keys {
         let template = key["id"]
             .as_str()
             .and_then(|id| Id::parse(id).ok())
             .and_then(|id| saved(dir, &id))
-            .and_then(|saved| saved.get("template").cloned());
-        key["template"] = template.unwrap_or(Value::Null);
+            .and_then(|saved| saved.get("template").and_then(Value::as_str).map(str::to_owned));
+        let records = template.as_deref().and_then(spec).is_some_and(|spec| spec.records);
+        key["template"] = json!(template);
+        key["records"] = json!(records);
     }
 }
 
@@ -707,6 +747,38 @@ pub async fn load(app: &App, id: &str, body: &Map<String, Value>) -> Result<Valu
         .ok_or_else(|| "Für diese App ist keine Vorlage gespeichert.".to_owned())
 }
 
+/// An error of the node's moderation path in German.
+fn moderation_error(error: String) -> String {
+    if error.contains("NOT_FOUND") {
+        "Diese Website hat auf deinem Owner-Knoten keine Einträge (sie läuft dort nicht oder ohne Einträge).".into()
+    } else {
+        error
+    }
+}
+
+/// `POST /api/nodes/<id>/site-entries` `{"app","before"?}`: the newest entries of a website with entries hosted by
+/// the owner node (moderation, docs/13 §6).
+pub async fn entries(app: &App, id: &str, body: &Map<String, Value>) -> Result<Value, String> {
+    let entry = entry_of(app, id).await?;
+    let admin = crate::ops::admin_client(app, &entry)?;
+    let app_id = Id::parse(text(body, "app").trim()).map_err(|_| "keine App-ID".to_owned())?;
+    let before = match body.get("before") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_i64().ok_or("before: eine Zeit")?),
+    };
+    crate::ops::patient(|| admin.app_entries(&app_id, before)).await.map_err(moderation_error)
+}
+
+/// `POST /api/nodes/<id>/site-entry-remove` `{"app","c","id"}`: removes anybody's entry - at every host of the site.
+pub async fn remove_entry(app: &App, id: &str, body: &Map<String, Value>) -> Result<Value, String> {
+    let entry = entry_of(app, id).await?;
+    let admin = crate::ops::admin_client(app, &entry)?;
+    let app_id = Id::parse(text(body, "app").trim()).map_err(|_| "keine App-ID".to_owned())?;
+    let (collection, entry_id) = (text(body, "c"), text(body, "id"));
+    crate::ops::patient(|| admin.app_entry_remove(&app_id, collection, entry_id)).await.map_err(moderation_error)?;
+    Ok(json!({"ok": true}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,7 +790,7 @@ mod tests {
     /// Every built-in template parses, its defaults are valid and the site has everything the page loads.
     #[test]
     fn built_in_templates_are_complete() -> Result<(), String> {
-        assert!(TEMPLATES.len() >= 8);
+        assert!(TEMPLATES.len() >= 13);
         let ids: HashSet<&str> = TEMPLATES.iter().map(|template| template.id).collect();
         assert_eq!(ids.len(), TEMPLATES.len(), "unique ids");
         for template in TEMPLATES {
@@ -791,6 +863,10 @@ mod tests {
             config["links"],
             json!([{"title": "Blog", "url": "https://example.org/a?b=1"}, {"title": "", "url": "https://example.com"}])
         );
+        let faq = spec("faq").ok_or("no faq")?;
+        let (_, config) =
+            faq.check(&object(json!({"questions": "Wann? | Morgen | Rest\nWo?|Hier\nNur eine Frage"})))?;
+        assert_eq!(config["questions"], json!([["Wann?", "Morgen | Rest"], ["Wo?", "Hier"], ["Nur eine Frage", ""]]));
         let poll = spec("umfrage").ok_or("no umfrage")?;
         let (_, config) = poll.check(&object(json!({"answers": "Ja\nNein"})))?;
         assert_eq!(config["answers"], json!(["Ja", "Nein"]));
@@ -806,6 +882,7 @@ mod tests {
         let dates = spec("termine").ok_or("no termine")?;
         let book = spec("gaestebuch").ok_or("no gaestebuch")?;
         let countdown = spec("countdown").ok_or("no countdown")?;
+        let faq = spec("faq").ok_or("no faq")?;
         let cases = [
             (&card, json!({"name": "x", "admin": true}), "Unbekannte Einstellung"),
             (&card, json!({"name": ""}), "bitte ausfüllen"),
@@ -829,6 +906,7 @@ mod tests {
             (&dates, json!({"dates": "2026-12-24 18:00"}), "JJJJ-MM-TT"),
             (&book, json!({"login_only": "ja"}), "an oder aus"),
             (&countdown, json!({"time": "25:00"}), "HH:MM"),
+            (&faq, json!({"questions": "| Antwort ohne Frage"}), "vor dem ersten"),
             (&countdown, json!({"date": ""}), "bitte ausfüllen"),
         ];
         for (spec, input, expected) in cases {
@@ -859,6 +937,7 @@ mod tests {
             field(json!({"default": "x".repeat(81)})),
             field(json!({"type": "choice", "options": [{"value": "a", "label": "A"}]})),
             field(json!({"type": "list", "line": "script"})),
+            field(json!({"type": "list", "line": "parts", "parts": 9})),
             field(json!({"type": "list", "min": 5, "max": 2})),
             json!({"name": "T", "fields": []}).to_string(),
             json!({"name": "", "fields": [{"key": "a", "label": "A", "type": "text"}]}).to_string(),
@@ -912,6 +991,7 @@ mod tests {
         let mut keys = vec![json!({"id": app.as_str(), "name": "x"}), json!({"id": "kaputt", "name": "y"})];
         annotate(dir.path(), &mut keys);
         assert_eq!((keys[0]["template"].clone(), keys[1]["template"].clone()), (json!("gaestebuch"), Value::Null));
+        assert_eq!((keys[0]["records"].clone(), keys[1]["records"].clone()), (json!(true), json!(false)));
         // Attack: an oversized or foreign file is not read.
         std::fs::write(saved_path(dir.path(), &app), vec![b' '; 70 * 1024]).map_err(|e| e.to_string())?;
         assert!(saved(dir.path(), &app).is_none());

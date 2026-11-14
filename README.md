@@ -52,12 +52,13 @@ Knoten (Schlüssel, Datenbank; der Owner-Ordner hat `admin-key.json`), `logs/`, 
 BridgeControll (Python) bleibt für Bridge-3-Server. UI-Rauchtest: `python3 apps/bridgecontroll/tests/ui/smoke.py`.
 
 ## Website aus Vorlage (Phase 9, docs/13)
-Im Dashboard bei „Apps“: **Website aus Vorlage** → Vorlage wählen (Visitenkarte, Gästebuch, Umfrage, Termine, Anmeldung, Ideen sammeln,
-Countdown, Rezept), Felder
+Im Dashboard bei „Apps“: **Website aus Vorlage** → Vorlage wählen (13 Stück: Visitenkarte, Gästebuch, Umfrage, Termine, Anmeldung, Ideen
+sammeln, Countdown, Rezept, Wunschliste, Pinnwand, Fragen & Antworten, Speisekarte & Preise, Infoseite), Felder
 ausfüllen, Design wählen (Hell, Dunkel, Bunt), Adresse vergeben, „Veröffentlichen“. Kein Ordner, kein Code – der
 Owner-Knoten hostet die Seite. Einträge (Grüße, Stimmen, Zusagen) speichert der eingebaute Baustein `builtin:records`
 bei den Hosts. „Bearbeiten“ ändert die Einstellungen später (neue Version, gleiche Adresse, Einträge bleiben).
-Abstimmen und Zusagen gehen mit Bridge Login – also über die Adresse der Website im Bridge-Rahmen.
+Abstimmen und Zusagen gehen mit Bridge Login – also über die Adresse der Website im Bridge-Rahmen. Spam oder
+Beleidigungen löschst du bei der Website mit **„Einträge“** (bei allen Hosts).
 
 ## Öffentlich machen (Phase 7, docs/11)
 

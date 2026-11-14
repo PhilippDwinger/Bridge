@@ -123,6 +123,23 @@ async fn a_guest_book_from_a_template() -> TestResult {
         .collect();
     assert_eq!(leftovers, vec![format!("{app_id}.json")], "no build folder is left");
 
+    // Moderation (docs/13 §6): the owner removes anybody's entry.
+    let entries = app.ok(&format!("/api/nodes/{owner}/site-entries"), &json!({"app": app_id})).await?;
+    assert_eq!((entries["total"].clone(), entries["entries"][0]["c"].clone()), (json!(1), json!("pub-eintraege")));
+    let entry_id = entries["entries"][0]["id"].as_str().ok_or("no entry id")?.to_owned();
+    let remove = format!("/api/nodes/{owner}/site-entry-remove");
+    let (status, refused) = app.post(&remove, &json!({"app": app_id, "c": "pub-eintraege", "id": "kaputt"})).await?;
+    assert_eq!(status, 400, "{refused}");
+    app.ok(&remove, &json!({"app": app_id, "c": "pub-eintraege", "id": entry_id})).await?;
+    // (Reads are rate limited per visitor - this test is one visitor asking a lot.)
+    wait_for(20, "gone for visitors", || async {
+        let (_, entries) = post_json(&format!("{api}list"), &json!({"c": "pub-eintraege"})).await?;
+        Ok((entries["total"] == 0).then_some(()))
+    })
+    .await?;
+    let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
+    assert_eq!(dash["app_keys"][0]["records"], true);
+
     // Löschen forgets the settings.
     app.ok(&format!("/api/nodes/{owner}/site-delete"), &json!({"app": app_id})).await?;
     assert!(!owner_dir.join("templates").join(format!("{app_id}.json")).exists());

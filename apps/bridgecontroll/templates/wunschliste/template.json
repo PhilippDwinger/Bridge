@@ -1,0 +1,13 @@
+{
+  "name": "Wunschliste",
+  "description": "Deine Wünsche – wer etwas schenkt, hakt es ab, damit nichts doppelt kommt.",
+  "records": true,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Meine Wunschliste"},
+    {"key": "text", "label": "Text", "type": "area", "max": 1000,
+     "default": "Wenn du mir etwas schenken möchtest: Hak es hier ab, dann sehen die anderen, dass es schon vergeben ist."},
+    {"key": "wishes", "label": "Wünsche", "type": "list", "line": "parts", "parts": 2, "max": 30, "line_max": 400,
+     "required": true, "hint": "Je Zeile: Wunsch | Link (optional, https://…). Tipp: Schau danach selbst nicht mehr rein.",
+     "default": ["Ein gutes Buch", "Kinogutschein", "Kopfhörer | https://example.org/kopfhoerer"]}
+  ]
+}

@@ -18,7 +18,8 @@ die Website (wie jede Website, docs/07); Bridge Login und gespeicherte Einträge
   wird keine Datei gelesen.
 - **Felder** (`template.json` → `fields`, höchstens 24): `text` (eine Zeile, `max` ≤ 200 Zeichen), `area` (mehrere
   Zeilen, `max` ≤ 4.000 Zeichen, ≤ 100 Zeilen), `list` (`min`–`max` ≤ 50 Zeilen, je ≤ `line_max` Zeichen; `line`:
-  `text`, `link` = „Titel https://…“ → `{title, url}`, `date` = „JJJJ-MM-TT [HH:MM] Titel“ → `{date, time, title}`),
+  `text`, `link` = „Titel https://…“ → `{title, url}`, `date` = „JJJJ-MM-TT [HH:MM] Titel“ → `{date, time, title}`,
+  `parts` = „Teil 1 | Teil 2 | …“ → genau `parts` (2–4) Texte, der erste muss da sein, der letzte nimmt den Rest),
   `choice` (eine von `options`), `switch` (an/aus), `date` (`JJJJ-MM-TT`, 1970–2200, ein echter Tag), `time`
   (`HH:MM`), `link`
   (`https://…`, ≤ 300 Zeichen, ohne Leer- und Anführungszeichen, `<`, `>`, `\`). Jedes Feld hat `key`, `label`,
@@ -76,14 +77,28 @@ einen **eingebauten** Baustein im Knoten: App-Manifest `"server": "builtin:recor
 | **Ideen sammeln** | Titel, Erklärung | `user-ideen`, ein Herz je Nutzer und Idee in `vote-i<id>` (die neuesten 30, die meisten Herzen oben) |
 | **Countdown** | Worauf, Datum, Uhrzeit, Text, Text „so weit“ | – (zählt mit der Uhr des Besuchers) |
 | **Rezept** | Name, Text, Menge, Dauer, Zutaten (Zeilen), Schritte (Zeilen) | – |
+| **Wunschliste** | Titel, Text, Wünsche (Zeilen „Wunsch \| Link“) | `vote-w<kennung des wunsches>` („ja“ = ich schenke das, „nein“ = doch nicht) |
+| **Pinnwand** | Titel, Text, nur mit Login ja/nein (Standard: ja) | `user-zettel` / `pub-zettel` (`text`, `farbe` 0–3; die neuesten 60) |
+| **Fragen & Antworten** | Titel, Einleitung, Fragen (Zeilen „Frage \| Antwort“), Link „Noch Fragen?“ | – |
+| **Speisekarte & Preise** | Titel, Text, Einträge (Zeilen „Name \| Preis \| Beschreibung“, ohne „\|“ = Überschrift), Hinweis | – |
+| **Infoseite** | Name, Untertitel, Abschnitte (Zeilen „Überschrift \| Text“), Kontakt, Kontakt-Link | – |
 
 Angemeldet wird man nur im Bridge-Rahmen (`/web/<name>/`, docs/11 §9.4) – also über die Adresse der Website. Wer die
 Seite direkt öffnet (`/app/<id>/`, z. B. „Ansehen“ auf dem eigenen PC), sieht sie ohne Login und bekommt den Hinweis,
 die Adresse zu nutzen.
 
-## 6. Grenzen
-- Wer Einträge schreiben darf, bestimmen nur die Sammlungsarten; Moderation (Einträge anderer löschen) kommt später.
-  Bis dahin: die Website sperren/löschen oder eine neue Version ohne die Sammlung.
+## 6. Moderation und Grenzen
+- Wer Einträge schreiben darf, bestimmen die Sammlungsarten. **Einträge anderer löschen** (Spam, Beleidigungen): in
+  BridgeControll bei der Website **„Einträge“** – die neuesten Einträge aller Sammlungen, je „Löschen“.
+- Weg dafür: `POST /v4/admin/app-entries` `{"app","before"?}` → `{"entries": [{"c","id","t","u","n","f"}], "total",
+  "next"}` (höchstens 100) und `POST /v4/admin/app-entry-remove` `{"app","c","id"}` – beide als signierte
+  Admin-Anfrage (Recht `bans` oder `seals`, wie Meldungen) an einen Host der App. Der Host hängt ein Ereignis
+  `{"k":"mod","c","id"}` an das Log der App; jeder Host wendet es an (ein moderierter Eintrag zählt nirgends mehr; bei
+  `vote-` zählt auch keine ältere Stimme dieses Nutzers, bis er neu abstimmt). Die App selbst (`api/…`) kann kein
+  `mod` schreiben. Hosts einer App sind für ihr Ereignis-Log ohnehin vertrauenswürdig (docs/09 §13) – ein Host kann
+  also moderieren, aber nichts, was er nicht schon könnte.
+- BridgeControll: `POST /api/nodes/<id>/site-entries` `{"app","before"?}`, `site-entry-remove` `{"app","c","id"}`;
+  App-Schlüssel im Dashboard tragen `records` (ja/nein).
 - Zeiten kommen vom Host, der den Eintrag angenommen hat.
 
 ## 7. Abnahme
@@ -94,6 +109,7 @@ die Adresse zu nutzen.
 - BridgeControll: Vorlagen-Liste, Eingaben geprüft (Angriffe: unbekannte Einstellungen, falsche Arten, zu lang,
   Steuerzeichen, Links ohne https oder mit Ausbruch aus dem Attribut, unmögliche Daten), Veröffentlichen (Ordner +
   `config.json`, kein Build-Ordner bleibt), Bearbeiten (neue Version, Einträge bleiben), Löschen vergisst die
-  Einstellungen, Rauchtest-Bilder 42–47 (Seiten laufen ohne Skriptfehler, ein Eintrag ohne Login).
+  Einstellungen, Moderation (Eintrag weg für Besucher), Rauchtest-Bilder 42–57 (Seiten laufen ohne Skriptfehler,
+  ein Eintrag ohne Login, Einträge-Dialog).
 - Kein Vorlagen-Code setzt etwas als HTML ein (Test sucht `innerHTML`, `outerHTML`, `insertAdjacentHTML`,
   `document.write`, `eval(`).

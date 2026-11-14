@@ -110,7 +110,7 @@ async fn browse_report_and_moderate() -> TestResult {
 
     // Names: the dashboard offers the app; `shop` is registered (the operator key gets level 2 on the way).
     let (_, dash) = app.get(&format!("/api/nodes/{owner}/dashboard")).await?;
-    assert_eq!(dash["app_keys"], json!([{"id": app_id.as_str(), "name": "Laden", "template": null}]));
+    assert_eq!(dash["app_keys"], json!([{"id": app_id.as_str(), "name": "Laden", "template": null, "records": false}]));
     assert_eq!(dash["net"]["contact"], CONTACT);
     let bad_names = [
         json!({"name": "Shop!", "target": "app", "app": app_id.as_str()}),

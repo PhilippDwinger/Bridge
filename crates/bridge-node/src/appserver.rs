@@ -125,6 +125,62 @@ fn checked_event(value: &Value, net: &Id, app: &Id, host: &Id, card: &KeyCard) -
 }
 
 impl Node {
+    /// The event log of an app with the built-in `records` hosted here (moderation, docs/13 §6).
+    fn records_host(&self, fields: &serde_json::Map<String, Value>, now: i64) -> NodeResult<AppHost> {
+        let app = Id::parse(fields.get("app").and_then(Value::as_str).unwrap_or_default())
+            .map_err(|_| NodeError::bad_format("app: an app ID"))?;
+        let version = self.inner.apps.current(&app).ok_or_else(NodeError::not_found)?;
+        if version.manifest.server.as_deref() != Some(crate::records::RECORDS) {
+            return Err(NodeError::not_found());
+        }
+        let (sign, receive) = self.inner.identity.secret_bytes();
+        Ok(AppHost {
+            store: Arc::clone(&self.inner.store),
+            identity: Identity::from_secret_bytes(&sign, &receive),
+            net: self.inner.net.clone(),
+            app,
+            appended: 0,
+            now,
+        })
+    }
+
+    /// `POST /v4/admin/app-entries` `{"app","before"?}` (admin with `bans` or `seals`): the newest live entries of every
+    /// collection of an app with `records` hosted here.
+    pub(crate) async fn admin_app_entries(&self, body: &[u8], now: i64) -> NodeResult<Vec<u8>> {
+        let (_, fields) = self.admin_request(body, "app-entries", now)?;
+        if let Some(unknown) = fields.keys().find(|key| !["app", "before"].contains(&key.as_str())) {
+            return Err(NodeError::bad_format(format!("unknown field {unknown}")));
+        }
+        let before = match fields.get("before") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_i64().ok_or_else(|| NodeError::bad_format("before: a time (ms)"))?),
+        };
+        let host = self.records_host(&fields, now)?;
+        let answer = tokio::task::spawn_blocking(move || crate::records::entries(&host, before, 100))
+            .await
+            .map_err(|_| NodeError::unavailable())?;
+        Ok(answer.to_string().into_bytes())
+    }
+
+    /// `POST /v4/admin/app-entry-remove` `{"app","c","id"}` (admin with `bans` or `seals`): removes anybody's entry - an
+    /// event `mod` on the app's log that every host applies.
+    pub(crate) async fn admin_app_entry_remove(&self, body: &[u8], now: i64) -> NodeResult<Vec<u8>> {
+        let (admin, fields) = self.admin_request(body, "app-entry-remove", now)?;
+        if fields.len() != 3 {
+            return Err(NodeError::bad_format("body: exactly app, c and id"));
+        }
+        let text = |name: &str| fields.get(name).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let (collection, id) = (text("c"), text("id"));
+        let mut host = self.records_host(&fields, now)?;
+        let app = host.app.clone();
+        let done = tokio::task::spawn_blocking(move || crate::records::moderate(&mut host, &collection, &id))
+            .await
+            .map_err(|_| NodeError::unavailable())?;
+        done.map_err(NodeError::bad_format)?;
+        tracing::info!(%app, %admin, "entry removed by moderation");
+        Ok(json!({"ok": true}).to_string().into_bytes())
+    }
+
     /// `POST /app/<id>/api/<path>` at a host: runs the version's server code.
     pub(crate) async fn app_api(
         &self,

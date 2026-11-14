@@ -312,10 +312,11 @@ freigegeben).
   Freunden, die nicht programmieren können. In „Website hochladen“ fertige, **einstellbare** Vorlagen (z. B.
   Gästebuch, Chat, Umfrage, Terminliste, später viele mehr); der eigene PC hostet sie. Sie nutzen Bridge Login und den
   Server-Code der Apps.
-  **Gebaut 14.11.2026** (docs/13, ADR 0031): „Website aus Vorlage“ in BridgeControll mit acht Vorlagen (Visitenkarte,
-  Gästebuch, Umfrage, Termine, Anmeldung, Ideen sammeln, Countdown, Rezept), drei Designs, „Bearbeiten“; der eingebaute Server-Baustein `builtin:records` speichert die
-  Einträge auf dem Ereignis-Log der App (bei allen Hosts gleich). Nächste Vorlagen: Wunschliste, Pinnwand, Fotoalbum,
-  Chat.
+  **Gebaut 14.11.2026** (docs/13, ADR 0031): „Website aus Vorlage“ in BridgeControll mit 13 Vorlagen (Visitenkarte,
+  Gästebuch, Umfrage, Termine, Anmeldung, Ideen sammeln, Countdown, Rezept, Wunschliste, Pinnwand, Fragen & Antworten,
+  Speisekarte & Preise, Infoseite), drei Designs, „Bearbeiten“, Moderation („Einträge“: fremde Einträge löschen); der eingebaute Server-Baustein `builtin:records` speichert die
+  Einträge auf dem Ereignis-Log der App (bei allen Hosts gleich). Nächste Vorlagen: Fotoalbum (braucht Bilder-Upload), Chat
+  (braucht Abfragen ohne Neuladen).
 - **Design-Plugins** (später): laufen lokal; bei einer Vorlage wählt man als Design ein selbst gemachtes Design-Plugin,
   das das Aussehen der Website übernimmt.
 - **Bridge Drive**: geteilte Ordner über die Speicher-Knoten, beim Besitzer verschlüsselt, mit anderen Konten teilbar.

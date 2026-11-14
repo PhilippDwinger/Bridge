@@ -71,6 +71,33 @@ async fn a_guest_book_on_two_hosts() -> TestResult {
         (both["counts"]["pub-buch"]["total"].clone(), both["counts"]["vote-leer"]["total"].clone()),
         (json!(2), json!(0))
     );
+    // Moderation (docs/13 §6): the admin removes an entry written at the other host - gone at both hosts.
+    let admin = &apps.net.admin;
+    let listed = admin.app_entries(app.id(), None).await?;
+    assert_eq!(listed["total"], 2, "{listed}");
+    let spam = listed["entries"]
+        .as_array()
+        .and_then(|all| all.iter().find(|entry| entry["f"]["text"] == "Hallo von zwei"))
+        .ok_or("no entry from the second host")?;
+    let spam_id = spam["id"].as_str().ok_or("no id")?.to_owned();
+    admin.app_entry_remove(app.id(), "pub-buch", &spam_id).await?;
+    for host in [first, second] {
+        eventually("moderated at both hosts", || async {
+            match api(&host.url, &format!("{base}list"), &json!({"c": "pub-buch"})).await? {
+                (200, listed, _) if listed["total"] == 1 && listed["records"][0]["f"]["text"] == "Hallo von eins" => {
+                    Ok(())
+                }
+                other => Err(format!("{other:?}")),
+            }
+        })
+        .await?;
+    }
+    // Attacks: a bad id, an app that is not hosted here; the app's own API knows no moderation.
+    assert!(admin.app_entry_remove(app.id(), "pub-buch", "zzz").await.is_err());
+    let other = Identity::generate(&mut OsRng);
+    assert!(admin.app_entries(other.id(), None).await.is_err());
+    let (status, _, _) = api(&first.url, &format!("{base}mod"), &json!({"c": "pub-buch", "id": spam_id})).await?;
+    assert_eq!(status, 404);
     // Without Bridge Login: no `user-`/`vote-` entries, no removing; `me` says nobody.
     for collection in ["user-liste", "vote-frage"] {
         let (status, _, _) = api(&first.url, &format!("{base}add"), &json!({"c": collection, "f": {"x": 1}})).await?;

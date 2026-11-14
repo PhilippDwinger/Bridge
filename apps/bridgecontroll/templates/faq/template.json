@@ -1,0 +1,13 @@
+{
+  "name": "Fragen & Antworten",
+  "description": "Die häufigsten Fragen auf einer Seite – zum Aufklappen.",
+  "records": false,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Häufige Fragen"},
+    {"key": "text", "label": "Einleitung", "type": "area", "max": 1000},
+    {"key": "questions", "label": "Fragen", "type": "list", "line": "parts", "parts": 2, "max": 40, "line_max": 400,
+     "required": true, "hint": "Je Zeile: Frage | Antwort",
+     "default": ["Was kostet das? | Nichts – alles läuft auf unseren eigenen PCs.", "Wie mache ich mit? | Schreib uns einfach."]},
+    {"key": "contact", "label": "Link „Noch Fragen?“", "type": "link"}
+  ]
+}

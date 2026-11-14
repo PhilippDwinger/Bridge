@@ -320,7 +320,7 @@ impl Node {
 
     /// An admin request for the reports (`op`): signed by an admin with `bans` or `seals`, or the net key; fresh, for
     /// this node, used once. Returns the admin and the body.
-    fn admin_request(&self, body: &[u8], op: &str, now: i64) -> NodeResult<(Id, Map<String, Value>)> {
+    pub(crate) fn admin_request(&self, body: &[u8], op: &str, now: i64) -> NodeResult<(Id, Map<String, Value>)> {
         let request = SignedRequest::parse(body)?;
         request.check(self.inner.identity.id(), now)?;
         if request.op() != op {
@@ -333,7 +333,7 @@ impl Node {
                     .then(|| core.state.card_of(request.iss()).cloned())
                     .flatten()
             })?
-            .ok_or_else(|| NodeError::forbidden("only admins with the right bans or seals read reports"))?;
+            .ok_or_else(|| NodeError::forbidden("only admins with the right bans or seals"))?;
         request.verify(&card)?;
         self.inner.guard.remember_nonce(
             request.iss(),
@@ -355,6 +355,8 @@ impl Node {
         match (request.method, request.path.as_str()) {
             (Method::Post, "/v4/admin/reports") => self.admin_reports(&request.body, now).await,
             (Method::Post, "/v4/admin/report") => self.admin_report_status(&request.body, now).await,
+            (Method::Post, "/v4/admin/app-entries") => self.admin_app_entries(&request.body, now).await,
+            (Method::Post, "/v4/admin/app-entry-remove") => self.admin_app_entry_remove(&request.body, now).await,
             _ => Err(NodeError::not_found()),
         }
     }

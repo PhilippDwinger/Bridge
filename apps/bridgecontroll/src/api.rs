@@ -194,6 +194,8 @@ async fn node_action(app: &App, id: &str, action: &str, body: &Map<String, Value
         "site-delete" => result(crate::sites::delete(app, id, body).await),
         "template-publish" => result(crate::templates::publish(app, id, body).await),
         "template-load" => result(crate::templates::load(app, id, body).await),
+        "site-entries" => result(crate::templates::entries(app, id, body).await),
+        "site-entry-remove" => result(crate::templates::remove_entry(app, id, body).await),
         _ => Answer::error(404, "Nicht gefunden"),
     }
 }

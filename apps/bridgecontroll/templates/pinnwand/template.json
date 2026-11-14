@@ -1,0 +1,11 @@
+{
+  "name": "Pinnwand",
+  "description": "Kurze Zettel an einer bunten Wand – für Grüße, Tipps und Ankündigungen.",
+  "records": true,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Unsere Pinnwand"},
+    {"key": "text", "label": "Text", "type": "area", "max": 1000},
+    {"key": "login_only", "label": "Nur mit Bridge Login anpinnen", "type": "switch", "default": true,
+     "hint": "Aus: jeder kann Zettel anpinnen – auch Fremde, wenn die Website öffentlich ist."}
+  ]
+}

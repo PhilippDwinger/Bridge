@@ -1102,6 +1102,8 @@
         h('div', { class: 'srv__actions' },
           serving && a.public ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.public, target: '_blank', rel: 'noopener noreferrer', title: 'Über die öffentliche Adresse – mit Bridge Login' }, icon('globe'), 'Öffentlich') : null,
           serving && a.view ? h('a', { class: 'b-btn b-btn--ghost b-btn--sm', href: a.view, target: '_blank', rel: 'noopener noreferrer', title: 'Auf diesem PC (ohne Login)' }, icon('external'), 'Ansehen') : null,
+          !a.banned && own && key.records ? h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Einträge',
+            onclick: (event) => entriesDialog(id, key, event.currentTarget) }) : null,
           !a.banned && own && key.template ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Bearbeiten',
             onclick: (event) => templateEdit(id, data, key, event.currentTarget) }) : null,
           !a.banned && own && !key.template ? h('button', { class: 'b-btn b-btn--secondary b-btn--sm', type: 'button', text: 'Neue Version',
@@ -1793,6 +1795,53 @@
       siteDone(ownerId, result);
       return true;
     }, { wide: true });
+  }
+
+  // Einträge einer Vorlagen-Website moderieren (docs/13 §6): fremde Einträge löschen, bei allen Hosts.
+  async function entriesDialog(ownerId, appKey, button) {
+    const first = await act(button, () => api('POST', '/api/nodes/' + ownerId + '/site-entries', { app: appKey.id }));
+    if (!first) return;
+    const list = h('div', { class: 'bc-list' });
+    const more = h('button', { class: 'b-btn b-btn--ghost b-btn--sm', type: 'button', text: 'Ältere Einträge', hidden: true });
+    const count = h('p', { class: 'bc-muted bc-p0' });
+    let next = null;
+    let total = first.total;
+    const showCount = () => { count.textContent = total === 1 ? '1 Eintrag' : total + ' Einträge'; };
+    const describe = (f) => Object.entries(f || {}).filter(([k]) => k !== 'name')
+      .map(([k, v]) => (k === 'text' ? '' : k + ': ') + String(v)).join(' · ');
+    const row = (e) => {
+      const remove = h('button', { class: 'b-btn b-btn--danger b-btn--sm', type: 'button', text: 'Löschen' });
+      const item = h('div', { class: 'srv', 'data-entry': e.id },
+        h('div', { class: 'srv__body' }, h('span', { class: 'bc-text', text: describe(e.f).slice(0, 300) || '–' }),
+          h('div', { class: 'srv__meta' }, chip(e.c), chip(e.n || (e.f && e.f.name ? e.f.name + ' (ohne Login)' : (e.u ? 'Nutzer ' + short(e.u) : 'Gast'))),
+            chip(new Date(e.t).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })))),
+        h('div', { class: 'srv__actions' }, remove));
+      let armed = false;
+      remove.addEventListener('click', async () => {
+        if (!armed) { armed = true; remove.textContent = 'Wirklich löschen?'; return; }
+        const done = await act(remove, () => api('POST', '/api/nodes/' + ownerId + '/site-entry-remove', { app: appKey.id, c: e.c, id: e.id }), 'Eintrag gelöscht');
+        if (done) { item.remove(); total = Math.max(0, total - 1); showCount(); }
+      });
+      return item;
+    };
+    const add = (answer) => {
+      answer.entries.forEach((e) => list.append(row(e)));
+      next = answer.next;
+      more.hidden = next === null || next === undefined;
+      if (!list.children.length) list.append(h('p', { class: 'bc-empty-line', text: 'Noch keine Einträge.' }));
+    };
+    more.addEventListener('click', async () => {
+      const answer = await act(more, () => api('POST', '/api/nodes/' + ownerId + '/site-entries', { app: appKey.id, before: next }));
+      if (answer) add(answer);
+    });
+    showCount();
+    add(first);
+    const dialog = h('div', { class: 'b-dialog bc-dialog-wide', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'entries-title' },
+      h('h3', { id: 'entries-title', text: 'Einträge von „' + appKey.name + '“' }),
+      h('p', { class: 'bc-muted bc-p0', text: 'Hier löschst du Einträge anderer – zum Beispiel Spam. Gelöscht wird bei allen Hosts der Website; der Eintrag kommt nicht zurück.' }),
+      count, list, more,
+      h('div', { class: 'b-dialog__btns' }, h('button', { class: 'b-btn b-btn--primary', type: 'button', text: 'Fertig', onclick: () => close() })));
+    const close = openDialog(dialog);
   }
 
   function nameDialog(ownerId, data) {

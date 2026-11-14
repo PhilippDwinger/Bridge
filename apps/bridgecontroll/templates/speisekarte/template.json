@@ -1,0 +1,13 @@
+{
+  "name": "Speisekarte & Preise",
+  "description": "Eine Karte mit Preisen – fürs Café, den Flohmarkt oder deine Dienste.",
+  "records": false,
+  "fields": [
+    {"key": "title", "label": "Titel", "type": "text", "max": 80, "required": true, "default": "Unsere Karte"},
+    {"key": "text", "label": "Text", "type": "area", "max": 1000},
+    {"key": "items", "label": "Einträge", "type": "list", "line": "parts", "parts": 3, "max": 50, "line_max": 300,
+     "required": true, "hint": "Je Zeile: Name | Preis | Beschreibung. Eine Zeile ohne „|“ ist eine Überschrift.",
+     "default": ["Getränke", "Kaffee | 2,50 € | frisch gemahlen", "Kakao | 3,00 €", "Kuchen", "Apfelkuchen | 3,50 € | nach Omas Rezept"]},
+    {"key": "note", "label": "Hinweis unten", "type": "text", "max": 200, "default": "Alle Preise inklusive Mehrwertsteuer."}
+  ]
+}

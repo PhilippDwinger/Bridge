@@ -775,6 +775,20 @@ impl AdminClient {
         Ok(answer.get("reports").and_then(Value::as_array).cloned().unwrap_or_default())
     }
 
+    /// The newest live entries of an app with the built-in `records` hosted at this node (moderation, docs/13 §6):
+    /// `{"entries": [{"c","id","t","u","n","f"}], "total", "next"}`.
+    pub async fn app_entries(&self, app: &Id, before: Option<i64>) -> Result<Value, String> {
+        let body = self.request("app-entries", json!({"app": app.as_str(), "before": before}))?;
+        self.answer(self.http.post("/v4/admin/app-entries", None, body).await, &self.url).map(Value::Object)
+    }
+
+    /// Removes anybody's entry of an app with `records` (moderation): every host of the app applies it.
+    pub async fn app_entry_remove(&self, app: &Id, collection: &str, id: &str) -> Result<(), String> {
+        let body = self.request("app-entry-remove", json!({"app": app.as_str(), "c": collection, "id": id}))?;
+        self.answer(self.http.post("/v4/admin/app-entry-remove", None, body).await, &self.url)?;
+        Ok(())
+    }
+
     /// Sets the status of a report (`open` or `done`).
     pub async fn report_status(&self, id: &str, status: &str) -> Result<(), String> {
         let body = self.request("report-status", json!({"id": id, "status": status}))?;

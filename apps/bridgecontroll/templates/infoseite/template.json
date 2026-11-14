@@ -1,0 +1,14 @@
+{
+  "name": "Infoseite",
+  "description": "Für Verein, Projekt oder Gruppe: ein paar Abschnitte und wie man euch erreicht.",
+  "records": false,
+  "fields": [
+    {"key": "title", "label": "Name", "type": "text", "max": 80, "required": true, "default": "Unser Verein"},
+    {"key": "subtitle", "label": "Untertitel", "type": "text", "max": 160, "default": "Gemeinsam mehr erleben"},
+    {"key": "sections", "label": "Abschnitte", "type": "list", "line": "parts", "parts": 2, "max": 20, "line_max": 400,
+     "hint": "Je Zeile: Überschrift | Text",
+     "default": ["Wer wir sind | Ein paar Leute, die gern zusammen etwas machen.", "Wann wir uns treffen | Jeden Freitag ab 18 Uhr."]},
+    {"key": "contact_text", "label": "Kontakt", "type": "text", "max": 160, "hint": "z. B. eine E-Mail-Adresse oder Telefonnummer"},
+    {"key": "contact_link", "label": "Kontakt-Link", "type": "link"}
+  ]
+}
